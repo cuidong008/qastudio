@@ -1,0 +1,40 @@
+# === Backend 临时/数据文件 ===
+backend/.env
+backend/*.db
+backend/qastudio.db
+backend/uploads/
+backend/data/
+backend/rag_vector_store/
+
+# === Python ===
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+backend/.venv/
+venv/
+.venv/
+env/
+*.egg-info/
+.eggs/
+dist/
+build/
+
+# === IDE / 编辑器 ===
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# === 日志与缓存 ===
+*.log
+.pytest_cache/
+.coverage
+htmlcov/
+.mypy_cache/
+
+# === 系统文件 ===
+.DS_Store
+Thumbs.db

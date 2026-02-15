@@ -1,0 +1,241 @@
+const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000/api";
+
+/** 模型提供商（API Key 返回 ***） */
+export type RagProvider = {
+  id: string;
+  type: string;
+  name: string;
+  base_url: string;
+  api_key: string;
+};
+
+/** GET /admin/rag/providers 响应 */
+export type RagProvidersResponse = {
+  providers: RagProvider[];
+  default_llm: string;
+  default_embedding: string;
+  default_vlm: string;
+  default_rerank: string;
+  provider_types: { id: string; name: string; need_base_url: boolean }[];
+  llm_models_by_type: Record<string, string[]>;
+  embedding_models_by_type: Record<string, string[]>;
+  vlm_models_by_type: Record<string, string[]>;
+  rerank_models_by_type: Record<string, string[]>;
+};
+
+/** PUT /admin/rag/providers 请求体 */
+export type RagProvidersUpdateBody = {
+  providers: { id?: string; type: string; name: string; base_url?: string; api_key?: string }[];
+  default_llm: string;
+  default_embedding: string;
+  default_vlm: string;
+  default_rerank: string;
+};
+
+/** 后管台 RAG 配置（API Key 等敏感项可能为 ***） */
+export type RagConfig = {
+  enabled: boolean;
+  llm_type: string;
+  llm_vllm_base_url: string;
+  llm_vllm_model: string;
+  llm_vllm_api_key: string;
+  llm_qianwen_api_key: string;
+  llm_qianwen_model: string;
+  llm_zhipu_api_key: string;
+  llm_zhipu_model: string;
+  llm_zhipu_base_url: string;
+  embedding_type: string;
+  embedding_dim: number;
+  embedding_builtin_model: string;
+  embedding_external_api_key: string;
+  embedding_external_base_url: string;
+  embedding_external_model: string;
+  embedding_qianwen_api_key: string;
+  embedding_zhipu_api_key: string;
+  vector_store_path: string;
+  vector_collection_name: string;
+  top_k: number;
+  chunk_size: number;
+  chunk_overlap: number;
+  llm_max_tokens: number;
+  llm_temperature: number;
+};
+
+function getToken(): string | null {
+  return localStorage.getItem("token");
+}
+
+export async function request<T>(
+  path: string,
+  options: RequestInit & { body?: unknown } = {}
+): Promise<T> {
+  const { body, ...rest } = options;
+  const headers: HeadersInit = {
+    "Content-Type": "application/json",
+    ...(rest.headers as Record<string, string>),
+  };
+  const token = getToken();
+  if (token) (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...rest,
+    headers,
+    body: body !== undefined ? JSON.stringify(body) : rest.body,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || String(err));
+  }
+  return res.json();
+}
+
+export const api = {
+  auth: {
+    login: (username: string, password: string) =>
+      request<{ access_token: string; role: string }>("/auth/login", { method: "POST", body: { username, password } }),
+    me: () => request<{ id: number; username: string; role: string; display_name: string | null } | null>("/auth/me"),
+  },
+  chapters: {
+    list: () => request<{ id: number; title: string; order_index: number }[]>("/chapters"),
+    get: (id: number) => request<{ id: number; title: string; knowledge_points: { id: number; title: string; ppt_slide_ref: string | null }[] }>(`/chapters/${id}`),
+  },
+  preview: {
+    task: (chapterId: number) => request<{ chapter_id: number; chapter_title: string; summary: string; key_points: string[]; self_check_questions: string[]; duration_minutes: number }>(`/preview/task/${chapterId}`),
+    submit: (chapterId: number, weakPoints?: string[]) =>
+      request<{ ok: boolean }>("/preview/submit", { method: "POST", body: { chapter_id: chapterId, weak_points: weakPoints } }),
+  },
+  qa: {
+    ask: (question: string, chapterId?: number) =>
+      request<{ answer: string; ppt_ref: string | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, chapter_id: chapterId } }),
+  },
+  questions: {
+    list: (params?: { chapter_id?: number; difficulty?: string }) => {
+      const q = new URLSearchParams();
+      if (params?.chapter_id) q.set("chapter_id", String(params.chapter_id));
+      if (params?.difficulty) q.set("difficulty", params.difficulty);
+      return request<{ id: number; chapter_id: number; difficulty: string; question_text: string; options: string | null; explanation: string | null; ppt_ref: string | null }[]>(`/questions?${q}`);
+    },
+    submit: (questionId: number, userAnswer: string) =>
+      request<{ is_correct: boolean; correct_answer: string; explanation: string | null; ppt_ref: string | null }>("/questions/submit", { method: "POST", body: { question_id: questionId, user_answer: userAnswer } }),
+    wrong: () => request<{ id: number; question_text: string; options: string | null; explanation: string | null }[]>("/questions/wrong"),
+  },
+  teacher: {
+    stats: (classId?: number) => {
+      const q = classId != null ? `?class_id=${classId}` : "";
+      return request<{
+        preview_completion_rate: number;
+        total_questions_asked: number;
+        top_asked: { question: string; count: number }[];
+        answer_accuracy_rate: number;
+        weak_knowledge_points: string[];
+      }>(`/teacher/stats/overview${q}`);
+    },
+    configChapters: () =>
+      request<{
+        chapter_id: number;
+        title: string;
+        preview_enabled: boolean;
+        difficulty_filter: string[];
+        question_limit: number | null;
+      }[]>("/teacher/config/chapters"),
+    updateChapterConfig: (body: {
+      chapter_id: number;
+      preview_enabled: boolean;
+      difficulty_filter: string[] | null;
+      question_limit: number | null;
+    }) =>
+      request<{ ok: boolean }>("/teacher/config/chapter", {
+        method: "PUT",
+        body,
+      }),
+    export: (report: string) => `${API_BASE}/teacher/export/csv?report=${report}`,
+  },
+  feedback: {
+    submit: (content: string, source: "form" | "dialogue" = "form") =>
+      request<{ ok: boolean; id?: number; message?: string }>("/feedback", {
+        method: "POST",
+        body: { content, source },
+      }),
+    /** 将某次答疑对话记为学习反馈（仅限本人提问记录） */
+    submitFromQa: (questionAskedId: number) =>
+      request<{ ok: boolean; id?: number }>("/feedback/from-qa", {
+        method: "POST",
+        body: { question_asked_id: questionAskedId },
+      }),
+  },
+  admin: {
+    users: {
+      list: (params?: { role?: string; class_id?: number; q?: string }) => {
+        const q = new URLSearchParams();
+        if (params?.role) q.set("role", params.role);
+        if (params?.class_id != null) q.set("class_id", String(params.class_id));
+        if (params?.q) q.set("q", params.q);
+        return request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null; created_at: string | null }[]>(`/admin/users?${q}`);
+      },
+      create: (body: { username: string; password?: string; role: string; display_name?: string; class_id?: number }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null }>("/admin/users", { method: "POST", body }),
+      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null }>(`/admin/users/${id}`),
+      update: (id: number, body: { password?: string; role?: string; display_name?: string; class_id?: number }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null }>(`/admin/users/${id}`, { method: "PUT", body }),
+      delete: (id: number) => request<{ ok: boolean }>(`/admin/users/${id}`, { method: "DELETE" }),
+    },
+    classes: {
+      list: () => request<{ id: number; name: string; term: string | null; created_at: string | null }[]>("/admin/classes"),
+      create: (body: { name: string; term?: string }) => request<{ id: number; name: string; term: string | null }>("/admin/classes", { method: "POST", body }),
+      get: (id: number) => request<{ id: number; name: string; term: string | null }>(`/admin/classes/${id}`),
+      update: (id: number, body: { name?: string; term?: string }) => request<{ id: number; name: string; term: string | null }>(`/admin/classes/${id}`, { method: "PUT", body }),
+      delete: (id: number) => request<{ ok: boolean }>(`/admin/classes/${id}`, { method: "DELETE" }),
+    },
+    courses: {
+      list: () => request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; created_at: string | null }[]>("/admin/courses"),
+      create: (body: { name: string; code?: string; description?: string; is_active?: boolean }) =>
+        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean }>("/admin/courses", { method: "POST", body }),
+      get: (id: number) => request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean }>(`/admin/courses/${id}`),
+      update: (id: number, body: { name?: string; code?: string; description?: string; is_active?: boolean }) =>
+        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean }>(`/admin/courses/${id}`, { method: "PUT", body }),
+      delete: (id: number) => request<{ ok: boolean }>(`/admin/courses/${id}`, { method: "DELETE" }),
+      chapters: (courseId: number) =>
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }[]>(`/admin/courses/${courseId}/chapters`),
+      createChapter: (courseId: number, body: { title: string; order_index?: number; syllabus_ref?: string }) =>
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/admin/courses/${courseId}/chapters`, { method: "POST", body }),
+      updateChapter: (chapterId: number, body: { title?: string; order_index?: number; syllabus_ref?: string }) =>
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/admin/chapters/${chapterId}`, { method: "PUT", body }),
+      deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/admin/chapters/${chapterId}`, { method: "DELETE" }),
+      reindex: (courseId: number) =>
+        request<{ ok: boolean; chunks_indexed: number }>(`/admin/courses/${courseId}/reindex`, { method: "POST" }),
+    },
+    rag: {
+      status: () =>
+        request<{ enabled: boolean; llm_type: string; embedding_type: string; top_k: number; chunk_size: number; chunk_overlap: number; config_note?: string }>("/admin/rag/status"),
+      config: () =>
+        request<RagConfig>("/admin/rag/config"),
+      updateConfig: (body: Partial<RagConfig>) =>
+        request<RagConfig>("/admin/rag/config", { method: "PUT", body }),
+      /** 模型提供商（RAGFlow 风格）：先配提供商，再选默认 LLM/Embedding */
+      providers: () =>
+        request<RagProvidersResponse>("/admin/rag/providers"),
+      updateProviders: (body: RagProvidersUpdateBody) =>
+        request<RagProvidersResponse>("/admin/rag/providers", { method: "PUT", body }),
+    },
+    teachings: {
+      list: (params?: { course_id?: number; class_id?: number; teacher_id?: number }) => {
+        const q = new URLSearchParams();
+        if (params?.course_id != null) q.set("course_id", String(params.course_id));
+        if (params?.class_id != null) q.set("class_id", String(params.class_id));
+        if (params?.teacher_id != null) q.set("teacher_id", String(params.teacher_id));
+        return request<{ id: number; course_id: number; class_id: number; teacher_id: number; term: string | null; is_active: boolean; course_name: string | null; class_name: string | null; teacher_name: string | null }[]>(`/admin/teachings?${q}`);
+      },
+      create: (body: { course_id: number; class_id: number; teacher_id: number; term?: string; is_active?: boolean }) =>
+        request<{ id: number; course_id: number; class_id: number; teacher_id: number; term: string | null; is_active: boolean; course_name: string | null; class_name: string | null; teacher_name: string | null }>("/admin/teachings", { method: "POST", body }),
+      update: (id: number, body: { teacher_id?: number; term?: string; is_active?: boolean }) =>
+        request<{ id: number; course_id: number; class_id: number; teacher_id: number; term: string | null; is_active: boolean; course_name: string | null; class_name: string | null; teacher_name: string | null }>(`/admin/teachings/${id}`, { method: "PUT", body }),
+      delete: (id: number) => request<{ ok: boolean }>(`/admin/teachings/${id}`, { method: "DELETE" }),
+    },
+  },
+};
+
+export function setToken(token: string) {
+  localStorage.setItem("token", token);
+}
+export function clearToken() {
+  localStorage.removeItem("token");
+}
