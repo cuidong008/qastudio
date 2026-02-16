@@ -2,7 +2,13 @@
 import asyncio
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncSession
-from .session import AsyncSessionLocal, engine, _migrate_chapter_course_id
+from .session import (
+    AsyncSessionLocal,
+    engine,
+    _migrate_chapter_course_id,
+    _migrate_course_owner_teacher_id,
+    _migrate_class_course_owner,
+)
 from .models import (
     Base, Chapter, Class, Course, Teaching, KnowledgePoint, KnowledgeDocument,
     Question, User, UserRole, ChapterConfig,
@@ -103,6 +109,8 @@ async def run_seed():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_chapter_course_id)
+        await conn.run_sync(_migrate_course_owner_teacher_id)
+        await conn.run_sync(_migrate_class_course_owner)
     async with AsyncSessionLocal() as session:
         await seed(session)
 

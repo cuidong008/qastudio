@@ -37,6 +37,8 @@ class Class(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(64), nullable=False)
     term = Column(String(32), nullable=True)  # 学期
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)  # 班级关联课程
+    owner_teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 管理教师
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -48,6 +50,7 @@ class Course(Base):
     code = Column(String(32), unique=True, nullable=True, index=True)
     description = Column(Text, nullable=True)
     is_active = Column(Boolean, default=True)
+    owner_teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 课程归属教师
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

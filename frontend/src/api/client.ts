@@ -147,6 +147,45 @@ export const api = {
         method: "PUT",
         body,
       }),
+    courses: {
+      list: () =>
+        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }[]>("/teacher/courses"),
+      create: (body: { name: string; code?: string; description?: string; is_active?: boolean }) =>
+        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>("/teacher/courses", { method: "POST", body }),
+      update: (id: number, body: { name?: string; code?: string; description?: string; is_active?: boolean }) =>
+        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>(`/teacher/courses/${id}`, { method: "PUT", body }),
+      delete: (id: number) => request<{ ok: boolean }>(`/teacher/courses/${id}`, { method: "DELETE" }),
+      reindex: (courseId: number) =>
+        request<{ ok: boolean; chunks_indexed: number }>(`/teacher/courses/${courseId}/reindex`, { method: "POST" }),
+      chapters: (courseId: number) =>
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }[]>(`/teacher/courses/${courseId}/chapters`),
+      createChapter: (courseId: number, body: { title: string; order_index?: number; syllabus_ref?: string }) =>
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/courses/${courseId}/chapters`, { method: "POST", body }),
+      updateChapter: (chapterId: number, body: { title?: string; order_index?: number; syllabus_ref?: string }) =>
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/chapters/${chapterId}`, { method: "PUT", body }),
+      deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/teacher/chapters/${chapterId}`, { method: "DELETE" }),
+    },
+    classes: {
+      list: () =>
+        request<{ id: number; name: string; term: string | null; course_id: number | null; course_name: string | null; owner_teacher_id: number | null; student_count: number; created_at: string | null }[]>("/teacher/classes"),
+      create: (body: { name: string; term?: string; course_id: number }) =>
+        request<{ id: number; name: string; term: string | null; course_id: number | null; course_name: string | null; owner_teacher_id: number | null; student_count: number; created_at: string | null }>("/teacher/classes", { method: "POST", body }),
+      update: (id: number, body: { name?: string; term?: string; course_id?: number }) =>
+        request<{ id: number; name: string; term: string | null; course_id: number | null; course_name: string | null; owner_teacher_id: number | null; student_count: number; created_at: string | null }>(`/teacher/classes/${id}`, { method: "PUT", body }),
+      delete: (id: number) => request<{ ok: boolean }>(`/teacher/classes/${id}`, { method: "DELETE" }),
+      students: (classId: number) =>
+        request<{ id: number; username: string; display_name: string | null; class_id: number | null }[]>(`/teacher/classes/${classId}/students`),
+      assignStudents: (classId: number, studentIds: number[]) =>
+        request<{ ok: boolean; assigned: number }>(`/teacher/classes/${classId}/students/assign`, { method: "POST", body: { student_ids: studentIds } }),
+    },
+    students: {
+      list: (params?: { q?: string; only_unassigned?: boolean }) => {
+        const q = new URLSearchParams();
+        if (params?.q) q.set("q", params.q);
+        if (params?.only_unassigned) q.set("only_unassigned", "true");
+        return request<{ id: number; username: string; display_name: string | null; class_id: number | null }[]>(`/teacher/students?${q}`);
+      },
+    },
     export: (report: string) => `${API_BASE}/teacher/export/csv?report=${report}`,
   },
   feedback: {

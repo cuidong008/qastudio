@@ -43,6 +43,12 @@ export default function TeacherLayout({
           <Link to="/teacher" className="nav-link">
             学情概览
           </Link>
+          <Link to="/teacher/courses" className="nav-link">
+            我的课程
+          </Link>
+          <Link to="/teacher/classes" className="nav-link">
+            我的班级
+          </Link>
           <Link to="/teacher/config" className="nav-link">
             教学内容配置
           </Link>

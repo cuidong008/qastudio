@@ -1,5 +1,5 @@
-"""教师端：教学内容配置、学情数据监控、教学决策支持与导出"""
-from fastapi import APIRouter, Depends, Query
+"""教师端：教学内容配置、课程/班级管理、学情数据监控与导出"""
+from fastapi import APIRouter, Depends, Query, HTTPException
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -9,8 +9,9 @@ import csv
 
 from ..db import get_db
 from ..db.models import (
-    User, Class, Chapter, Question, KnowledgePoint, KnowledgeDocument,
-    PreviewRecord, AnswerRecord, QuestionAsked, ChapterConfig,
+    User, Class, Course, Chapter, Teaching, UserRole,
+    Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
+    AnswerRecord, QuestionAsked, ChapterConfig,
 )
 from ..api.auth import require_teacher
 
@@ -46,7 +47,15 @@ async def list_chapter_configs(
     user: User = Depends(require_teacher),
 ):
     """获取所有章节及其配置（用于教师端配置页）"""
-    r_ch = await db.execute(select(Chapter).order_by(Chapter.order_index, Chapter.id))
+    chapter_qry = select(Chapter).order_by(Chapter.order_index, Chapter.id)
+    if user.role == UserRole.teacher.value:
+        chapter_qry = (
+            select(Chapter)
+            .join(Course, Course.id == Chapter.course_id)
+            .where(Course.owner_teacher_id == user.id)
+            .order_by(Chapter.order_index, Chapter.id)
+        )
+    r_ch = await db.execute(chapter_qry)
     chapters = r_ch.scalars().all()
     r_cfg = await db.execute(select(ChapterConfig))
     configs = {c.chapter_id: c for c in r_cfg.scalars().all()}
@@ -72,8 +81,14 @@ async def config_chapter(
     user: User = Depends(require_teacher),
 ):
     """持久化章节配置：预习开关、难度筛选、题量限制"""
-    from fastapi import HTTPException
-    r = await db.execute(select(Chapter).where(Chapter.id == body.chapter_id))
+    chapter_qry = select(Chapter).where(Chapter.id == body.chapter_id)
+    if user.role == UserRole.teacher.value:
+        chapter_qry = (
+            select(Chapter)
+            .join(Course, Course.id == Chapter.course_id)
+            .where(Chapter.id == body.chapter_id, Course.owner_teacher_id == user.id)
+        )
+    r = await db.execute(chapter_qry)
     if not r.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="章节不存在")
     r = await db.execute(select(ChapterConfig).where(ChapterConfig.chapter_id == body.chapter_id))
@@ -95,6 +110,486 @@ async def config_chapter(
     return {"ok": True, "chapter_id": body.chapter_id}
 
 
+class TeacherCourseOut(BaseModel):
+    id: int
+    name: str
+    code: str | None
+    description: str | None
+    is_active: bool
+    owner_teacher_id: int | None
+    created_at: str | None
+
+
+class TeacherCourseCreateIn(BaseModel):
+    name: str
+    code: str | None = None
+    description: str | None = None
+    is_active: bool = True
+
+
+class TeacherCourseUpdateIn(BaseModel):
+    name: str | None = None
+    code: str | None = None
+    description: str | None = None
+    is_active: bool | None = None
+
+
+class TeacherChapterOut(BaseModel):
+    id: int
+    course_id: int | None
+    title: str
+    order_index: int
+    syllabus_ref: str | None
+
+
+class TeacherChapterCreateIn(BaseModel):
+    title: str
+    order_index: int = 0
+    syllabus_ref: str | None = None
+
+
+class TeacherChapterUpdateIn(BaseModel):
+    title: str | None = None
+    order_index: int | None = None
+    syllabus_ref: str | None = None
+
+
+class TeacherClassOut(BaseModel):
+    id: int
+    name: str
+    term: str | None
+    course_id: int | None
+    course_name: str | None = None
+    owner_teacher_id: int | None
+    student_count: int = 0
+    created_at: str | None
+
+
+class TeacherClassCreateIn(BaseModel):
+    name: str
+    term: str | None = None
+    course_id: int
+
+
+class TeacherClassUpdateIn(BaseModel):
+    name: str | None = None
+    term: str | None = None
+    course_id: int | None = None
+
+
+class TeacherStudentOut(BaseModel):
+    id: int
+    username: str
+    display_name: str | None
+    class_id: int | None
+
+
+class TeacherClassStudentsAssignIn(BaseModel):
+    student_ids: list[int]
+
+
+async def _require_owned_course(db: AsyncSession, teacher_id: int, course_id: int) -> Course:
+    r = await db.execute(select(Course).where(Course.id == course_id, Course.owner_teacher_id == teacher_id))
+    c = r.scalar_one_or_none()
+    if not c:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+    return c
+
+
+async def _require_owned_class(db: AsyncSession, teacher_id: int, class_id: int) -> Class:
+    r = await db.execute(select(Class).where(Class.id == class_id, Class.owner_teacher_id == teacher_id))
+    c = r.scalar_one_or_none()
+    if not c:
+        raise HTTPException(status_code=404, detail="班级不存在或无权限")
+    return c
+
+
+@router.get("/courses", response_model=list[TeacherCourseOut])
+async def list_teacher_courses(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(select(Course).where(Course.owner_teacher_id == user.id).order_by(Course.id))
+    rows = r.scalars().all()
+    return [
+        TeacherCourseOut(
+            id=c.id,
+            name=c.name,
+            code=c.code,
+            description=c.description,
+            is_active=c.is_active,
+            owner_teacher_id=c.owner_teacher_id,
+            created_at=c.created_at.isoformat() if c.created_at else None,
+        )
+        for c in rows
+    ]
+
+
+@router.post("/courses", response_model=TeacherCourseOut)
+async def create_teacher_course(
+    body: TeacherCourseCreateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    if body.code:
+        r = await db.execute(select(Course).where(Course.code == body.code.strip()))
+        if r.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="课程代码已存在")
+    c = Course(
+        name=body.name.strip(),
+        code=body.code.strip() if body.code else None,
+        description=body.description,
+        is_active=body.is_active,
+        owner_teacher_id=user.id,
+    )
+    db.add(c)
+    await db.commit()
+    await db.refresh(c)
+    return TeacherCourseOut(
+        id=c.id,
+        name=c.name,
+        code=c.code,
+        description=c.description,
+        is_active=c.is_active,
+        owner_teacher_id=c.owner_teacher_id,
+        created_at=c.created_at.isoformat() if c.created_at else None,
+    )
+
+
+@router.put("/courses/{course_id}", response_model=TeacherCourseOut)
+async def update_teacher_course(
+    course_id: int,
+    body: TeacherCourseUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    c = await _require_owned_course(db, user.id, course_id)
+    if body.name is not None:
+        c.name = body.name.strip()
+    if body.code is not None:
+        code = body.code.strip() if body.code else None
+        if code and code != c.code:
+            r_dup = await db.execute(select(Course).where(Course.code == code, Course.id != c.id))
+            if r_dup.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="课程代码已存在")
+        c.code = code
+    if body.description is not None:
+        c.description = body.description
+    if body.is_active is not None:
+        c.is_active = body.is_active
+    await db.commit()
+    await db.refresh(c)
+    return TeacherCourseOut(
+        id=c.id,
+        name=c.name,
+        code=c.code,
+        description=c.description,
+        is_active=c.is_active,
+        owner_teacher_id=c.owner_teacher_id,
+        created_at=c.created_at.isoformat() if c.created_at else None,
+    )
+
+
+@router.delete("/courses/{course_id}")
+async def delete_teacher_course(
+    course_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    c = await _require_owned_course(db, user.id, course_id)
+    await db.delete(c)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.post("/courses/{course_id}/reindex")
+async def reindex_teacher_course(
+    course_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_course(db, user.id, course_id)
+    from ..services.rag_index_service import build_index_for_course
+    count = await build_index_for_course(db, course_id)
+    return {"ok": True, "chunks_indexed": count}
+
+
+@router.get("/courses/{course_id}/chapters", response_model=list[TeacherChapterOut])
+async def list_teacher_course_chapters(
+    course_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_course(db, user.id, course_id)
+    r = await db.execute(select(Chapter).where(Chapter.course_id == course_id).order_by(Chapter.order_index, Chapter.id))
+    rows = r.scalars().all()
+    return [TeacherChapterOut(id=ch.id, course_id=ch.course_id, title=ch.title, order_index=ch.order_index, syllabus_ref=ch.syllabus_ref) for ch in rows]
+
+
+@router.post("/courses/{course_id}/chapters", response_model=TeacherChapterOut)
+async def create_teacher_chapter(
+    course_id: int,
+    body: TeacherChapterCreateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_course(db, user.id, course_id)
+    ch = Chapter(course_id=course_id, title=body.title.strip(), order_index=body.order_index, syllabus_ref=body.syllabus_ref)
+    db.add(ch)
+    await db.commit()
+    await db.refresh(ch)
+    return TeacherChapterOut(id=ch.id, course_id=ch.course_id, title=ch.title, order_index=ch.order_index, syllabus_ref=ch.syllabus_ref)
+
+
+@router.put("/chapters/{chapter_id}", response_model=TeacherChapterOut)
+async def update_teacher_chapter(
+    chapter_id: int,
+    body: TeacherChapterUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(Chapter, Course)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(Chapter.id == chapter_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="章节不存在或无权限")
+    ch = row[0]
+    if body.title is not None:
+        ch.title = body.title.strip()
+    if body.order_index is not None:
+        ch.order_index = body.order_index
+    if body.syllabus_ref is not None:
+        ch.syllabus_ref = body.syllabus_ref
+    await db.commit()
+    await db.refresh(ch)
+    return TeacherChapterOut(id=ch.id, course_id=ch.course_id, title=ch.title, order_index=ch.order_index, syllabus_ref=ch.syllabus_ref)
+
+
+@router.delete("/chapters/{chapter_id}")
+async def delete_teacher_chapter(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(Chapter, Course)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(Chapter.id == chapter_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="章节不存在或无权限")
+    ch = row[0]
+    await db.delete(ch)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/classes", response_model=list[TeacherClassOut])
+async def list_teacher_classes(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(select(Class).where(Class.owner_teacher_id == user.id).order_by(Class.id))
+    rows = r.scalars().all()
+    course_ids = [c.course_id for c in rows if c.course_id is not None]
+    courses: dict[int, str] = {}
+    if course_ids:
+        r_course = await db.execute(select(Course).where(Course.id.in_(course_ids)))
+        courses = {c.id: c.name for c in r_course.scalars().all()}
+    counts: dict[int, int] = {}
+    if rows:
+        r_count = await db.execute(
+            select(User.class_id, func.count(User.id))
+            .where(User.role == UserRole.student.value, User.class_id.in_([c.id for c in rows]))
+            .group_by(User.class_id)
+        )
+        counts = {cid: cnt for cid, cnt in r_count.all()}
+    return [
+        TeacherClassOut(
+            id=c.id,
+            name=c.name,
+            term=c.term,
+            course_id=c.course_id,
+            course_name=courses.get(c.course_id) if c.course_id else None,
+            owner_teacher_id=c.owner_teacher_id,
+            student_count=counts.get(c.id, 0),
+            created_at=c.created_at.isoformat() if c.created_at else None,
+        )
+        for c in rows
+    ]
+
+
+@router.post("/classes", response_model=TeacherClassOut)
+async def create_teacher_class(
+    body: TeacherClassCreateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    course = await _require_owned_course(db, user.id, body.course_id)
+    c = Class(
+        name=body.name.strip(),
+        term=body.term,
+        course_id=course.id,
+        owner_teacher_id=user.id,
+    )
+    db.add(c)
+    await db.flush()
+    r_teaching = await db.execute(
+        select(Teaching).where(
+            Teaching.course_id == course.id,
+            Teaching.class_id == c.id,
+            Teaching.teacher_id == user.id,
+        )
+    )
+    if not r_teaching.scalar_one_or_none():
+        db.add(
+            Teaching(
+                course_id=course.id,
+                class_id=c.id,
+                teacher_id=user.id,
+                term=body.term,
+                is_active=True,
+            )
+        )
+    await db.commit()
+    await db.refresh(c)
+    return TeacherClassOut(
+        id=c.id,
+        name=c.name,
+        term=c.term,
+        course_id=c.course_id,
+        course_name=course.name,
+        owner_teacher_id=c.owner_teacher_id,
+        student_count=0,
+        created_at=c.created_at.isoformat() if c.created_at else None,
+    )
+
+
+@router.put("/classes/{class_id}", response_model=TeacherClassOut)
+async def update_teacher_class(
+    class_id: int,
+    body: TeacherClassUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    c = await _require_owned_class(db, user.id, class_id)
+    next_course: Course | None = None
+    if body.course_id is not None:
+        next_course = await _require_owned_course(db, user.id, body.course_id)
+        c.course_id = next_course.id
+    if body.name is not None:
+        c.name = body.name.strip()
+    if body.term is not None:
+        c.term = body.term
+    if c.course_id is not None:
+        # 保证班级与课程存在本教师授课关系
+        r_teaching = await db.execute(
+            select(Teaching).where(
+                Teaching.course_id == c.course_id,
+                Teaching.class_id == c.id,
+                Teaching.teacher_id == user.id,
+            )
+        )
+        if not r_teaching.scalar_one_or_none():
+            db.add(
+                Teaching(
+                    course_id=c.course_id,
+                    class_id=c.id,
+                    teacher_id=user.id,
+                    term=c.term,
+                    is_active=True,
+                )
+            )
+    await db.commit()
+    await db.refresh(c)
+    r_count = await db.execute(
+        select(func.count(User.id)).where(User.role == UserRole.student.value, User.class_id == c.id)
+    )
+    student_count = r_count.scalar() or 0
+    if not next_course and c.course_id is not None:
+        r_course = await db.execute(select(Course).where(Course.id == c.course_id))
+        next_course = r_course.scalar_one_or_none()
+    return TeacherClassOut(
+        id=c.id,
+        name=c.name,
+        term=c.term,
+        course_id=c.course_id,
+        course_name=next_course.name if next_course else None,
+        owner_teacher_id=c.owner_teacher_id,
+        student_count=student_count,
+        created_at=c.created_at.isoformat() if c.created_at else None,
+    )
+
+
+@router.delete("/classes/{class_id}")
+async def delete_teacher_class(
+    class_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    c = await _require_owned_class(db, user.id, class_id)
+    await db.delete(c)
+    await db.commit()
+    return {"ok": True}
+
+
+@router.get("/classes/{class_id}/students", response_model=list[TeacherStudentOut])
+async def list_teacher_class_students(
+    class_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_class(db, user.id, class_id)
+    r = await db.execute(
+        select(User)
+        .where(User.role == UserRole.student.value, User.class_id == class_id)
+        .order_by(User.id)
+    )
+    return [TeacherStudentOut(id=s.id, username=s.username, display_name=s.display_name, class_id=s.class_id) for s in r.scalars().all()]
+
+
+@router.post("/classes/{class_id}/students/assign")
+async def assign_students_to_teacher_class(
+    class_id: int,
+    body: TeacherClassStudentsAssignIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_class(db, user.id, class_id)
+    ids = [i for i in body.student_ids if isinstance(i, int)]
+    if not ids:
+        raise HTTPException(status_code=400, detail="请选择学生")
+    r = await db.execute(select(User).where(User.id.in_(ids), User.role == UserRole.student.value))
+    students = r.scalars().all()
+    if not students:
+        raise HTTPException(status_code=404, detail="学生不存在")
+    for s in students:
+        s.class_id = class_id
+    await db.commit()
+    return {"ok": True, "assigned": len(students)}
+
+
+@router.get("/students", response_model=list[TeacherStudentOut])
+async def list_students_for_teacher(
+    q: str | None = Query(None),
+    only_unassigned: bool = Query(False),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    qry = select(User).where(User.role == UserRole.student.value).order_by(User.id)
+    if q:
+        keyword = f"%{q.strip()}%"
+        qry = qry.where((User.username.like(keyword)) | (User.display_name.like(keyword)))
+    if only_unassigned:
+        qry = qry.where(User.class_id == None)
+    r = await db.execute(qry)
+    return [TeacherStudentOut(id=s.id, username=s.username, display_name=s.display_name, class_id=s.class_id) for s in r.scalars().all()]
+
+
 async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
     """若指定 class_id，返回该班级用户 id 列表，用于过滤统计；否则返回 None 表示不过滤"""
     if class_id is None:
@@ -109,6 +604,8 @@ async def stats_overview(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
+    if class_id is not None and user.role == UserRole.teacher.value:
+        await _require_owned_class(db, user.id, class_id)
     user_ids = await _user_ids_by_class(db, class_id)
 
     # 预习完成率（可选按班级）

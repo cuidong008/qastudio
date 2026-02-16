@@ -9,12 +9,11 @@ import Feedback from "./pages/student/Feedback";
 import TeacherLayout from "./components/TeacherLayout";
 import TeacherDashboard from "./pages/teacher/TeacherDashboard";
 import TeacherConfig from "./pages/teacher/TeacherConfig";
+import TeacherCourses from "./pages/teacher/TeacherCourses";
+import TeacherClasses from "./pages/teacher/TeacherClasses";
 import AdminLayout from "./components/AdminLayout";
 import AdminHome from "./pages/admin/AdminHome";
 import AdminUsers from "./pages/admin/AdminUsers";
-import AdminClasses from "./pages/admin/AdminClasses";
-import AdminCourses from "./pages/admin/AdminCourses";
-import AdminTeachings from "./pages/admin/AdminTeachings";
 import AdminRag from "./pages/admin/AdminRag";
 import Login from "./pages/Login";
 
@@ -48,14 +47,13 @@ function App() {
       <Route path="/student/exercises" element={<Layout role="student" requireAuth><Exercises /></Layout>} />
       <Route path="/student/feedback" element={<Layout role="student" requireAuth><Feedback /></Layout>} />
       <Route path="/teacher" element={<TeacherLayout requireAuth><TeacherDashboard /></TeacherLayout>} />
+      <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />
+      <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
       <Route path="/teacher/config" element={<TeacherLayout requireAuth><TeacherConfig /></TeacherLayout>} />
       <Route path="/admin" element={<AdminLayout />}>
         <Route index element={<AdminHome />} />
         <Route path="users" element={<AdminUsers />} />
-        <Route path="classes" element={<AdminClasses />} />
-        <Route path="courses" element={<AdminCourses />} />
         <Route path="rag" element={<AdminRag />} />
-        <Route path="teachings" element={<AdminTeachings />} />
       </Route>
       <Route path="/" element={<Navigate to={user?.role === "admin" ? "/admin" : user?.role === "teacher" ? "/teacher" : "/student/inclass"} replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />

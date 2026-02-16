@@ -19,6 +19,26 @@ def _migrate_chapter_course_id(sync_conn):
         pass  # 列已存在
 
 
+def _migrate_course_owner_teacher_id(sync_conn):
+    """为已有 courses 表添加 owner_teacher_id 列（SQLite）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE courses ADD COLUMN owner_teacher_id INTEGER"))
+    except Exception:
+        pass
+
+
+def _migrate_class_course_owner(sync_conn):
+    """为已有 classes 表添加 course_id / owner_teacher_id 列（SQLite）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE classes ADD COLUMN course_id INTEGER"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("ALTER TABLE classes ADD COLUMN owner_teacher_id INTEGER"))
+    except Exception:
+        pass
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
@@ -35,3 +55,5 @@ async def init_db():
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
         await conn.run_sync(_migrate_chapter_course_id)
+        await conn.run_sync(_migrate_course_owner_teacher_id)
+        await conn.run_sync(_migrate_class_course_owner)

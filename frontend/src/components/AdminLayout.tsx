@@ -1,4 +1,4 @@
-import { ReactNode, useEffect } from "react";
+import { useEffect } from "react";
 import { Link, useNavigate, Outlet } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
@@ -35,10 +35,7 @@ export default function AdminLayout() {
         <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
           <Link to="/admin" className="nav-link">概览</Link>
           <Link to="/admin/users" className="nav-link">用户管理</Link>
-          <Link to="/admin/classes" className="nav-link">班级管理</Link>
-          <Link to="/admin/courses" className="nav-link">课程管理</Link>
           <Link to="/admin/rag" className="nav-link">RAG 配置</Link>
-          <Link to="/admin/teachings" className="nav-link">开课分配</Link>
         </nav>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
