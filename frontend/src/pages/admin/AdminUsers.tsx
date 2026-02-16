@@ -1,18 +1,16 @@
 import { useState, useEffect } from "react";
 import { api } from "../../api/client";
 
-type User = { id: number; username: string; role: string; display_name: string | null; class_id: number | null; created_at: string | null };
-type ClassItem = { id: number; name: string; term: string | null };
+type User = { id: number; username: string; role: string; display_name: string | null; student_no: string | null; created_at: string | null };
 
 export default function AdminUsers() {
   const [list, setList] = useState<User[]>([]);
-  const [classes, setClasses] = useState<ClassItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [roleFilter, setRoleFilter] = useState<string>("");
   const [q, setQ] = useState("");
   const [modal, setModal] = useState<"create" | "edit" | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
-  const [form, setForm] = useState({ username: "", password: "", role: "student", display_name: "", class_id: "" });
+  const [form, setForm] = useState({ username: "", password: "", role: "student", display_name: "", student_no: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
 
@@ -23,18 +21,14 @@ export default function AdminUsers() {
   useEffect(() => {
     load();
   }, [roleFilter, q]);
-  useEffect(() => {
-    api.admin.classes.list().then(setClasses).catch(() => setClasses([]));
-  }, []);
-
   const openCreate = () => {
-    setForm({ username: "", password: "123456", role: "student", display_name: "", class_id: "" });
+    setForm({ username: "", password: "123456", role: "student", display_name: "", student_no: "" });
     setModal("create");
     setError("");
   };
   const openEdit = (u: User) => {
     setEditId(u.id);
-    setForm({ username: u.username, password: "", role: u.role, display_name: u.display_name || "", class_id: u.class_id != null ? String(u.class_id) : "" });
+    setForm({ username: u.username, password: "", role: u.role, display_name: u.display_name || "", student_no: u.student_no || "" });
     setModal("edit");
     setError("");
   };
@@ -47,7 +41,7 @@ export default function AdminUsers() {
         password: form.password || "123456",
         role: form.role,
         display_name: form.display_name.trim() || undefined,
-        class_id: form.class_id ? parseInt(form.class_id, 10) : undefined,
+        student_no: form.student_no.trim() || undefined,
       })
       .then(() => { setModal(null); load(); })
       .catch((e) => setError(e?.message || "创建失败"))
@@ -57,11 +51,11 @@ export default function AdminUsers() {
     if (editId == null) return;
     setSaving(true);
     setError("");
-    const body: { password?: string; role?: string; display_name?: string; class_id?: number } = {};
+    const body: { password?: string; role?: string; display_name?: string; student_no?: string } = {};
     if (form.password) body.password = form.password;
     body.role = form.role;
     body.display_name = form.display_name.trim() || undefined;
-    body.class_id = form.class_id ? parseInt(form.class_id, 10) : undefined;
+    body.student_no = form.student_no.trim() || undefined;
     api.admin.users
       .update(editId, body)
       .then(() => { setModal(null); setEditId(null); load(); })
@@ -76,7 +70,7 @@ export default function AdminUsers() {
   return (
     <div>
       <h1 style={{ marginBottom: 8, fontSize: 24, fontWeight: 600 }}>用户管理</h1>
-      <p style={{ color: "var(--text-muted)", marginBottom: 20, fontSize: 15 }}>创建、编辑用户与角色、班级分配</p>
+      <p style={{ color: "var(--text-muted)", marginBottom: 20, fontSize: 15 }}>创建、编辑用户与角色、学号/工号维护</p>
       <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
         <input
           type="text"
@@ -104,9 +98,9 @@ export default function AdminUsers() {
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
                 <th style={{ textAlign: "left", padding: "10px 12px" }}>ID</th>
                 <th style={{ textAlign: "left", padding: "10px 12px" }}>用户名</th>
+                <th style={{ textAlign: "left", padding: "10px 12px" }}>学号/工号</th>
                 <th style={{ textAlign: "left", padding: "10px 12px" }}>姓名</th>
                 <th style={{ textAlign: "left", padding: "10px 12px" }}>角色</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>班级</th>
                 <th style={{ textAlign: "left", padding: "10px 12px" }}>操作</th>
               </tr>
             </thead>
@@ -115,9 +109,9 @@ export default function AdminUsers() {
                 <tr key={u.id} style={{ borderBottom: "1px solid var(--border)" }}>
                   <td style={{ padding: "10px 12px" }}>{u.id}</td>
                   <td style={{ padding: "10px 12px" }}>{u.username}</td>
+                  <td style={{ padding: "10px 12px" }}>{u.student_no || "—"}</td>
                   <td style={{ padding: "10px 12px" }}>{u.display_name || "—"}</td>
                   <td style={{ padding: "10px 12px" }}>{u.role === "admin" ? "管理员" : u.role === "teacher" ? "教师" : "学生"}</td>
-                  <td style={{ padding: "10px 12px" }}>{classes.find((c) => c.id === u.class_id)?.name ?? (u.class_id ?? "—")}</td>
                   <td style={{ padding: "10px 12px" }}>
                     <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => openEdit(u)}>编辑</button>
                     <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)" }} onClick={() => doDelete(u.id)}>删除</button>
@@ -177,17 +171,14 @@ export default function AdminUsers() {
                 />
               </label>
               <label>
-                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>班级（学生可选）</span>
-                <select
-                  value={form.class_id}
-                  onChange={(e) => setForm((f) => ({ ...f, class_id: e.target.value }))}
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>{form.role === "teacher" ? "工号" : "学号"}</span>
+                <input
+                  type="text"
+                  value={form.student_no}
+                  onChange={(e) => setForm((f) => ({ ...f, student_no: e.target.value }))}
+                  placeholder={form.role === "teacher" ? "输入教师工号" : "输入学生学号"}
                   style={{ width: "100%", padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6 }}
-                >
-                  <option value="">—</option>
-                  {classes.map((c) => (
-                    <option key={c.id} value={c.id}>{c.name}</option>
-                  ))}
-                </select>
+                />
               </label>
             </div>
             <div style={{ marginTop: 20, display: "flex", gap: 8, justifyContent: "flex-end" }}>

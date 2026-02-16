@@ -1,7 +1,7 @@
 import { useState, useEffect } from "react";
 import { api } from "../../api/client";
 
-export default function Preview() {
+export default function Preview({ courseId }: { courseId?: number | null }) {
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
   const [selected, setSelected] = useState<number | null>(null);
   const [task, setTask] = useState<{
@@ -15,11 +15,15 @@ export default function Preview() {
   const [submitted, setSubmitted] = useState(false);
 
   useEffect(() => {
-    api.chapters.list().then((list) => {
+    api.chapters.list({ course_id: courseId ?? undefined }).then((list) => {
       setChapters(list);
-      if (list.length && !selected) setSelected(list[0].id);
+      if (list.length) {
+        setSelected((prev) => (prev && list.some((c) => c.id === prev) ? prev : list[0].id));
+      } else {
+        setSelected(null);
+      }
     });
-  }, []);
+  }, [courseId]);
 
   useEffect(() => {
     if (selected == null) return;

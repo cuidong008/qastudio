@@ -92,11 +92,18 @@ export const api = {
   auth: {
     login: (username: string, password: string) =>
       request<{ access_token: string; role: string }>("/auth/login", { method: "POST", body: { username, password } }),
-    me: () => request<{ id: number; username: string; role: string; display_name: string | null } | null>("/auth/me"),
+    me: () => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null } | null>("/auth/me"),
   },
   chapters: {
-    list: () => request<{ id: number; title: string; order_index: number }[]>("/chapters"),
+    list: (params?: { course_id?: number }) => {
+      const q = new URLSearchParams();
+      if (params?.course_id != null) q.set("course_id", String(params.course_id));
+      return request<{ id: number; title: string; order_index: number }[]>(`/chapters${q.toString() ? `?${q}` : ""}`);
+    },
     get: (id: number) => request<{ id: number; title: string; knowledge_points: { id: number; title: string; ppt_slide_ref: string | null }[] }>(`/chapters/${id}`),
+  },
+  courses: {
+    list: () => request<{ id: number; name: string; code: string | null; is_active: boolean }[]>("/chapters/courses"),
   },
   preview: {
     task: (chapterId: number) => request<{ chapter_id: number; chapter_title: string; summary: string; key_points: string[]; self_check_questions: string[]; duration_minutes: number }>(`/preview/task/${chapterId}`),
@@ -104,8 +111,8 @@ export const api = {
       request<{ ok: boolean }>("/preview/submit", { method: "POST", body: { chapter_id: chapterId, weak_points: weakPoints } }),
   },
   qa: {
-    ask: (question: string, chapterId?: number) =>
-      request<{ answer: string; ppt_ref: string | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, chapter_id: chapterId } }),
+    ask: (question: string, params?: { chapterId?: number; courseId?: number }) =>
+      request<{ answer: string; ppt_ref: string | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, chapter_id: params?.chapterId, course_id: params?.courseId } }),
   },
   questions: {
     list: (params?: { chapter_id?: number; difficulty?: string }) => {
@@ -174,16 +181,17 @@ export const api = {
         request<{ id: number; name: string; term: string | null; course_id: number | null; course_name: string | null; owner_teacher_id: number | null; student_count: number; created_at: string | null }>(`/teacher/classes/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/teacher/classes/${id}`, { method: "DELETE" }),
       students: (classId: number) =>
-        request<{ id: number; username: string; display_name: string | null; class_id: number | null }[]>(`/teacher/classes/${classId}/students`),
-      assignStudents: (classId: number, studentIds: number[]) =>
-        request<{ ok: boolean; assigned: number }>(`/teacher/classes/${classId}/students/assign`, { method: "POST", body: { student_ids: studentIds } }),
+        request<{ id: number; username: string; student_no: string | null; display_name: string | null }[]>(`/teacher/classes/${classId}/students`),
+      assignStudents: (classId: number, body: { student_ids?: number[]; student_no?: string; name?: string }) =>
+        request<{ ok: boolean; assigned: number }>(`/teacher/classes/${classId}/students/assign`, { method: "POST", body }),
     },
     students: {
-      list: (params?: { q?: string; only_unassigned?: boolean }) => {
+      list: (params?: { q?: string; student_no?: string; name?: string }) => {
         const q = new URLSearchParams();
         if (params?.q) q.set("q", params.q);
-        if (params?.only_unassigned) q.set("only_unassigned", "true");
-        return request<{ id: number; username: string; display_name: string | null; class_id: number | null }[]>(`/teacher/students?${q}`);
+        if (params?.student_no) q.set("student_no", params.student_no);
+        if (params?.name) q.set("name", params.name);
+        return request<{ id: number; username: string; student_no: string | null; display_name: string | null }[]>(`/teacher/students?${q}`);
       },
     },
     export: (report: string) => `${API_BASE}/teacher/export/csv?report=${report}`,
@@ -203,18 +211,17 @@ export const api = {
   },
   admin: {
     users: {
-      list: (params?: { role?: string; class_id?: number; q?: string }) => {
+      list: (params?: { role?: string; q?: string }) => {
         const q = new URLSearchParams();
         if (params?.role) q.set("role", params.role);
-        if (params?.class_id != null) q.set("class_id", String(params.class_id));
         if (params?.q) q.set("q", params.q);
-        return request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null; created_at: string | null }[]>(`/admin/users?${q}`);
+        return request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; created_at: string | null }[]>(`/admin/users?${q}`);
       },
-      create: (body: { username: string; password?: string; role: string; display_name?: string; class_id?: number }) =>
-        request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null }>("/admin/users", { method: "POST", body }),
-      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null }>(`/admin/users/${id}`),
-      update: (id: number, body: { password?: string; role?: string; display_name?: string; class_id?: number }) =>
-        request<{ id: number; username: string; role: string; display_name: string | null; class_id: number | null }>(`/admin/users/${id}`, { method: "PUT", body }),
+      create: (body: { username: string; password?: string; role: string; display_name?: string; student_no?: string }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null }>("/admin/users", { method: "POST", body }),
+      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null }>(`/admin/users/${id}`),
+      update: (id: number, body: { password?: string; role?: string; display_name?: string; student_no?: string }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null }>(`/admin/users/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/admin/users/${id}`, { method: "DELETE" }),
     },
     classes: {

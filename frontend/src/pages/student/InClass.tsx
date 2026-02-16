@@ -17,7 +17,7 @@ type ChatMessage = {
 type ChatSession = {
   id: number;
   title: string;
-  chapterId: number | null;
+  courseId: number | null;
   messages: ChatMessage[];
 };
 
@@ -34,7 +34,7 @@ function makeSession(id: number): ChatSession {
   return {
     id,
     title: "新对话",
-    chapterId: null,
+    courseId: null,
     messages: [],
   };
 }
@@ -42,7 +42,7 @@ function makeSession(id: number): ChatSession {
 export default function InClass() {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
-  const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
+  const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
   const [feedbackSendingId, setFeedbackSendingId] = useState<number | null>(null);
   const [submittedQaIds, setSubmittedQaIds] = useState<Set<number>>(new Set());
   const [mode, setMode] = useState<WorkspaceMode>("qa");
@@ -51,7 +51,7 @@ export default function InClass() {
   const [activeSessionId, setActiveSessionId] = useState(1);
 
   useEffect(() => {
-    api.chapters.list().then(setChapters).catch(() => setChapters([]));
+    api.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
   }, []);
 
   const activeSession = useMemo(
@@ -90,7 +90,7 @@ export default function InClass() {
     setQuestion("");
     setLoading(true);
     try {
-      const res = await api.qa.ask(q, activeSession.chapterId ?? undefined);
+      const res = await api.qa.ask(q, { courseId: activeSession.courseId ?? undefined });
       const assistantMsg: ChatMessage = {
         id: Date.now() + 1,
         role: "assistant",
@@ -141,20 +141,19 @@ export default function InClass() {
 
       <section className="student-chat-main">
         <div className="student-chat-topbar">
-          <div className="student-chat-topbar-title">课中辅助</div>
           <div className="student-chat-course-picker">
             <span>课程</span>
             <select
-              value={activeSession.chapterId ?? ""}
+              value={activeSession.courseId ?? ""}
               onChange={(e) => {
                 const nextId = e.target.value ? Number(e.target.value) : null;
-                updateActiveSession((session) => ({ ...session, chapterId: nextId }));
+                updateActiveSession((session) => ({ ...session, courseId: nextId }));
               }}
             >
               <option value="">全部课程</option>
-              {chapters.map((c) => (
+              {courses.map((c) => (
                 <option key={c.id} value={c.id}>
-                  {c.title}
+                  {c.name}
                 </option>
               ))}
             </select>
@@ -203,9 +202,9 @@ export default function InClass() {
             </>
           ) : (
             <div className="student-chat-tool-content">
-              {mode === "preview" && <Preview />}
-              {mode === "review" && <Review inWorkspace onGoQa={() => setMode("qa")} />}
-              {mode === "exercises" && <Exercises />}
+              {mode === "preview" && <Preview courseId={activeSession.courseId} />}
+              {mode === "review" && <Review inWorkspace onGoQa={() => setMode("qa")} courseId={activeSession.courseId} />}
+              {mode === "exercises" && <Exercises courseId={activeSession.courseId} />}
               {mode === "feedback" && <Feedback inWorkspace onGoQa={() => setMode("qa")} />}
             </div>
           )}

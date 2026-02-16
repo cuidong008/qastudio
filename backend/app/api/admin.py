@@ -281,7 +281,7 @@ class UserListOut(BaseModel):
     username: str
     role: str
     display_name: str | None
-    class_id: int | None
+    student_no: str | None
     created_at: str | None
 
     class Config:
@@ -293,20 +293,19 @@ class UserCreateIn(BaseModel):
     password: str = "123456"
     role: str = "student"
     display_name: str | None = None
-    class_id: int | None = None
+    student_no: str | None = None
 
 
 class UserUpdateIn(BaseModel):
     password: str | None = None
     role: str | None = None
     display_name: str | None = None
-    class_id: int | None = None
+    student_no: str | None = None
 
 
 @router.get("/users", response_model=list[UserListOut])
 async def list_users(
     role: str | None = Query(None),
-    class_id: int | None = Query(None),
     q: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
@@ -314,8 +313,6 @@ async def list_users(
     qry = select(User).order_by(User.id)
     if role:
         qry = qry.where(User.role == role)
-    if class_id is not None:
-        qry = qry.where(User.class_id == class_id)
     if q and q.strip():
         from sqlalchemy import or_
         pat = f"%{q.strip()}%"
@@ -325,7 +322,7 @@ async def list_users(
     return [
         UserListOut(
             id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-            class_id=u.class_id, created_at=u.created_at.isoformat() if u.created_at else None,
+            student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
         )
         for u in rows
     ]
@@ -342,6 +339,10 @@ async def create_user(
     r = await db.execute(select(User).where(User.username == body.username.strip()))
     if r.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
+    if body.student_no:
+        r = await db.execute(select(User).where(User.student_no == body.student_no.strip()))
+        if r.scalar_one_or_none():
+            raise HTTPException(status_code=400, detail="学号/工号已存在")
     raw = (body.password or "123456").encode()
     hashed = bcrypt.hashpw(raw, bcrypt.gensalt()).decode("utf-8")
     u = User(
@@ -349,14 +350,14 @@ async def create_user(
         hashed_password=hashed,
         role=body.role,
         display_name=body.display_name or body.username.strip(),
-        class_id=body.class_id,
+        student_no=body.student_no.strip() if body.student_no else None,
     )
     db.add(u)
     await db.commit()
     await db.refresh(u)
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-        class_id=u.class_id, created_at=u.created_at.isoformat() if u.created_at else None,
+        student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
 
@@ -372,7 +373,7 @@ async def get_user(
         raise HTTPException(status_code=404, detail="用户不存在")
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-        class_id=u.class_id, created_at=u.created_at.isoformat() if u.created_at else None,
+        student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
 
@@ -395,13 +396,18 @@ async def update_user(
         u.role = body.role
     if body.display_name is not None:
         u.display_name = body.display_name
-    if body.class_id is not None:
-        u.class_id = body.class_id
+    if body.student_no is not None:
+        next_no = body.student_no.strip() if body.student_no else None
+        if next_no:
+            r_dup = await db.execute(select(User).where(User.student_no == next_no, User.id != u.id))
+            if r_dup.scalar_one_or_none():
+                raise HTTPException(status_code=400, detail="学号/工号已存在")
+        u.student_no = next_no
     await db.commit()
     await db.refresh(u)
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-        class_id=u.class_id, created_at=u.created_at.isoformat() if u.created_at else None,
+        student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
 

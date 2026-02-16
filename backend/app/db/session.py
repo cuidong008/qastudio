@@ -39,6 +39,31 @@ def _migrate_class_course_owner(sync_conn):
         pass
 
 
+def _migrate_user_student_no(sync_conn):
+    """为已有 users 表添加 student_no 列（SQLite）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE users ADD COLUMN student_no VARCHAR(32)"))
+    except Exception:
+        pass
+
+
+def _backfill_student_class_memberships(sync_conn):
+    """将历史 users.class_id 数据回填到多对多关系表"""
+    try:
+        sync_conn.execute(
+            text(
+                """
+                INSERT OR IGNORE INTO student_class_memberships (student_id, class_id, created_at)
+                SELECT id, class_id, CURRENT_TIMESTAMP
+                FROM users
+                WHERE role = 'student' AND class_id IS NOT NULL
+                """
+            )
+        )
+    except Exception:
+        pass
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
@@ -57,3 +82,5 @@ async def init_db():
         await conn.run_sync(_migrate_chapter_course_id)
         await conn.run_sync(_migrate_course_owner_teacher_id)
         await conn.run_sync(_migrate_class_course_owner)
+        await conn.run_sync(_migrate_user_student_no)
+        await conn.run_sync(_backfill_student_class_memberships)

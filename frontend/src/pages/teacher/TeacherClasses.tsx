@@ -20,8 +20,8 @@ type CourseItem = {
 type StudentItem = {
   id: number;
   username: string;
+  student_no: string | null;
   display_name: string | null;
-  class_id: number | null;
 };
 
 export default function TeacherClasses() {
@@ -37,6 +37,8 @@ export default function TeacherClasses() {
   const [classStudents, setClassStudents] = useState<StudentItem[]>([]);
   const [candidateStudents, setCandidateStudents] = useState<StudentItem[]>([]);
   const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([]);
+  const [searchStudentNo, setSearchStudentNo] = useState("");
+  const [searchName, setSearchName] = useState("");
   const [assigning, setAssigning] = useState(false);
 
   const load = () => {
@@ -122,15 +124,24 @@ export default function TeacherClasses() {
   const openStudentsModal = (classId: number) => {
     setStudentsModalClassId(classId);
     setSelectedStudentIds([]);
-    Promise.all([api.teacher.classes.students(classId), api.teacher.students.list({ only_unassigned: true })])
-      .then(([inClass, unassigned]) => {
+    setSearchStudentNo("");
+    setSearchName("");
+    Promise.all([api.teacher.classes.students(classId)])
+      .then(([inClass]) => {
         setClassStudents(inClass);
-        setCandidateStudents(unassigned);
+        setCandidateStudents([]);
       })
       .catch(() => {
         setClassStudents([]);
         setCandidateStudents([]);
       });
+  };
+
+  const searchStudents = () => {
+    api.teacher.students
+      .list({ student_no: searchStudentNo.trim() || undefined, name: searchName.trim() || undefined })
+      .then(setCandidateStudents)
+      .catch(() => setCandidateStudents([]));
   };
 
   const toggleCandidate = (id: number) => {
@@ -141,7 +152,7 @@ export default function TeacherClasses() {
     if (studentsModalClassId == null || selectedStudentIds.length === 0) return;
     setAssigning(true);
     api.teacher.classes
-      .assignStudents(studentsModalClassId, selectedStudentIds)
+      .assignStudents(studentsModalClassId, { student_ids: selectedStudentIds })
       .then(() => openStudentsModal(studentsModalClassId))
       .catch((e) => alert(e?.message || "添加学生失败"))
       .finally(() => setAssigning(false));
@@ -251,21 +262,40 @@ export default function TeacherClasses() {
                 <h4 style={{ marginTop: 0 }}>已在班级</h4>
                 <ul style={{ margin: 0, paddingLeft: 20 }}>
                   {classStudents.map((s) => (
-                    <li key={s.id}>{s.display_name || s.username}</li>
+                    <li key={s.id}>{s.student_no || "无学号"} · {s.display_name || s.username}</li>
                   ))}
                   {classStudents.length === 0 && <li style={{ color: "var(--text-muted)" }}>暂无学生</li>}
                 </ul>
               </div>
               <div>
-                <h4 style={{ marginTop: 0 }}>可添加学生（未分配班级）</h4>
+                <h4 style={{ marginTop: 0 }}>按学号/姓名添加学生</h4>
+                <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <input
+                    type="text"
+                    value={searchStudentNo}
+                    onChange={(e) => setSearchStudentNo(e.target.value)}
+                    placeholder="学号"
+                    style={{ minWidth: 120 }}
+                  />
+                  <input
+                    type="text"
+                    value={searchName}
+                    onChange={(e) => setSearchName(e.target.value)}
+                    placeholder="姓名或用户名"
+                    style={{ minWidth: 160 }}
+                  />
+                  <button type="button" className="btn-secondary" onClick={searchStudents}>
+                    查询
+                  </button>
+                </div>
                 <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflow: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
                   {candidateStudents.map((s) => (
                     <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
                       <input type="checkbox" checked={selectedStudentIds.includes(s.id)} onChange={() => toggleCandidate(s.id)} />
-                      <span>{s.display_name || s.username}</span>
+                      <span>{s.student_no || "无学号"} · {s.display_name || s.username}</span>
                     </label>
                   ))}
-                  {candidateStudents.length === 0 && <span style={{ color: "var(--text-muted)" }}>暂无可添加学生</span>}
+                  {candidateStudents.length === 0 && <span style={{ color: "var(--text-muted)" }}>输入条件后点击查询</span>}
                 </div>
               </div>
             </div>

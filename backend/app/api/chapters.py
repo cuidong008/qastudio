@@ -1,12 +1,12 @@
 """章节与知识点：学生/教师共用"""
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..db import get_db
-from ..db.models import Chapter, KnowledgePoint
+from ..db.models import Chapter, KnowledgePoint, Course
 
 router = APIRouter(prefix="/chapters", tags=["chapters"])
 
@@ -37,11 +37,34 @@ class ChapterDetailOut(ChapterOut):
     knowledge_points: list[KnowledgePointOut] = []
 
 
-@router.get("", response_model=list[ChapterOut])
-async def list_chapters(db: AsyncSession = Depends(get_db)):
+class CourseOut(BaseModel):
+    id: int
+    name: str
+    code: str | None
+    is_active: bool
+
+    class Config:
+        from_attributes = True
+
+
+@router.get("/courses", response_model=list[CourseOut])
+async def list_courses(db: AsyncSession = Depends(get_db)):
     result = await db.execute(
-        select(Chapter).order_by(Chapter.order_index, Chapter.id)
+        select(Course).where(Course.is_active == True).order_by(Course.id)
     )
+    rows = result.scalars().all()
+    return [CourseOut.model_validate(c) for c in rows]
+
+
+@router.get("", response_model=list[ChapterOut])
+async def list_chapters(
+    course_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+):
+    qry = select(Chapter).order_by(Chapter.order_index, Chapter.id)
+    if course_id is not None:
+        qry = qry.where(Chapter.course_id == course_id)
+    result = await db.execute(qry)
     chapters = result.scalars().all()
     return [ChapterOut.model_validate(c) for c in chapters]
 

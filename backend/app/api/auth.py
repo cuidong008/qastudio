@@ -35,7 +35,7 @@ class UserOut(BaseModel):
     username: str
     role: str
     display_name: str | None
-    class_id: int | None
+    student_no: str | None
 
     class Config:
         from_attributes = True
@@ -93,6 +93,7 @@ async def login(form: LoginIn, db: AsyncSession = Depends(get_db)):
             hashed_password=hashed,
             role=role,
             display_name=username,
+            student_no=username if role == UserRole.teacher.value else None,
         )
         db.add(user)
         await db.flush()
@@ -114,5 +115,5 @@ async def me(user: User | None = Depends(get_current_user)):
         username=user.username,
         role=user.role,
         display_name=user.display_name,
-        class_id=user.class_id,
+        student_no=user.student_no,
     )

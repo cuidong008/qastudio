@@ -51,11 +51,15 @@ async def ask(
 ):
     question = (body.question or "").strip()
     course_id = body.course_id
+    chapter_ids_by_course: list[int] | None = None
     if course_id is None and body.chapter_id is not None:
         r_ch = await db.execute(select(Chapter).where(Chapter.id == body.chapter_id))
         ch = r_ch.scalar_one_or_none()
         if ch and ch.course_id is not None:
             course_id = ch.course_id
+    if course_id is not None and body.chapter_id is None:
+        r_ids = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id))
+        chapter_ids_by_course = [row[0] for row in r_ids.all()]
 
     # RAG 开关：仅当启用且能确定 course_id 时才导入并走 RAG 管道
     import os
@@ -93,6 +97,11 @@ async def ask(
     q_docs = select(KnowledgeDocument)
     if body.chapter_id is not None:
         q_docs = q_docs.where(KnowledgeDocument.chapter_id == body.chapter_id)
+    elif chapter_ids_by_course is not None:
+        if chapter_ids_by_course:
+            q_docs = q_docs.where(KnowledgeDocument.chapter_id.in_(chapter_ids_by_course))
+        else:
+            q_docs = q_docs.where(KnowledgeDocument.chapter_id == -1)
     if question:
         like = f"%{question[:50]}%"
         q_docs = q_docs.where(
@@ -106,8 +115,15 @@ async def ask(
     docs = list(doc_result.scalars().all())
     # 若无文档匹配，再查知识点表（标题/内容）
     points: list = []
-    if not docs and question and body.chapter_id is not None:
-        q_pts = select(KnowledgePoint).where(KnowledgePoint.chapter_id == body.chapter_id)
+    if not docs and question and (body.chapter_id is not None or chapter_ids_by_course is not None):
+        q_pts = select(KnowledgePoint)
+        if body.chapter_id is not None:
+            q_pts = q_pts.where(KnowledgePoint.chapter_id == body.chapter_id)
+        elif chapter_ids_by_course is not None:
+            if chapter_ids_by_course:
+                q_pts = q_pts.where(KnowledgePoint.chapter_id.in_(chapter_ids_by_course))
+            else:
+                q_pts = q_pts.where(KnowledgePoint.chapter_id == -1)
         like = f"%{question[:30]}%"
         q_pts = q_pts.where(
             or_(
@@ -123,6 +139,11 @@ async def ask(
         q_fallback = select(KnowledgeDocument)
         if body.chapter_id is not None:
             q_fallback = q_fallback.where(KnowledgeDocument.chapter_id == body.chapter_id)
+        elif chapter_ids_by_course is not None:
+            if chapter_ids_by_course:
+                q_fallback = q_fallback.where(KnowledgeDocument.chapter_id.in_(chapter_ids_by_course))
+            else:
+                q_fallback = q_fallback.where(KnowledgeDocument.chapter_id == -1)
         q_fallback = q_fallback.order_by(KnowledgeDocument.id).limit(1)
         fallback = await db.execute(q_fallback)
         docs = list(fallback.scalars().all())

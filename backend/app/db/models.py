@@ -1,6 +1,6 @@
 """数据层模型：知识库、题库、学习行为、用户"""
 from datetime import datetime
-from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, ForeignKey, Enum as SQLEnum
+from sqlalchemy import Column, Integer, String, Text, Float, Boolean, DateTime, ForeignKey, Enum as SQLEnum, UniqueConstraint
 from sqlalchemy.orm import declarative_base, relationship
 import enum
 
@@ -24,6 +24,7 @@ class User(Base):
     __tablename__ = "users"
     id = Column(Integer, primary_key=True, autoincrement=True)
     username = Column(String(64), unique=True, nullable=False, index=True)
+    student_no = Column(String(32), unique=True, nullable=True, index=True)  # 学号（教师则为工号）
     hashed_password = Column(String(128), nullable=False)
     role = Column(String(20), default=UserRole.student.value, nullable=False)
     display_name = Column(String(64), nullable=True)
@@ -39,6 +40,16 @@ class Class(Base):
     term = Column(String(32), nullable=True)  # 学期
     course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)  # 班级关联课程
     owner_teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 管理教师
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class StudentClassMembership(Base):
+    """学生与班级多对多关系"""
+    __tablename__ = "student_class_memberships"
+    __table_args__ = (UniqueConstraint("student_id", "class_id", name="uq_student_class_membership"),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    student_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    class_id = Column(Integer, ForeignKey("classes.id"), nullable=False, index=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

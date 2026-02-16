@@ -2,13 +2,13 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 
-export default function Review({ inWorkspace = false, onGoQa }: { inWorkspace?: boolean; onGoQa?: () => void }) {
+export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWorkspace?: boolean; onGoQa?: () => void; courseId?: number | null }) {
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
   const [detail, setDetail] = useState<{ id: number; title: string; knowledge_points: { id: number; title: string; ppt_slide_ref: string | null }[] } | null>(null);
 
   useEffect(() => {
-    api.chapters.list().then(setChapters);
-  }, []);
+    api.chapters.list({ course_id: courseId ?? undefined }).then(setChapters);
+  }, [courseId]);
 
   const loadDetail = (id: number) => {
     api.chapters.get(id).then(setDetail);

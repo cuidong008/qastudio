@@ -8,6 +8,8 @@ from .session import (
     _migrate_chapter_course_id,
     _migrate_course_owner_teacher_id,
     _migrate_class_course_owner,
+    _migrate_user_student_no,
+    _backfill_student_class_memberships,
 )
 from .models import (
     Base, Chapter, Class, Course, Teaching, KnowledgePoint, KnowledgeDocument,
@@ -40,7 +42,7 @@ async def seed(session: AsyncSession):
         r_admin = await session.execute(select(User).where(User.username == "admin"))
         if not r_admin.scalar_one_or_none():
             _hash = lambda p: bcrypt.hashpw(p.encode(), bcrypt.gensalt()).decode("utf-8")
-            session.add(User(username="admin", hashed_password=_hash("admin"), role=UserRole.admin.value, display_name="管理员", class_id=None))
+            session.add(User(username="admin", student_no="A0001", hashed_password=_hash("admin"), role=UserRole.admin.value, display_name="管理员", class_id=None))
         await session.commit()
         return
     ch1 = Chapter(id=1, course_id=default_course.id, title="第1章 计算机网络概述", order_index=1, syllabus_ref="教学大纲 1.1")
@@ -97,9 +99,9 @@ async def seed(session: AsyncSession):
         return bcrypt.hashpw(pwd.encode(), bcrypt.gensalt()).decode("utf-8")
 
     for u in [
-        User(username="admin", hashed_password=_hash("admin"), role=UserRole.admin.value, display_name="管理员", class_id=None),
-        User(username="teacher", hashed_password=_hash("teacher"), role=UserRole.teacher.value, display_name="教师", class_id=None),
-        User(username="student", hashed_password=_hash("student"), role=UserRole.student.value, display_name="学生", class_id=1),
+        User(username="admin", student_no="A0001", hashed_password=_hash("admin"), role=UserRole.admin.value, display_name="管理员", class_id=None),
+        User(username="teacher", student_no="T0001", hashed_password=_hash("teacher"), role=UserRole.teacher.value, display_name="教师", class_id=None),
+        User(username="student", student_no="S0001", hashed_password=_hash("student"), role=UserRole.student.value, display_name="学生", class_id=1),
     ]:
         session.add(u)
     await session.commit()
@@ -111,6 +113,8 @@ async def run_seed():
         await conn.run_sync(_migrate_chapter_course_id)
         await conn.run_sync(_migrate_course_owner_teacher_id)
         await conn.run_sync(_migrate_class_course_owner)
+        await conn.run_sync(_migrate_user_student_no)
+        await conn.run_sync(_backfill_student_class_memberships)
     async with AsyncSessionLocal() as session:
         await seed(session)
 

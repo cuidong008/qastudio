@@ -10,6 +10,7 @@ import csv
 from ..db import get_db
 from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
+    StudentClassMembership,
     Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
     AnswerRecord, QuestionAsked, ChapterConfig,
 )
@@ -180,12 +181,14 @@ class TeacherClassUpdateIn(BaseModel):
 class TeacherStudentOut(BaseModel):
     id: int
     username: str
+    student_no: str | None
     display_name: str | None
-    class_id: int | None
 
 
 class TeacherClassStudentsAssignIn(BaseModel):
-    student_ids: list[int]
+    student_ids: list[int] = []
+    student_no: str | None = None
+    name: str | None = None
 
 
 async def _require_owned_course(db: AsyncSession, teacher_id: int, course_id: int) -> Course:
@@ -403,9 +406,9 @@ async def list_teacher_classes(
     counts: dict[int, int] = {}
     if rows:
         r_count = await db.execute(
-            select(User.class_id, func.count(User.id))
-            .where(User.role == UserRole.student.value, User.class_id.in_([c.id for c in rows]))
-            .group_by(User.class_id)
+            select(StudentClassMembership.class_id, func.count(StudentClassMembership.student_id))
+            .where(StudentClassMembership.class_id.in_([c.id for c in rows]))
+            .group_by(StudentClassMembership.class_id)
         )
         counts = {cid: cnt for cid, cnt in r_count.all()}
     return [
@@ -507,7 +510,7 @@ async def update_teacher_class(
     await db.commit()
     await db.refresh(c)
     r_count = await db.execute(
-        select(func.count(User.id)).where(User.role == UserRole.student.value, User.class_id == c.id)
+        select(func.count(StudentClassMembership.student_id)).where(StudentClassMembership.class_id == c.id)
     )
     student_count = r_count.scalar() or 0
     if not next_course and c.course_id is not None:
@@ -532,6 +535,9 @@ async def delete_teacher_class(
     user: User = Depends(require_teacher),
 ):
     c = await _require_owned_class(db, user.id, class_id)
+    r_m = await db.execute(select(StudentClassMembership).where(StudentClassMembership.class_id == class_id))
+    for m in r_m.scalars().all():
+        await db.delete(m)
     await db.delete(c)
     await db.commit()
     return {"ok": True}
@@ -546,10 +552,11 @@ async def list_teacher_class_students(
     await _require_owned_class(db, user.id, class_id)
     r = await db.execute(
         select(User)
-        .where(User.role == UserRole.student.value, User.class_id == class_id)
+        .join(StudentClassMembership, StudentClassMembership.student_id == User.id)
+        .where(User.role == UserRole.student.value, StudentClassMembership.class_id == class_id)
         .order_by(User.id)
     )
-    return [TeacherStudentOut(id=s.id, username=s.username, display_name=s.display_name, class_id=s.class_id) for s in r.scalars().all()]
+    return [TeacherStudentOut(id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name) for s in r.scalars().all()]
 
 
 @router.post("/classes/{class_id}/students/assign")
@@ -561,22 +568,41 @@ async def assign_students_to_teacher_class(
 ):
     await _require_owned_class(db, user.id, class_id)
     ids = [i for i in body.student_ids if isinstance(i, int)]
-    if not ids:
-        raise HTTPException(status_code=400, detail="请选择学生")
-    r = await db.execute(select(User).where(User.id.in_(ids), User.role == UserRole.student.value))
+    qry = select(User).where(User.role == UserRole.student.value)
+    if ids:
+        qry = qry.where(User.id.in_(ids))
+    else:
+        if body.student_no and body.student_no.strip():
+            qry = qry.where(User.student_no.ilike(f"%{body.student_no.strip()}%"))
+        if body.name and body.name.strip():
+            keyword = f"%{body.name.strip()}%"
+            qry = qry.where((User.display_name.ilike(keyword)) | (User.username.ilike(keyword)))
+        if not body.student_no and not body.name:
+            raise HTTPException(status_code=400, detail="请填写学号/姓名或选择学生")
+    r = await db.execute(qry)
     students = r.scalars().all()
     if not students:
         raise HTTPException(status_code=404, detail="学生不存在")
+    assigned = 0
     for s in students:
-        s.class_id = class_id
+        r_ex = await db.execute(
+            select(StudentClassMembership).where(
+                StudentClassMembership.student_id == s.id,
+                StudentClassMembership.class_id == class_id,
+            )
+        )
+        if not r_ex.scalar_one_or_none():
+            db.add(StudentClassMembership(student_id=s.id, class_id=class_id))
+            assigned += 1
     await db.commit()
-    return {"ok": True, "assigned": len(students)}
+    return {"ok": True, "assigned": assigned}
 
 
 @router.get("/students", response_model=list[TeacherStudentOut])
 async def list_students_for_teacher(
     q: str | None = Query(None),
-    only_unassigned: bool = Query(False),
+    student_no: str | None = Query(None),
+    name: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
@@ -584,17 +610,20 @@ async def list_students_for_teacher(
     if q:
         keyword = f"%{q.strip()}%"
         qry = qry.where((User.username.like(keyword)) | (User.display_name.like(keyword)))
-    if only_unassigned:
-        qry = qry.where(User.class_id == None)
+    if student_no and student_no.strip():
+        qry = qry.where(User.student_no.ilike(f"%{student_no.strip()}%"))
+    if name and name.strip():
+        keyword = f"%{name.strip()}%"
+        qry = qry.where((User.display_name.ilike(keyword)) | (User.username.ilike(keyword)))
     r = await db.execute(qry)
-    return [TeacherStudentOut(id=s.id, username=s.username, display_name=s.display_name, class_id=s.class_id) for s in r.scalars().all()]
+    return [TeacherStudentOut(id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name) for s in r.scalars().all()]
 
 
 async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
     """若指定 class_id，返回该班级用户 id 列表，用于过滤统计；否则返回 None 表示不过滤"""
     if class_id is None:
         return None
-    r = await db.execute(select(User.id).where(User.class_id == class_id))
+    r = await db.execute(select(StudentClassMembership.student_id).where(StudentClassMembership.class_id == class_id))
     return [row[0] for row in r.all()]
 
 

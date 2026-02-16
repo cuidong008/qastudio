@@ -17,7 +17,7 @@ const difficultyLabel: Record<string, string> = {
   extended: "拓展",
 };
 
-export default function Exercises() {
+export default function Exercises({ courseId }: { courseId?: number | null }) {
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
   const [chapterId, setChapterId] = useState<number | null>(null);
   const [difficulty, setDifficulty] = useState<string>("");
@@ -28,20 +28,32 @@ export default function Exercises() {
   const [tab, setTab] = useState<"practice" | "wrong">("practice");
 
   useEffect(() => {
-    api.chapters.list().then(setChapters);
-  }, []);
+    api.chapters.list({ course_id: courseId ?? undefined }).then((list) => {
+      setChapters(list);
+      if (!list.length) {
+        setChapterId(null);
+        return;
+      }
+      setChapterId((prev) => (prev && list.some((c) => c.id === prev) ? prev : null));
+    });
+  }, [courseId]);
 
   useEffect(() => {
     if (tab === "wrong") {
-      api.questions.wrong().then((list) => {
-        setQuestions(list);
-        setCurrent(list[0] ?? null);
-      }).catch(() => setQuestions([]));
+      api.questions
+        .wrong()
+        .then((list) => {
+          setQuestions(list);
+          setCurrent(list[0] ?? null);
+        })
+        .catch(() => setQuestions([]));
     } else {
-      api.questions.list({ chapter_id: chapterId ?? undefined, difficulty: difficulty || undefined }).then((list) => {
-        setQuestions(list);
-        setCurrent(list[0] ?? null);
-      });
+      api.questions
+        .list({ chapter_id: chapterId ?? undefined, difficulty: difficulty || undefined })
+        .then((list) => {
+          setQuestions(list);
+          setCurrent(list[0] ?? null);
+        });
     }
     setResult(null);
     setUserAnswer("");
@@ -61,45 +73,31 @@ export default function Exercises() {
     setUserAnswer("");
   };
 
-  const options = current?.options ? (() => {
-    try {
-      return JSON.parse(current.options) as string[];
-    } catch {
-      return [];
-    }
-  })() : [];
+  const options = current?.options
+    ? (() => {
+        try {
+          return JSON.parse(current.options) as string[];
+        } catch {
+          return [];
+        }
+      })()
+    : [];
 
   return (
     <div>
-      <h1 style={{ marginBottom: 8, fontSize: 24, fontWeight: 600 }}>
-        习题训练
-      </h1>
-      <p style={{ color: "var(--text-muted)", marginBottom: 20, fontSize: 15 }}>
-        分层习题、详细解析与 PPT 关联
-      </p>
+      <h1 style={{ marginBottom: 8, fontSize: 24, fontWeight: 600 }}>习题训练</h1>
+      <p style={{ color: "var(--text-muted)", marginBottom: 20, fontSize: 15 }}>分层习题、详细解析与 PPT 关联</p>
       <div style={{ display: "flex", gap: 12, marginBottom: 24 }}>
-        <button
-          type="button"
-          className={tab === "practice" ? "btn-primary" : "btn-secondary"}
-          onClick={() => setTab("practice")}
-        >
+        <button type="button" className={tab === "practice" ? "btn-primary" : "btn-secondary"} onClick={() => setTab("practice")}>
           按章节/难度练习
         </button>
-        <button
-          type="button"
-          className={tab === "wrong" ? "btn-primary" : "btn-secondary"}
-          onClick={() => setTab("wrong")}
-        >
+        <button type="button" className={tab === "wrong" ? "btn-primary" : "btn-secondary"} onClick={() => setTab("wrong")}>
           错题本
         </button>
       </div>
       {tab === "practice" && (
         <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-          <select
-            value={chapterId ?? ""}
-            onChange={(e) => setChapterId(e.target.value ? Number(e.target.value) : null)}
-            style={{ padding: "10px 14px", minWidth: 160 }}
-          >
+          <select value={chapterId ?? ""} onChange={(e) => setChapterId(e.target.value ? Number(e.target.value) : null)} style={{ padding: "10px 14px", minWidth: 160 }}>
             <option value="">全部章节</option>
             {chapters.map((c) => (
               <option key={c.id} value={c.id}>
@@ -107,11 +105,7 @@ export default function Exercises() {
               </option>
             ))}
           </select>
-          <select
-            value={difficulty}
-            onChange={(e) => setDifficulty(e.target.value)}
-            style={{ padding: "10px 14px", minWidth: 120 }}
-          >
+          <select value={difficulty} onChange={(e) => setDifficulty(e.target.value)} style={{ padding: "10px 14px", minWidth: 120 }}>
             <option value="">全部难度</option>
             <option value="basic">基础</option>
             <option value="applied">应用</option>
@@ -121,20 +115,10 @@ export default function Exercises() {
       )}
       {current ? (
         <div className="card">
-          <p
-            style={{
-              color: "var(--text-muted)",
-              marginBottom: 12,
-              fontSize: 13,
-              textTransform: "uppercase",
-              letterSpacing: "0.5px",
-            }}
-          >
+          <p style={{ color: "var(--text-muted)", marginBottom: 12, fontSize: 13, textTransform: "uppercase", letterSpacing: "0.5px" }}>
             {difficultyLabel[current.difficulty ?? ""] ?? current.difficulty ?? ""}
           </p>
-          <p style={{ fontSize: 16, marginBottom: 16, lineHeight: 1.6 }}>
-            {current.question_text}
-          </p>
+          <p style={{ fontSize: 16, marginBottom: 16, lineHeight: 1.6 }}>{current.question_text}</p>
           {options.length > 0 ? (
             <div style={{ marginBottom: 20 }}>
               {options.map((opt, i) => (
@@ -152,44 +136,21 @@ export default function Exercises() {
                     border: "1px solid var(--border)",
                   }}
                 >
-                  <input
-                    type="radio"
-                    name="answer"
-                    value={opt.slice(0, 1)}
-                    checked={userAnswer === opt.slice(0, 1)}
-                    onChange={() => setUserAnswer(opt.slice(0, 1))}
-                  />
+                  <input type="radio" name="answer" value={opt.slice(0, 1)} checked={userAnswer === opt.slice(0, 1)} onChange={() => setUserAnswer(opt.slice(0, 1))} />
                   {opt}
                 </label>
               ))}
             </div>
           ) : (
-            <input
-              type="text"
-              placeholder="输入答案"
-              value={userAnswer}
-              onChange={(e) => setUserAnswer(e.target.value)}
-              style={{ marginBottom: 20, maxWidth: 400 }}
-            />
+            <input type="text" placeholder="输入答案" value={userAnswer} onChange={(e) => setUserAnswer(e.target.value)} style={{ marginBottom: 20, maxWidth: 400 }} />
           )}
           {!result ? (
-            <button
-              type="button"
-              className="btn-primary"
-              onClick={submitAnswer}
-              disabled={!userAnswer.trim()}
-            >
+            <button type="button" className="btn-primary" onClick={submitAnswer} disabled={!userAnswer.trim()}>
               提交答案
             </button>
           ) : (
             <div>
-              <p
-                style={{
-                  color: result.is_correct ? "var(--success)" : "var(--error)",
-                  marginBottom: 8,
-                  fontWeight: 500,
-                }}
-              >
+              <p style={{ color: result.is_correct ? "var(--success)" : "var(--error)", marginBottom: 8, fontWeight: 500 }}>
                 {result.is_correct ? "回答正确" : "回答错误"}，正确答案：{result.correct_answer}
               </p>
               {result.explanation && (
@@ -198,11 +159,7 @@ export default function Exercises() {
                   {result.explanation}
                 </p>
               )}
-              {result.ppt_ref && (
-                <p style={{ color: "var(--accent)", marginBottom: 16 }}>
-                  参考 PPT：{result.ppt_ref}
-                </p>
-              )}
+              {result.ppt_ref && <p style={{ color: "var(--accent)", marginBottom: 16 }}>参考 PPT：{result.ppt_ref}</p>}
               <button type="button" className="btn-primary" onClick={nextQuestion}>
                 下一题
               </button>
@@ -210,9 +167,7 @@ export default function Exercises() {
           )}
         </div>
       ) : (
-        <p style={{ color: "var(--text-muted)" }}>
-          暂无题目，请选择其他章节或难度。
-        </p>
+        <p style={{ color: "var(--text-muted)" }}>暂无题目，请选择其他章节或难度。</p>
       )}
     </div>
   );
