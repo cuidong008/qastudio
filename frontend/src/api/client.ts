@@ -180,10 +180,19 @@ export const api = {
       update: (id: number, body: { name?: string; term?: string; course_id?: number }) =>
         request<{ id: number; name: string; term: string | null; course_id: number | null; course_name: string | null; owner_teacher_id: number | null; student_count: number; created_at: string | null }>(`/teacher/classes/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/teacher/classes/${id}`, { method: "DELETE" }),
-      students: (classId: number) =>
-        request<{ id: number; username: string; student_no: string | null; display_name: string | null }[]>(`/teacher/classes/${classId}/students`),
+      students: (classId: number, params?: { q?: string; student_no?: string; name?: string }) => {
+        const q = new URLSearchParams();
+        if (params?.q) q.set("q", params.q);
+        if (params?.student_no) q.set("student_no", params.student_no);
+        if (params?.name) q.set("name", params.name);
+        return request<{ id: number; username: string; student_no: string | null; display_name: string | null }[]>(
+          `/teacher/classes/${classId}/students${q.toString() ? `?${q}` : ""}`
+        );
+      },
       assignStudents: (classId: number, body: { student_ids?: number[]; student_no?: string; name?: string }) =>
         request<{ ok: boolean; assigned: number }>(`/teacher/classes/${classId}/students/assign`, { method: "POST", body }),
+      removeStudent: (classId: number, studentId: number) =>
+        request<{ ok: boolean }>(`/teacher/classes/${classId}/students/${studentId}`, { method: "DELETE" }),
     },
     students: {
       list: (params?: { q?: string; student_no?: string; name?: string }) => {

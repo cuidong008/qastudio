@@ -28,18 +28,22 @@ export default function TeacherClasses() {
   const [classes, setClasses] = useState<ClassItem[]>([]);
   const [courses, setCourses] = useState<CourseItem[]>([]);
   const [loading, setLoading] = useState(true);
+
   const [modal, setModal] = useState<"create" | "edit" | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
   const [form, setForm] = useState({ name: "", term: "", course_id: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
-  const [studentsModalClassId, setStudentsModalClassId] = useState<number | null>(null);
-  const [classStudents, setClassStudents] = useState<StudentItem[]>([]);
+
+  const [addModalClassId, setAddModalClassId] = useState<number | null>(null);
+  const [manageModalClassId, setManageModalClassId] = useState<number | null>(null);
   const [candidateStudents, setCandidateStudents] = useState<StudentItem[]>([]);
+  const [classStudents, setClassStudents] = useState<StudentItem[]>([]);
   const [selectedStudentIds, setSelectedStudentIds] = useState<number[]>([]);
-  const [searchStudentNo, setSearchStudentNo] = useState("");
-  const [searchName, setSearchName] = useState("");
+  const [addSearchKeyword, setAddSearchKeyword] = useState("");
+  const [manageSearchKeyword, setManageSearchKeyword] = useState("");
   const [assigning, setAssigning] = useState(false);
+  const [removingStudentId, setRemovingStudentId] = useState<number | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -121,41 +125,88 @@ export default function TeacherClasses() {
     api.teacher.classes.delete(id).then(load).catch((e) => alert(e?.message || "删除失败"));
   };
 
-  const openStudentsModal = (classId: number) => {
-    setStudentsModalClassId(classId);
-    setSelectedStudentIds([]);
-    setSearchStudentNo("");
-    setSearchName("");
-    Promise.all([api.teacher.classes.students(classId)])
-      .then(([inClass]) => {
-        setClassStudents(inClass);
-        setCandidateStudents([]);
-      })
-      .catch(() => {
-        setClassStudents([]);
-        setCandidateStudents([]);
-      });
+  const loadClassStudents = (classId: number, keyword = "") => {
+    api.teacher.classes
+      .students(classId, { q: keyword || undefined })
+      .then(setClassStudents)
+      .catch(() => setClassStudents([]));
   };
 
-  const searchStudents = () => {
-    api.teacher.students
-      .list({ student_no: searchStudentNo.trim() || undefined, name: searchName.trim() || undefined })
-      .then(setCandidateStudents)
+  const loadCandidateStudents = (classId: number, keyword = "") => {
+    Promise.all([api.teacher.classes.students(classId), api.teacher.students.list({ q: keyword || undefined })])
+      .then(([inClass, allStudents]) => {
+        const inClassSet = new Set(inClass.map((s) => s.id));
+        setCandidateStudents(allStudents.filter((s) => !inClassSet.has(s.id)));
+      })
       .catch(() => setCandidateStudents([]));
+  };
+
+  const openAddStudentsModal = (classId: number) => {
+    setAddModalClassId(classId);
+    setSelectedStudentIds([]);
+    setAddSearchKeyword("");
+    loadCandidateStudents(classId, "");
+  };
+
+  const openManageStudentsModal = (classId: number) => {
+    setManageModalClassId(classId);
+    setManageSearchKeyword("");
+    loadClassStudents(classId, "");
   };
 
   const toggleCandidate = (id: number) => {
     setSelectedStudentIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
+  const searchAddStudents = () => {
+    if (addModalClassId == null) return;
+    loadCandidateStudents(addModalClassId, addSearchKeyword.trim());
+  };
+
+  const resetAddStudentsSearch = () => {
+    if (addModalClassId == null) return;
+    setAddSearchKeyword("");
+    setSelectedStudentIds([]);
+    loadCandidateStudents(addModalClassId, "");
+  };
+
+  const searchManageStudents = () => {
+    if (manageModalClassId == null) return;
+    loadClassStudents(manageModalClassId, manageSearchKeyword.trim());
+  };
+
+  const resetManageStudentsSearch = () => {
+    if (manageModalClassId == null) return;
+    setManageSearchKeyword("");
+    loadClassStudents(manageModalClassId, "");
+  };
+
   const assignStudents = () => {
-    if (studentsModalClassId == null || selectedStudentIds.length === 0) return;
+    if (addModalClassId == null || selectedStudentIds.length === 0) return;
     setAssigning(true);
     api.teacher.classes
-      .assignStudents(studentsModalClassId, { student_ids: selectedStudentIds })
-      .then(() => openStudentsModal(studentsModalClassId))
+      .assignStudents(addModalClassId, { student_ids: selectedStudentIds })
+      .then(() => {
+        setSelectedStudentIds([]);
+        loadCandidateStudents(addModalClassId, addSearchKeyword.trim());
+        load();
+      })
       .catch((e) => alert(e?.message || "添加学生失败"))
       .finally(() => setAssigning(false));
+  };
+
+  const removeStudent = (studentId: number) => {
+    if (manageModalClassId == null) return;
+    if (!confirm("确定将该学生从当前班级移除？")) return;
+    setRemovingStudentId(studentId);
+    api.teacher.classes
+      .removeStudent(manageModalClassId, studentId)
+      .then(() => {
+        loadClassStudents(manageModalClassId, manageSearchKeyword.trim());
+        load();
+      })
+      .catch((e) => alert(e?.message || "移除失败"))
+      .finally(() => setRemovingStudentId(null));
   };
 
   return (
@@ -195,8 +246,11 @@ export default function TeacherClasses() {
                     <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => openEdit(c)}>
                       编辑
                     </button>
-                    <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => openStudentsModal(c.id)}>
-                      学生管理
+                    <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => openAddStudentsModal(c.id)}>
+                      添加学生
+                    </button>
+                    <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => openManageStudentsModal(c.id)}>
+                      管理学生
                     </button>
                     <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)" }} onClick={() => doDelete(c.id)}>
                       删除
@@ -250,61 +304,139 @@ export default function TeacherClasses() {
         </div>
       )}
 
-      {studentsModalClassId != null && (
+      {addModalClassId != null && (
         <div
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 110 }}
-          onClick={() => !assigning && setStudentsModalClassId(null)}
+          onClick={() => !assigning && setAddModalClassId(null)}
         >
-          <div className="card" style={{ width: "min(860px, 92vw)", maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
-            <h3 style={{ marginTop: 0 }}>班级学生管理</h3>
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-              <div>
-                <h4 style={{ marginTop: 0 }}>已在班级</h4>
-                <ul style={{ margin: 0, paddingLeft: 20 }}>
-                  {classStudents.map((s) => (
-                    <li key={s.id}>{s.student_no || "无学号"} · {s.display_name || s.username}</li>
-                  ))}
-                  {classStudents.length === 0 && <li style={{ color: "var(--text-muted)" }}>暂无学生</li>}
-                </ul>
-              </div>
-              <div>
-                <h4 style={{ marginTop: 0 }}>按学号/姓名添加学生</h4>
-                <div style={{ display: "flex", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
-                  <input
-                    type="text"
-                    value={searchStudentNo}
-                    onChange={(e) => setSearchStudentNo(e.target.value)}
-                    placeholder="学号"
-                    style={{ minWidth: 120 }}
-                  />
-                  <input
-                    type="text"
-                    value={searchName}
-                    onChange={(e) => setSearchName(e.target.value)}
-                    placeholder="姓名或用户名"
-                    style={{ minWidth: 160 }}
-                  />
-                  <button type="button" className="btn-secondary" onClick={searchStudents}>
-                    查询
+          <div className="card" style={{ width: "min(760px, 92vw)", maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>添加学生到班级</h3>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ position: "relative", minWidth: 280, maxWidth: 420 }}>
+                <input
+                  type="text"
+                  value={addSearchKeyword}
+                  onChange={(e) => setAddSearchKeyword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      searchAddStudents();
+                    }
+                  }}
+                  placeholder="按学号、姓名或用户名搜索"
+                  style={{ width: "100%", paddingRight: addSearchKeyword ? 28 : undefined }}
+                />
+                {addSearchKeyword && (
+                  <button
+                    type="button"
+                    onClick={resetAddStudentsSearch}
+                    aria-label="清空搜索"
+                    style={{
+                      position: "absolute",
+                      right: 6,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      border: 0,
+                      background: "transparent",
+                      cursor: "pointer",
+                      color: "var(--text-muted)",
+                      fontSize: 16,
+                      lineHeight: 1,
+                      padding: 2,
+                    }}
+                  >
+                    ×
                   </button>
-                </div>
-                <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 260, overflow: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
-                  {candidateStudents.map((s) => (
-                    <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
-                      <input type="checkbox" checked={selectedStudentIds.includes(s.id)} onChange={() => toggleCandidate(s.id)} />
-                      <span>{s.student_no || "无学号"} · {s.display_name || s.username}</span>
-                    </label>
-                  ))}
-                  {candidateStudents.length === 0 && <span style={{ color: "var(--text-muted)" }}>输入条件后点击查询</span>}
-                </div>
+                )}
               </div>
             </div>
+            <div style={{ display: "flex", flexDirection: "column", gap: 6, maxHeight: 340, overflow: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 10 }}>
+              {candidateStudents.map((s) => (
+                <label key={s.id} style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                  <input type="checkbox" checked={selectedStudentIds.includes(s.id)} onChange={() => toggleCandidate(s.id)} />
+                  <span>{s.student_no || "无学号"} · {s.display_name || s.username}</span>
+                </label>
+              ))}
+              {candidateStudents.length === 0 && <span style={{ color: "var(--text-muted)" }}>无匹配学生</span>}
+            </div>
             <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end", gap: 8 }}>
-              <button type="button" className="btn-ghost" onClick={() => setStudentsModalClassId(null)} disabled={assigning}>
+              <button type="button" className="btn-ghost" onClick={() => setAddModalClassId(null)} disabled={assigning}>
                 关闭
               </button>
               <button type="button" className="btn-primary" onClick={assignStudents} disabled={assigning || selectedStudentIds.length === 0}>
                 {assigning ? "添加中…" : "添加到班级"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {manageModalClassId != null && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 110 }}
+          onClick={() => setManageModalClassId(null)}
+        >
+          <div className="card" style={{ width: "min(760px, 92vw)", maxHeight: "80vh", overflow: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0 }}>管理班级学生</h3>
+            <div style={{ marginBottom: 12 }}>
+              <div style={{ position: "relative", minWidth: 280, maxWidth: 420 }}>
+                <input
+                  type="text"
+                  value={manageSearchKeyword}
+                  onChange={(e) => setManageSearchKeyword(e.target.value)}
+                  onKeyDown={(e) => {
+                    if (e.key === "Enter") {
+                      e.preventDefault();
+                      searchManageStudents();
+                    }
+                  }}
+                  placeholder="按学号、姓名或用户名搜索"
+                  style={{ width: "100%", paddingRight: manageSearchKeyword ? 28 : undefined }}
+                />
+                {manageSearchKeyword && (
+                  <button
+                    type="button"
+                    onClick={resetManageStudentsSearch}
+                    aria-label="清空搜索"
+                    style={{
+                      position: "absolute",
+                      right: 6,
+                      top: "50%",
+                      transform: "translateY(-50%)",
+                      border: 0,
+                      background: "transparent",
+                      cursor: "pointer",
+                      color: "var(--text-muted)",
+                      fontSize: 16,
+                      lineHeight: 1,
+                      padding: 2,
+                    }}
+                  >
+                    ×
+                  </button>
+                )}
+              </div>
+            </div>
+            <ul style={{ margin: 0, paddingLeft: 20 }}>
+              {classStudents.map((s) => (
+                <li key={s.id} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", gap: 8 }}>
+                  <span>{s.student_no || "无学号"} · {s.display_name || s.username}</span>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    onClick={() => removeStudent(s.id)}
+                    disabled={removingStudentId === s.id}
+                    style={{ color: "var(--danger, #c00)", minHeight: 28, padding: "4px 8px" }}
+                  >
+                    {removingStudentId === s.id ? "移除中…" : "移除"}
+                  </button>
+                </li>
+              ))}
+              {classStudents.length === 0 && <li style={{ color: "var(--text-muted)" }}>无匹配学生</li>}
+            </ul>
+            <div style={{ marginTop: 16, display: "flex", justifyContent: "flex-end" }}>
+              <button type="button" className="btn-ghost" onClick={() => setManageModalClassId(null)}>
+                关闭
               </button>
             </div>
           </div>

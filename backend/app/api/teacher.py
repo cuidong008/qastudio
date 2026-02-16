@@ -546,16 +546,28 @@ async def delete_teacher_class(
 @router.get("/classes/{class_id}/students", response_model=list[TeacherStudentOut])
 async def list_teacher_class_students(
     class_id: int,
+    q: str | None = Query(None),
+    student_no: str | None = Query(None),
+    name: str | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
     await _require_owned_class(db, user.id, class_id)
-    r = await db.execute(
+    qry = (
         select(User)
         .join(StudentClassMembership, StudentClassMembership.student_id == User.id)
         .where(User.role == UserRole.student.value, StudentClassMembership.class_id == class_id)
         .order_by(User.id)
     )
+    if q and q.strip():
+        keyword = f"%{q.strip()}%"
+        qry = qry.where((User.username.ilike(keyword)) | (User.display_name.ilike(keyword)) | (User.student_no.ilike(keyword)))
+    if student_no and student_no.strip():
+        qry = qry.where(User.student_no.ilike(f"%{student_no.strip()}%"))
+    if name and name.strip():
+        keyword = f"%{name.strip()}%"
+        qry = qry.where((User.display_name.ilike(keyword)) | (User.username.ilike(keyword)))
+    r = await db.execute(qry)
     return [TeacherStudentOut(id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name) for s in r.scalars().all()]
 
 
@@ -598,6 +610,28 @@ async def assign_students_to_teacher_class(
     return {"ok": True, "assigned": assigned}
 
 
+@router.delete("/classes/{class_id}/students/{student_id}")
+async def remove_student_from_teacher_class(
+    class_id: int,
+    student_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_class(db, user.id, class_id)
+    r = await db.execute(
+        select(StudentClassMembership).where(
+            StudentClassMembership.class_id == class_id,
+            StudentClassMembership.student_id == student_id,
+        )
+    )
+    m = r.scalar_one_or_none()
+    if not m:
+        raise HTTPException(status_code=404, detail="该学生不在班级中")
+    await db.delete(m)
+    await db.commit()
+    return {"ok": True}
+
+
 @router.get("/students", response_model=list[TeacherStudentOut])
 async def list_students_for_teacher(
     q: str | None = Query(None),
@@ -607,9 +641,9 @@ async def list_students_for_teacher(
     user: User = Depends(require_teacher),
 ):
     qry = select(User).where(User.role == UserRole.student.value).order_by(User.id)
-    if q:
+    if q and q.strip():
         keyword = f"%{q.strip()}%"
-        qry = qry.where((User.username.like(keyword)) | (User.display_name.like(keyword)))
+        qry = qry.where((User.username.ilike(keyword)) | (User.display_name.ilike(keyword)) | (User.student_no.ilike(keyword)))
     if student_no and student_no.strip():
         qry = qry.where(User.student_no.ilike(f"%{student_no.strip()}%"))
     if name and name.strip():
