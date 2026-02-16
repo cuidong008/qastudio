@@ -16,6 +16,7 @@ export default function AdminCourses() {
   const [chapters, setChapters] = useState<ChapterItem[]>([]);
   const [chapterForm, setChapterForm] = useState({ title: "", order_index: 0, syllabus_ref: "" });
   const [reindexingId, setReindexingId] = useState<number | null>(null);
+  const [clearingId, setClearingId] = useState<number | null>(null);
 
   const load = () => {
     setLoading(true);
@@ -97,6 +98,16 @@ export default function AdminCourses() {
       .finally(() => setReindexingId(null));
   };
 
+  const doClearKnowledge = (courseId: number, courseName: string) => {
+    if (!confirm(`确定清空「${courseName}」知识库？将删除该课程下全部章节文档、知识点、PPT 解析结果。`)) return;
+    setClearingId(courseId);
+    api.admin.courses
+      .clearKnowledge(courseId)
+      .then((r) => alert(`清理完成：文档 ${r.stats.knowledge_documents}、知识点 ${r.stats.knowledge_points}、PPT ${r.stats.ppt_files}、PPT页 ${r.stats.ppt_slides}、文件 ${r.stats.deleted_files}；索引剩余 ${r.chunks_indexed} 个切片。`))
+      .catch((e) => alert(e?.message || "一键清理失败"))
+      .finally(() => setClearingId(null));
+  };
+
   return (
     <div>
       <h1 style={{ marginBottom: 8, fontSize: 24, fontWeight: 600 }}>课程管理</h1>
@@ -129,8 +140,11 @@ export default function AdminCourses() {
                       <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => setExpandCourseId(expandCourseId === c.id ? null : c.id)}>
                         {expandCourseId === c.id ? "收起章节" : "章节"}
                       </button>
-                      <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => doReindex(c.id, c.name)} disabled={reindexingId !== null}>
+                      <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => doReindex(c.id, c.name)} disabled={reindexingId !== null || clearingId !== null}>
                         {reindexingId === c.id ? "索引中…" : "重建索引"}
+                      </button>
+                      <button type="button" className="btn-ghost" style={{ marginRight: 8, color: "var(--danger, #c00)" }} onClick={() => doClearKnowledge(c.id, c.name)} disabled={reindexingId !== null || clearingId !== null}>
+                        {clearingId === c.id ? "清理中…" : "一键清理"}
                       </button>
                       <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)" }} onClick={() => doDelete(c.id)}>删除</button>
                     </td>

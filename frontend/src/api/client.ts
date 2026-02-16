@@ -16,6 +16,7 @@ export type RagProvidersResponse = {
   default_embedding: string;
   default_vlm: string;
   default_rerank: string;
+  default_pdf_parser: string;
   provider_types: { id: string; name: string; need_base_url: boolean }[];
   llm_models_by_type: Record<string, string[]>;
   embedding_models_by_type: Record<string, string[]>;
@@ -30,6 +31,7 @@ export type RagProvidersUpdateBody = {
   default_embedding: string;
   default_vlm: string;
   default_rerank: string;
+  default_pdf_parser: string;
 };
 
 /** 后管台 RAG 配置（API Key 等敏感项可能为 ***） */
@@ -80,6 +82,28 @@ export async function request<T>(
     ...rest,
     headers,
     body: body !== undefined ? JSON.stringify(body) : rest.body,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || String(err));
+  }
+  return res.json();
+}
+
+export async function requestForm<T>(
+  path: string,
+  form: FormData,
+  options: RequestInit = {}
+): Promise<T> {
+  const headers: HeadersInit = {
+    ...(options.headers as Record<string, string>),
+  };
+  const token = getToken();
+  if (token) (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+    body: form,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
@@ -164,6 +188,11 @@ export const api = {
       delete: (id: number) => request<{ ok: boolean }>(`/teacher/courses/${id}`, { method: "DELETE" }),
       reindex: (courseId: number) =>
         request<{ ok: boolean; chunks_indexed: number }>(`/teacher/courses/${courseId}/reindex`, { method: "POST" }),
+      clearKnowledge: (courseId: number) =>
+        request<{ ok: boolean; stats: { knowledge_documents: number; knowledge_points: number; ppt_files: number; ppt_slides: number; deleted_files: number }; chunks_indexed: number }>(
+          `/teacher/courses/${courseId}/clear-knowledge`,
+          { method: "POST" }
+        ),
       chapters: (courseId: number) =>
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }[]>(`/teacher/courses/${courseId}/chapters`),
       createChapter: (courseId: number, body: { title: string; order_index?: number; syllabus_ref?: string }) =>
@@ -171,6 +200,24 @@ export const api = {
       updateChapter: (chapterId: number, body: { title?: string; order_index?: number; syllabus_ref?: string }) =>
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/chapters/${chapterId}`, { method: "PUT", body }),
       deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/teacher/chapters/${chapterId}`, { method: "DELETE" }),
+      chapterDocuments: (chapterId: number) =>
+        request<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }[]>(
+          `/teacher/chapters/${chapterId}/documents`
+        ),
+      uploadChapterDocument: (chapterId: number, file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return requestForm<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }>(
+          `/teacher/chapters/${chapterId}/documents/upload`,
+          form,
+          { method: "POST" }
+        );
+      },
+      documentDetail: (docId: number) =>
+        request<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null; content_preview: string; chunks: { index: number; text: string }[] }>(
+          `/teacher/documents/${docId}`
+        ),
+      documentFileUrl: (docId: number) => `${API_BASE}/teacher/documents/${docId}/file`,
     },
     classes: {
       list: () =>
@@ -257,6 +304,11 @@ export const api = {
       deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/admin/chapters/${chapterId}`, { method: "DELETE" }),
       reindex: (courseId: number) =>
         request<{ ok: boolean; chunks_indexed: number }>(`/admin/courses/${courseId}/reindex`, { method: "POST" }),
+      clearKnowledge: (courseId: number) =>
+        request<{ ok: boolean; stats: { knowledge_documents: number; knowledge_points: number; ppt_files: number; ppt_slides: number; deleted_files: number }; chunks_indexed: number }>(
+          `/admin/courses/${courseId}/clear-knowledge`,
+          { method: "POST" }
+        ),
     },
     rag: {
       status: () =>

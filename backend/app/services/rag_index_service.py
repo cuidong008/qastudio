@@ -31,7 +31,8 @@ async def build_index_for_course(db: AsyncSession, course_id: int) -> int:
     for d in doc_result.scalars().all():
         if not d.content and not d.title:
             continue
-        text = f"{d.title or ''}\n\n{d.content or ''}".strip()
+        # 与 RAGFlow 一致：正文作为分块主体，标题放 metadata，避免每个 chunk 重复文件名。
+        text = (d.content or d.title or "").strip()
         if not text:
             continue
         documents.append(
@@ -50,7 +51,7 @@ async def build_index_for_course(db: AsyncSession, course_id: int) -> int:
         select(KnowledgePoint).where(KnowledgePoint.chapter_id.in_(chapter_ids)).order_by(KnowledgePoint.order_index)
     )
     for p in kp_result.scalars().all():
-        text = f"{p.title or ''}\n\n{p.content or ''}".strip()
+        text = (p.content or p.title or "").strip()
         if not text:
             continue
         documents.append(

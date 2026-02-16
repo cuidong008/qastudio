@@ -1,4 +1,6 @@
 """后管台 API：用户、班级、课程、开课管理（仅 admin）"""
+import logging
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select
@@ -7,9 +9,12 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..db.models import User, UserRole, Class, Course, Teaching, Chapter
 from ..api.auth import require_admin
+from ..services.chapter_cleanup_service import cleanup_chapter_related_data
+from ..services.course_knowledge_service import clear_course_knowledge
 import bcrypt
 
 router = APIRouter(prefix="/admin", tags=["admin"])
+logger = logging.getLogger(__name__)
 
 
 # ---------- RAG 配置（Web 界面配置，存库优先于 .env）----------
@@ -203,6 +208,7 @@ class RAGProvidersGetOut(BaseModel):
     default_embedding: str
     default_vlm: str
     default_rerank: str
+    default_pdf_parser: str
     provider_types: list[dict]
     llm_models_by_type: dict
     embedding_models_by_type: dict
@@ -224,12 +230,20 @@ class RAGProvidersPutIn(BaseModel):
     default_embedding: str = ""
     default_vlm: str = ""
     default_rerank: str = ""
+    default_pdf_parser: str = ""
 
 
 @router.get("/rag/providers", response_model=RAGProvidersGetOut)
 async def get_rag_providers(user: User = Depends(require_admin)):
     """获取模型提供商列表与默认模型选择（用于 RAG 配置页「模型提供商」）"""
-    from ..rag.config_store import get_providers_list, get_default_llm, get_default_embedding, get_default_vlm, get_default_rerank
+    from ..rag.config_store import (
+        get_providers_list,
+        get_default_llm,
+        get_default_embedding,
+        get_default_vlm,
+        get_default_rerank,
+        get_default_pdf_parser,
+    )
     providers = get_providers_list()
     return RAGProvidersGetOut(
         providers=[RAGProviderOut(id=p["id"], type=p["type"], name=p["name"], base_url=p.get("base_url", ""), api_key=p.get("api_key", "")) for p in providers],
@@ -237,6 +251,7 @@ async def get_rag_providers(user: User = Depends(require_admin)):
         default_embedding=get_default_embedding(),
         default_vlm=get_default_vlm(),
         default_rerank=get_default_rerank(),
+        default_pdf_parser=get_default_pdf_parser(),
         provider_types=RAG_PROVIDER_TYPES,
         llm_models_by_type=RAG_LLM_MODELS_BY_TYPE,
         embedding_models_by_type=RAG_EMBEDDING_MODELS_BY_TYPE,
@@ -251,15 +266,22 @@ async def put_rag_providers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    """保存模型提供商与默认 LLM/Embedding/VLM/Rerank 选择"""
+    """保存模型提供商与默认 LLM/Embedding/VLM/Rerank/PDF 解析器 选择"""
     from ..rag.config_store import save_providers_and_defaults
     providers = [{"id": p.id, "type": p.type, "name": p.name, "base_url": p.base_url or "", "api_key": p.api_key or ""} for p in body.providers]
     await save_providers_and_defaults(
         db, providers,
         body.default_llm, body.default_embedding,
-        body.default_vlm, body.default_rerank,
+        body.default_vlm, body.default_rerank, body.default_pdf_parser,
     )
-    from ..rag.config_store import get_providers_list, get_default_llm, get_default_embedding, get_default_vlm, get_default_rerank
+    from ..rag.config_store import (
+        get_providers_list,
+        get_default_llm,
+        get_default_embedding,
+        get_default_vlm,
+        get_default_rerank,
+        get_default_pdf_parser,
+    )
     providers_out = get_providers_list()
     return RAGProvidersGetOut(
         providers=[RAGProviderOut(id=p["id"], type=p["type"], name=p["name"], base_url=p.get("base_url", ""), api_key=p.get("api_key", "")) for p in providers_out],
@@ -267,6 +289,7 @@ async def put_rag_providers(
         default_embedding=get_default_embedding(),
         default_vlm=get_default_vlm(),
         default_rerank=get_default_rerank(),
+        default_pdf_parser=get_default_pdf_parser(),
         provider_types=RAG_PROVIDER_TYPES,
         llm_models_by_type=RAG_LLM_MODELS_BY_TYPE,
         embedding_models_by_type=RAG_EMBEDDING_MODELS_BY_TYPE,
@@ -642,6 +665,22 @@ async def reindex_course(
     return {"ok": True, "chunks_indexed": count}
 
 
+@router.post("/courses/{course_id}/clear-knowledge")
+async def clear_course_knowledge_endpoint(
+    course_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    r = await db.execute(select(Course).where(Course.id == course_id))
+    if not r.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="课程不存在")
+    stats = await clear_course_knowledge(db, course_id)
+    await db.commit()
+    from ..services.rag_index_service import build_index_for_course
+    chunks = await build_index_for_course(db, course_id)
+    return {"ok": True, "stats": stats, "chunks_indexed": chunks}
+
+
 # ---------- 章节（按课程） ----------
 class ChapterOut(BaseModel):
     id: int
@@ -729,8 +768,16 @@ async def delete_chapter(
     ch = r.scalar_one_or_none()
     if not ch:
         raise HTTPException(status_code=404, detail="章节不存在")
+    course_id = ch.course_id
+    await cleanup_chapter_related_data(db, ch.id)
     await db.delete(ch)
     await db.commit()
+    if course_id:
+        try:
+            from ..services.rag_index_service import build_index_for_course
+            await build_index_for_course(db, course_id)
+        except Exception as e:
+            logger.warning("admin_delete_chapter_reindex_failed chapter_id=%s course_id=%s err=%s", ch.id, course_id, str(e))
     return {"ok": True}
 
 

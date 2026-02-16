@@ -1,12 +1,24 @@
 """教师端：教学内容配置、课程/班级管理、学情数据监控与导出"""
-from fastapi import APIRouter, Depends, Query, HTTPException
-from fastapi.responses import StreamingResponse
+import base64
+import csv
+import io
+import json
+import logging
+import os
+import re
+import subprocess
+import tempfile
+import time
+from pathlib import Path
+
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
+from fastapi.responses import StreamingResponse, FileResponse
+from openai import OpenAI
 from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
-import io
-import csv
 
+from ..config import settings
 from ..db import get_db
 from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
@@ -15,8 +27,11 @@ from ..db.models import (
     AnswerRecord, QuestionAsked, ChapterConfig,
 )
 from ..api.auth import require_teacher
+from ..services.chapter_cleanup_service import cleanup_chapter_related_data
+from ..services.course_knowledge_service import clear_course_knowledge
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
+logger = logging.getLogger(__name__)
 
 
 class ConfigChapterIn(BaseModel):
@@ -155,6 +170,30 @@ class TeacherChapterUpdateIn(BaseModel):
     syllabus_ref: str | None = None
 
 
+class TeacherDocumentChunkOut(BaseModel):
+    index: int
+    text: str
+
+
+class TeacherKnowledgeDocumentOut(BaseModel):
+    id: int
+    chapter_id: int | None
+    source_type: str
+    title: str
+    page_ref: str | None
+    file_name: str | None
+    file_size: int | None
+    parse_status: str | None
+    parse_error: str | None
+    chunk_count: int | None
+    created_at: str | None
+
+
+class TeacherKnowledgeDocumentDetailOut(TeacherKnowledgeDocumentOut):
+    content_preview: str
+    chunks: list[TeacherDocumentChunkOut]
+
+
 class TeacherClassOut(BaseModel):
     id: int
     name: str
@@ -205,6 +244,424 @@ async def _require_owned_class(db: AsyncSession, teacher_id: int, class_id: int)
     if not c:
         raise HTTPException(status_code=404, detail="班级不存在或无权限")
     return c
+
+
+async def _require_owned_chapter(db: AsyncSession, teacher_id: int, chapter_id: int) -> tuple[Chapter, Course]:
+    r = await db.execute(
+        select(Chapter, Course)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(Chapter.id == chapter_id, Course.owner_teacher_id == teacher_id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="章节不存在或无权限")
+    return row[0], row[1]
+
+
+async def _require_owned_document(db: AsyncSession, teacher_id: int, doc_id: int) -> tuple[KnowledgeDocument, Chapter, Course]:
+    r = await db.execute(
+        select(KnowledgeDocument, Chapter, Course)
+        .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(KnowledgeDocument.id == doc_id, Course.owner_teacher_id == teacher_id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="文档不存在或无权限")
+    return row[0], row[1], row[2]
+
+
+def _safe_pdf_filename(name: str) -> str:
+    base, ext = os.path.splitext(name)
+    safe = re.sub(r"[^\w\-.]", "_", base)[:96]
+    final_ext = ext.lower() if ext.lower() == ".pdf" else ".pdf"
+    return (safe or "document") + final_ext
+
+
+def _pdf_extract_text(content: bytes) -> tuple[str, int]:
+    try:
+        from pypdf import PdfReader
+    except ModuleNotFoundError as e:
+        raise HTTPException(status_code=500, detail="缺少依赖 pypdf，请先安装后重试") from e
+    try:
+        reader = PdfReader(io.BytesIO(content))
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"PDF 解析失败: {str(e)}")
+    pages = []
+    for i, page in enumerate(reader.pages, start=1):
+        text = (page.extract_text() or "").strip()
+        if text:
+            pages.append(f"[第{i}页]\n{text}")
+    return "\n\n".join(pages).strip(), len(reader.pages)
+
+
+def _looks_like_useful_text(text: str, prefer_chinese: bool = False) -> bool:
+    if not text:
+        return False
+    stripped = text.strip()
+    if len(stripped) < 20:
+        return False
+    # 至少有一定数量的中英文数字字符，避免只有 markdown 框架或图片链接
+    visible_chars = re.findall(r"[\u4e00-\u9fffA-Za-z0-9]", stripped)
+    if len(visible_chars) < 15:
+        return False
+    if prefer_chinese and _cjk_char_count(stripped) < 20:
+        return False
+    if prefer_chinese:
+        cjk = _cjk_char_count(stripped)
+        latin = len(re.findall(r"[A-Za-z]", stripped))
+        # 中文场景中，若英文字母显著多于中文，通常是 OCR 乱码
+        if cjk * 3 < latin:
+            return False
+    return True
+
+
+def _cjk_char_count(text: str) -> int:
+    if not text:
+        return 0
+    return len(re.findall(r"[\u4e00-\u9fff]", text))
+
+
+def _list_tesseract_langs() -> set[str]:
+    try:
+        proc = subprocess.run(["tesseract", "--list-langs"], capture_output=True, text=True, timeout=10)
+        if proc.returncode != 0:
+            return set()
+        langs = set()
+        for line in (proc.stdout or "").splitlines():
+            s = line.strip()
+            if not s or s.lower().startswith("list of available languages"):
+                continue
+            langs.add(s)
+        return langs
+    except Exception:
+        return set()
+
+
+def _pdf_extract_text_with_tesseract(content: bytes, prefer_chinese: bool = False) -> tuple[str, int | None]:
+    try:
+        import pypdfium2 as pdfium
+    except ModuleNotFoundError as e:
+        raise RuntimeError("缺少 pypdfium2，无法启用 tesseract OCR 兜底") from e
+    langs = _list_tesseract_langs()
+    has_chinese_lang = "chi_sim" in langs or "chi_tra" in langs
+    if "chi_sim" in langs:
+        lang = "chi_sim+eng"
+    elif "chi_tra" in langs:
+        lang = "chi_tra+eng"
+    elif "eng" in langs:
+        if prefer_chinese:
+            raise RuntimeError("tesseract 未安装中文语言包（chi_sim/chi_tra），无法可靠识别中文扫描件")
+        lang = "eng"
+    else:
+        raise RuntimeError("tesseract 缺少可用语言包，请安装 chi_sim 或 eng")
+
+    doc = pdfium.PdfDocument(io.BytesIO(content))
+    texts: list[str] = []
+    page_count = len(doc)
+    with tempfile.TemporaryDirectory(prefix="qastudio_tesseract_") as tmpdir:
+        root = Path(tmpdir)
+        for i in range(page_count):
+            page = doc[i]
+            pil_img = page.render(scale=2.2).to_pil()
+            img_path = root / f"p{i + 1}.png"
+            pil_img.save(img_path)
+            cmd = ["tesseract", str(img_path), "stdout", "-l", lang, "--psm", "6"]
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=90)
+            if proc.returncode != 0:
+                logger.warning("tesseract_page_failed page=%s rc=%s stderr=%s", i + 1, proc.returncode, (proc.stderr or "")[:240])
+                continue
+            txt = (proc.stdout or "").strip()
+            if txt:
+                texts.append(f"[第{i + 1}页]\n{txt}")
+    out = "\n\n".join(texts).strip()
+    if not out:
+        hint = ""
+        if not has_chinese_lang:
+            hint = "（当前 tesseract 未安装中文语言包，可安装 chi_sim）"
+        raise RuntimeError(f"tesseract OCR 未提取到文本{hint}")
+    if prefer_chinese and _cjk_char_count(out) < 20:
+        raise RuntimeError("OCR 结果几乎不含中文，可能未安装中文语言包或图片质量过低")
+    return out, page_count
+
+
+def _pdf_extract_text_with_mineru(content: bytes, file_name: str, method: str | None = None) -> tuple[str, int | None]:
+    safe_name = _safe_pdf_filename(file_name)
+    with tempfile.TemporaryDirectory(prefix="qastudio_mineru_") as tmpdir:
+        root = Path(tmpdir)
+        in_pdf = root / safe_name
+        out_dir = root / "out"
+        in_pdf.write_bytes(content)
+        out_dir.mkdir(parents=True, exist_ok=True)
+        cmd = [
+            "mineru",
+            "-p",
+            str(in_pdf),
+            "-o",
+            str(out_dir),
+            "-m",
+            (method or settings.mineru_method or "auto"),
+            "-l",
+            settings.mineru_lang or "ch",
+            "-b",
+            settings.mineru_backend or "pipeline",
+            "-d",
+            settings.mineru_device or "cpu",
+            "--vram",
+            str(settings.mineru_vram or 1),
+            "--source",
+            settings.mineru_source or "huggingface",
+        ]
+        logger.info(
+            "mineru_start file=%s size=%s method=%s lang=%s backend=%s device=%s source=%s",
+            file_name,
+            len(content),
+            (method or settings.mineru_method or "auto"),
+            settings.mineru_lang or "ch",
+            settings.mineru_backend or "pipeline",
+            settings.mineru_device or "cpu",
+            settings.mineru_source or "huggingface",
+        )
+        run_env = os.environ.copy()
+        run_env.setdefault("MINERU_DEVICE_MODE", settings.mineru_device or "cpu")
+        run_env.setdefault("MINERU_VIRTUAL_VRAM_SIZE", str(settings.mineru_vram or 1))
+        run_env.setdefault("MINERU_MODEL_SOURCE", settings.mineru_source or "huggingface")
+        try:
+            proc = subprocess.run(cmd, capture_output=True, text=True, timeout=600, env=run_env)
+        except FileNotFoundError as e:
+            logger.exception("mineru_not_found file=%s", file_name)
+            raise RuntimeError("mineru 命令不存在，请先安装 MinerU") from e
+        logger.info(
+            "mineru_done file=%s rc=%s stdout_len=%s stderr_len=%s",
+            file_name,
+            proc.returncode,
+            len(proc.stdout or ""),
+            len(proc.stderr or ""),
+        )
+        if proc.returncode != 0:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            logger.error("mineru_failed file=%s detail=%s", file_name, detail[:500])
+            if "No module named 'doclayout_yolo'" in detail or 'No module named "doclayout_yolo"' in detail:
+                detail = f"{detail}\nHint: pip install doclayout-yolo"
+            raise RuntimeError(detail or "MinerU 解析失败")
+        out_files = [str(p.relative_to(out_dir)) for p in out_dir.rglob("*") if p.is_file()]
+        logger.info("mineru_outputs file=%s count=%s files=%s", file_name, len(out_files), out_files[:30])
+        text_candidates: list[str] = []
+        for md in sorted(out_dir.rglob("*.md"), key=lambda p: p.stat().st_size, reverse=True):
+            try:
+                txt = md.read_text(encoding="utf-8", errors="ignore").strip()
+                if txt:
+                    text_candidates.append(txt)
+            except Exception:
+                pass
+        for txtf in sorted(out_dir.rglob("*.txt"), key=lambda p: p.stat().st_size, reverse=True):
+            try:
+                txt = txtf.read_text(encoding="utf-8", errors="ignore").strip()
+                if txt:
+                    text_candidates.append(txt)
+            except Exception:
+                pass
+        for js in sorted(out_dir.rglob("*.json"), key=lambda p: p.stat().st_size, reverse=True):
+            try:
+                obj = json.loads(js.read_text(encoding="utf-8", errors="ignore"))
+            except Exception:
+                continue
+            pieces: list[str] = []
+
+            def walk(v):
+                if isinstance(v, dict):
+                    for vv in v.values():
+                        walk(vv)
+                elif isinstance(v, list):
+                    for vv in v:
+                        walk(vv)
+                elif isinstance(v, str):
+                    s = v.strip()
+                    if s:
+                        pieces.append(s)
+
+            walk(obj)
+            if pieces:
+                text_candidates.append("\n".join(pieces))
+        best = max(text_candidates, key=len).strip() if text_candidates else ""
+        logger.info(
+            "mineru_text_candidates file=%s candidates=%s best_len=%s",
+            file_name,
+            len(text_candidates),
+            len(best),
+        )
+        if not best:
+            detail = (proc.stderr or proc.stdout or "").strip()
+            logger.error("mineru_empty_text file=%s detail=%s", file_name, detail[:500])
+            if "No module named 'doclayout_yolo'" in detail or 'No module named "doclayout_yolo"' in detail:
+                detail = f"{detail}\nHint: pip install doclayout-yolo"
+            raise RuntimeError(f"MinerU 解析后未提取到文本。{detail[:300]}")
+        page_count: int | None = None
+        try:
+            from pypdf import PdfReader
+            page_count = len(PdfReader(io.BytesIO(content)).pages)
+        except Exception:
+            page_count = None
+        return best, page_count
+
+
+def _resolve_pdf_parser_provider(default_pdf_parser: str) -> tuple[dict, str]:
+    if not default_pdf_parser or ":" not in default_pdf_parser:
+        raise RuntimeError("PDF 外部解析器配置无效（应为 provider_id:model）")
+    provider_id, model_name = default_pdf_parser.split(":", 1)
+    provider_id, model_name = provider_id.strip(), model_name.strip()
+    if not provider_id or not model_name:
+        raise RuntimeError("PDF 外部解析器配置无效（provider/model 为空）")
+
+    from ..rag.config_store import get_providers_list_raw
+    providers = get_providers_list_raw()
+    provider = next((p for p in providers if (p.get("id") or "").strip() == provider_id), None)
+    if not provider:
+        raise RuntimeError("PDF 外部解析器配置的提供商不存在，请重新选择")
+    return provider, model_name
+
+
+def _create_vlm_client_from_provider(provider: dict) -> OpenAI:
+    p_type = (provider.get("type") or "openai_compatible").strip().lower()
+    base_url = (provider.get("base_url") or "").strip()
+    api_key = (provider.get("api_key") or "").strip()
+
+    if p_type == "openai_compatible":
+        base = base_url or "https://api.openai.com/v1"
+        if not base.endswith("/v1"):
+            base = base.rstrip("/") + "/v1"
+        return OpenAI(base_url=base, api_key=api_key or "not-needed")
+    if p_type == "qianwen":
+        return OpenAI(base_url="https://dashscope.aliyuncs.com/compatible-mode/v1", api_key=api_key)
+    if p_type == "zhipu":
+        base = base_url or "https://open.bigmodel.cn/api/paas/v4"
+        return OpenAI(base_url=base, api_key=api_key)
+    raise RuntimeError(f"不支持的提供商类型: {p_type}")
+
+
+def _pdf_extract_text_with_external_vlm(
+    content: bytes,
+    file_name: str,
+    default_pdf_parser: str,
+    prefer_chinese: bool = False,
+) -> tuple[str, int]:
+    provider, model_name = _resolve_pdf_parser_provider(default_pdf_parser)
+    client = _create_vlm_client_from_provider(provider)
+    provider_name = provider.get("name") or provider.get("id") or "unknown"
+
+    try:
+        import pypdfium2 as pdfium
+    except ModuleNotFoundError as e:
+        raise RuntimeError("缺少 pypdfium2，无法使用外部模型解析 PDF") from e
+
+    doc = pdfium.PdfDocument(io.BytesIO(content))
+    page_count = len(doc)
+    if page_count <= 0:
+        raise RuntimeError("PDF 页数为 0")
+
+    logger.info(
+        "doc_parse_external_vlm_start file=%s provider=%s model=%s pages=%s",
+        file_name,
+        provider_name,
+        model_name,
+        page_count,
+    )
+
+    page_texts: list[str] = []
+    ocr_prompt = (
+        "你是 PDF OCR 提取器。请逐字提取图片中的正文文本与表格内容，"
+        "保留原有段落与换行，不要总结，不要解释，不要添加额外内容。"
+    )
+
+    for i in range(page_count):
+        page = doc[i]
+        image = page.render(scale=2.0).to_pil()
+        with io.BytesIO() as buf:
+            image.save(buf, format="PNG")
+            b64 = base64.b64encode(buf.getvalue()).decode("ascii")
+
+        # 不同 OpenAI 兼容网关对多模态消息格式要求不一致，做两种格式重试
+        message_variants = [
+            [
+                {"role": "system", "content": ocr_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请提取这一页的可见文字。"},
+                        {"type": "image_url", "image_url": {"url": f"data:image/png;base64,{b64}"}},
+                    ],
+                },
+            ],
+            [
+                {"role": "system", "content": ocr_prompt},
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "text", "text": "请提取这一页的可见文字。"},
+                        {"type": "image_url", "image_url": f"data:image/png;base64,{b64}"},
+                    ],
+                },
+            ],
+        ]
+
+        max_tokens = 1800
+        resp = None
+        last_err: Exception | None = None
+        for messages in message_variants:
+            try:
+                resp = client.chat.completions.create(
+                    model=model_name,
+                    messages=messages,
+                    temperature=0,
+                    max_tokens=max_tokens,
+                )
+                break
+            except Exception as e:
+                last_err = e
+                msg = str(e)
+                m = re.search(r"Range of max_tokens should be \[1,\s*(\d+)\]", msg)
+                if m:
+                    upper = max(1, int(m.group(1)))
+                    try:
+                        resp = client.chat.completions.create(
+                            model=model_name,
+                            messages=messages,
+                            temperature=0,
+                            max_tokens=min(max_tokens, upper),
+                        )
+                        break
+                    except Exception as e2:
+                        last_err = e2
+                        continue
+                # 仅参数类错误尝试下一个格式，其它错误直接抛出
+                if ("invalid_parameter" in msg.lower()) or ("Invalid parameter" in msg):
+                    continue
+                raise
+        if resp is None:
+            if last_err is not None:
+                raise RuntimeError(f"外部模型请求失败（参数不兼容或模型不支持图像）: {last_err}") from last_err
+            raise RuntimeError("外部模型请求失败（未知错误）")
+        text = ""
+        if resp.choices:
+            msg = resp.choices[0].message
+            content_obj = msg.content
+            if isinstance(content_obj, str):
+                text = content_obj.strip()
+            elif isinstance(content_obj, list):
+                parts = []
+                for part in content_obj:
+                    if isinstance(part, dict):
+                        t = (part.get("text") or "").strip()
+                        if t:
+                            parts.append(t)
+                text = "\n".join(parts).strip()
+        if text:
+            page_texts.append(f"[第{i + 1}页]\n{text}")
+
+    output = "\n\n".join(page_texts).strip()
+    if not _looks_like_useful_text(output, prefer_chinese=prefer_chinese):
+        raise RuntimeError("外部模型解析完成，但文本质量不足")
+    return output, page_count
 
 
 @router.get("/courses", response_model=list[TeacherCourseOut])
@@ -317,6 +774,20 @@ async def reindex_teacher_course(
     return {"ok": True, "chunks_indexed": count}
 
 
+@router.post("/courses/{course_id}/clear-knowledge")
+async def clear_teacher_course_knowledge(
+    course_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_course(db, user.id, course_id)
+    stats = await clear_course_knowledge(db, course_id)
+    await db.commit()
+    from ..services.rag_index_service import build_index_for_course
+    chunks = await build_index_for_course(db, course_id)
+    return {"ok": True, "stats": stats, "chunks_indexed": chunks}
+
+
 @router.get("/courses/{course_id}/chapters", response_model=list[TeacherChapterOut])
 async def list_teacher_course_chapters(
     course_id: int,
@@ -385,10 +856,310 @@ async def delete_teacher_chapter(
     row = r.first()
     if not row:
         raise HTTPException(status_code=404, detail="章节不存在或无权限")
-    ch = row[0]
+    ch, course = row[0], row[1]
+    await cleanup_chapter_related_data(db, ch.id)
     await db.delete(ch)
     await db.commit()
+    try:
+        from ..services.rag_index_service import build_index_for_course
+        await build_index_for_course(db, course.id)
+    except Exception as e:
+        logger.warning("delete_chapter_reindex_failed chapter_id=%s course_id=%s err=%s", ch.id, course.id, str(e))
     return {"ok": True}
+
+
+@router.get("/chapters/{chapter_id}/documents", response_model=list[TeacherKnowledgeDocumentOut])
+async def list_teacher_chapter_documents(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_chapter(db, user.id, chapter_id)
+    r = await db.execute(
+        select(KnowledgeDocument)
+        .where(KnowledgeDocument.chapter_id == chapter_id)
+        .order_by(KnowledgeDocument.id.desc())
+    )
+    rows = r.scalars().all()
+    return [
+        TeacherKnowledgeDocumentOut(
+            id=d.id,
+            chapter_id=d.chapter_id,
+            source_type=d.source_type,
+            title=d.title,
+            page_ref=d.page_ref,
+            file_name=d.file_name,
+            file_size=d.file_size,
+            parse_status=d.parse_status,
+            parse_error=d.parse_error,
+            chunk_count=d.chunk_count,
+            created_at=d.created_at.isoformat() if d.created_at else None,
+        )
+        for d in rows
+    ]
+
+
+@router.post("/chapters/{chapter_id}/documents/upload", response_model=TeacherKnowledgeDocumentOut)
+async def upload_teacher_chapter_document(
+    chapter_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, course = await _require_owned_chapter(db, user.id, chapter_id)
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="请上传 PDF 文件")
+    binary = await file.read()
+    if not binary:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    subdir = root / "knowledge"
+    subdir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_pdf_filename(file.filename)
+    saved_name = f"{chapter_id}_{int(time.time())}_{safe_name}"
+    abs_path = subdir / saved_name
+    abs_path.write_bytes(binary)
+    rel_path = f"knowledge/{saved_name}"
+
+    doc = KnowledgeDocument(
+        chapter_id=chapter.id,
+        source_type="pdf_upload",
+        title=file.filename,
+        content="",
+        file_name=file.filename,
+        file_path=rel_path,
+        file_size=len(binary),
+        parse_status="processing",
+    )
+    db.add(doc)
+    await db.flush()
+
+    try:
+        engine = (settings.pdf_parse_engine or "mineru_then_pypdf").strip().lower()
+        prefer_chinese = bool(re.search(r"[\u4e00-\u9fff]", file.filename or "")) or (settings.mineru_lang or "").startswith("ch")
+        default_pdf_parser = ""
+        try:
+            from ..rag.config_store import get_default_pdf_parser
+            default_pdf_parser = get_default_pdf_parser()
+        except Exception:
+            default_pdf_parser = ""
+        logger.info(
+            "doc_parse_start chapter_id=%s course_id=%s file=%s size=%s engine=%s default_pdf_parser=%s",
+            chapter.id,
+            course.id,
+            file.filename,
+            len(binary),
+            engine,
+            bool(default_pdf_parser),
+        )
+        extracted_text = ""
+        total_pages: int | None = None
+        mineru_errors: list[str] = []
+        if default_pdf_parser:
+            try:
+                extracted_text, total_pages = _pdf_extract_text_with_external_vlm(
+                    binary,
+                    file.filename,
+                    default_pdf_parser,
+                    prefer_chinese=prefer_chinese,
+                )
+                logger.info(
+                    "doc_parse_external_vlm_ok file=%s text_len=%s pages=%s",
+                    file.filename,
+                    len((extracted_text or "").strip()),
+                    total_pages,
+                )
+            except Exception as e:
+                logger.warning("doc_parse_external_vlm_failed file=%s err=%s", file.filename, str(e))
+                # 已显式配置外部 PDF 解析器时，按配置严格执行，不再回退本地 MinerU/PyPDF
+                raise HTTPException(status_code=400, detail=f"外部 PDF 解析失败: {str(e)}")
+        if engine == "mineru":
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                try:
+                    extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method=settings.mineru_method or "auto")
+                except Exception as e:
+                    logger.warning("doc_parse_mineru_auto_error file=%s err=%s", file.filename, str(e))
+                    mineru_errors.append(str(e))
+                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                    try:
+                        extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method="ocr")
+                    except Exception as e:
+                        logger.warning("doc_parse_mineru_ocr_error file=%s err=%s", file.filename, str(e))
+                        mineru_errors.append(str(e))
+        elif engine == "pypdf":
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                logger.info("doc_parse_use_pypdf file=%s", file.filename)
+                try:
+                    extracted_text, total_pages = _pdf_extract_text(binary)
+                except Exception as e:
+                    mineru_errors.append(str(e))
+                    extracted_text, total_pages = "", None
+                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                    try:
+                        logger.info("doc_parse_try_tesseract_after_pypdf file=%s", file.filename)
+                        extracted_text, total_pages = _pdf_extract_text_with_tesseract(binary, prefer_chinese=prefer_chinese)
+                    except Exception as e:
+                        logger.warning("doc_parse_tesseract_after_pypdf_failed file=%s err=%s", file.filename, str(e))
+                        mineru_errors.append(str(e))
+        else:
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                # 默认优先 MinerU（支持扫描版与中文 OCR），失败后降级 pypdf
+                try:
+                    extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method=settings.mineru_method or "auto")
+                    if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                        logger.info("doc_parse_mineru_auto_low_quality file=%s retry=ocr", file.filename)
+                        extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method="ocr")
+                except Exception as e:
+                    logger.warning("doc_parse_mineru_fallback_to_pypdf file=%s err=%s", file.filename, str(e))
+                    mineru_errors.append(str(e))
+                    try:
+                        extracted_text, total_pages = _pdf_extract_text(binary)
+                    except Exception as e2:
+                        mineru_errors.append(str(e2))
+                        extracted_text, total_pages = "", None
+                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                    try:
+                        fallback_text, fallback_pages = _pdf_extract_text(binary)
+                        if len(fallback_text.strip()) > len(extracted_text.strip()):
+                            logger.info(
+                                "doc_parse_use_pypdf_better_text file=%s mineru_len=%s pypdf_len=%s",
+                                file.filename,
+                                len(extracted_text.strip()),
+                                len(fallback_text.strip()),
+                            )
+                            extracted_text, total_pages = fallback_text, fallback_pages
+                    except Exception:
+                        pass
+                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                    try:
+                        logger.info("doc_parse_try_tesseract_after_mineru_pypdf file=%s", file.filename)
+                        extracted_text, total_pages = _pdf_extract_text_with_tesseract(binary, prefer_chinese=prefer_chinese)
+                    except Exception as e:
+                        logger.warning("doc_parse_tesseract_after_mineru_pypdf_failed file=%s err=%s", file.filename, str(e))
+                        mineru_errors.append(str(e))
+        logger.info(
+            "doc_parse_result file=%s text_len=%s pages=%s usable=%s",
+            file.filename,
+            len((extracted_text or "").strip()),
+            total_pages,
+            _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese),
+        )
+        if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+            hints = []
+            all_err = "\n".join(mineru_errors)
+            if "doclayout_yolo" in all_err:
+                hints.append("请在 backend 虚拟环境执行: pip install doclayout-yolo")
+            if "No module named 'torch'" in all_err or 'No module named "torch"' in all_err:
+                hints.append("请在 backend 虚拟环境执行: pip install torch")
+            if "tesseract 未安装中文语言包" in all_err or "几乎不含中文" in all_err:
+                hints.append("请安装中文 OCR 语言包: brew install tesseract-lang（并确认 tesseract --list-langs 有 chi_sim）")
+            hint_text = f"；建议: {'；'.join(hints)}" if hints else ""
+            extra = f"；最后错误: {mineru_errors[-1][:220]}{hint_text}" if mineru_errors else ""
+            logger.error("doc_parse_failed_no_text file=%s extra=%s", file.filename, extra)
+            raise HTTPException(status_code=400, detail=f"未提取到可用文本，请检查 PDF 或 OCR 配置{extra}")
+        doc.content = extracted_text
+        doc.page_ref = f"{total_pages}页" if total_pages else None
+        doc.parse_error = None
+        doc.parse_status = "done"
+
+        from ..rag import ChunkDocument
+        from ..rag.chunking import chunk_documents
+        preview_chunks = chunk_documents(
+            [ChunkDocument(text=(doc.content or "").strip(), course_id=course.id, chapter_id=chapter.id, title=doc.title, source_id=f"doc_{doc.id}")]
+        )
+        doc.chunk_count = len(preview_chunks)
+
+        from ..services.rag_index_service import build_index_for_course
+        try:
+            await build_index_for_course(db, course.id)
+        except Exception as idx_err:
+            # 文档解析成功时不阻断上传；索引异常作为提示返回，便于后续手动重建索引
+            logger.exception("doc_reindex_failed file=%s course_id=%s", file.filename, course.id)
+            msg = str(idx_err)
+            tip = f"索引失败: {msg[:240]}"
+            doc.parse_error = f"{doc.parse_error}；{tip}" if doc.parse_error else tip
+    except HTTPException as e:
+        doc.parse_status = "failed"
+        doc.parse_error = e.detail if isinstance(e.detail, str) else str(e.detail)
+        await db.commit()
+        raise
+    except Exception as e:
+        logger.exception("doc_parse_unexpected_error file=%s", file.filename)
+        doc.parse_status = "failed"
+        doc.parse_error = str(e)
+        await db.commit()
+        raise HTTPException(status_code=400, detail=f"文档处理失败: {str(e)}")
+
+    await db.commit()
+    await db.refresh(doc)
+    return TeacherKnowledgeDocumentOut(
+        id=doc.id,
+        chapter_id=doc.chapter_id,
+        source_type=doc.source_type,
+        title=doc.title,
+        page_ref=doc.page_ref,
+        file_name=doc.file_name,
+        file_size=doc.file_size,
+        parse_status=doc.parse_status,
+        parse_error=doc.parse_error,
+        chunk_count=doc.chunk_count,
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+    )
+
+
+@router.get("/documents/{doc_id}", response_model=TeacherKnowledgeDocumentDetailOut)
+async def get_teacher_document_detail(
+    doc_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    doc, chapter, course = await _require_owned_document(db, user.id, doc_id)
+    chunks_out: list[TeacherDocumentChunkOut] = []
+    if doc.content and doc.parse_status == "done":
+        from ..rag import ChunkDocument
+        from ..rag.chunking import chunk_documents
+        chunks = chunk_documents(
+            [ChunkDocument(text=(doc.content or "").strip(), course_id=course.id, chapter_id=chapter.id, title=doc.title, source_id=f"doc_{doc.id}")]
+        )
+        chunks_out = [TeacherDocumentChunkOut(index=i + 1, text=chunk[0]) for i, chunk in enumerate(chunks[:50])]
+    preview = (doc.content or "").strip()
+    if len(preview) > 4000:
+        preview = preview[:4000] + "\n\n..."
+    return TeacherKnowledgeDocumentDetailOut(
+        id=doc.id,
+        chapter_id=doc.chapter_id,
+        source_type=doc.source_type,
+        title=doc.title,
+        page_ref=doc.page_ref,
+        file_name=doc.file_name,
+        file_size=doc.file_size,
+        parse_status=doc.parse_status,
+        parse_error=doc.parse_error,
+        chunk_count=doc.chunk_count,
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+        content_preview=preview,
+        chunks=chunks_out,
+    )
+
+
+@router.get("/documents/{doc_id}/file")
+async def get_teacher_document_file(
+    doc_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    doc, _, _ = await _require_owned_document(db, user.id, doc_id)
+    if not doc.file_path:
+        raise HTTPException(status_code=404, detail="文档原文件不存在")
+    abs_path = Path(settings.upload_dir) / doc.file_path
+    if not abs_path.exists():
+        raise HTTPException(status_code=404, detail="文档文件不存在")
+    return FileResponse(
+        path=str(abs_path),
+        media_type="application/pdf",
+        filename=doc.file_name or abs_path.name,
+    )
 
 
 @router.get("/classes", response_model=list[TeacherClassOut])

@@ -12,6 +12,7 @@ export default function AdminRag() {
   const [defaultEmbedding, setDefaultEmbedding] = useState("");
   const [defaultVlm, setDefaultVlm] = useState("");
   const [defaultRerank, setDefaultRerank] = useState("");
+  const [defaultPdfParser, setDefaultPdfParser] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -34,6 +35,7 @@ export default function AdminRag() {
         setDefaultEmbedding(p.default_embedding || "");
         setDefaultVlm(p.default_vlm || "");
         setDefaultRerank(p.default_rerank || "");
+        setDefaultPdfParser(p.default_pdf_parser || "");
       })
       .catch((e) => setError(e?.message || "获取配置失败"))
       .finally(() => setLoading(false));
@@ -138,6 +140,7 @@ export default function AdminRag() {
         default_embedding: defaultEmbedding,
         default_vlm: defaultVlm,
         default_rerank: defaultRerank,
+        default_pdf_parser: defaultPdfParser,
       })
       .then(() =>
         api.admin.rag.updateConfig(configPayload)
@@ -189,6 +192,7 @@ export default function AdminRag() {
     setDefaultEmbedding((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultVlm((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultRerank((v) => (v.startsWith(id + ":") ? "" : v));
+    setDefaultPdfParser((v) => (v.startsWith(id + ":") ? "" : v));
   };
 
   const startEdit = (p: RagProvider) => {
@@ -359,7 +363,7 @@ export default function AdminRag() {
       <div className="card" style={{ maxWidth: 640, marginBottom: 24 }}>
         <h3 style={{ marginBottom: 12, fontSize: 16 }}>设置默认模型</h3>
         <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>
-          从已添加的提供商中选择默认使用的 LLM 与 Embedding；Embedding 也可选「程序自带」。
+          从已添加的提供商中选择默认使用的 LLM、Embedding、VLM、Rerank，以及 PDF 外部解析器。
         </p>
         <div style={sectionStyle}>
           <label style={labelStyle}>默认 LLM（大模型）</label>
@@ -409,6 +413,19 @@ export default function AdminRag() {
           >
             <option value="">暂不使用</option>
             {defaultRerankOptions.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <div style={sectionStyle}>
+          <label style={labelStyle}>默认 PDF 解析器（外部模型）</label>
+          <select
+            style={inputStyle}
+            value={defaultPdfParser}
+            onChange={(e) => setDefaultPdfParser(e.target.value)}
+          >
+            <option value="">不使用外部模型（沿用服务器 PDF_PARSE_ENGINE）</option>
+            {defaultVlmOptions.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
