@@ -6,7 +6,16 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
 from ..db import get_db
-from ..db.models import Chapter, KnowledgePoint, Course
+from ..db.models import (
+    Chapter,
+    KnowledgePoint,
+    Course,
+    Teaching,
+    User,
+    UserRole,
+    StudentClassMembership,
+)
+from ..api.auth import get_current_user
 
 router = APIRouter(prefix="/chapters", tags=["chapters"])
 
@@ -48,10 +57,40 @@ class CourseOut(BaseModel):
 
 
 @router.get("/courses", response_model=list[CourseOut])
-async def list_courses(db: AsyncSession = Depends(get_db)):
-    result = await db.execute(
-        select(Course).where(Course.is_active == True).order_by(Course.id)
-    )
+async def list_courses(
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+):
+    # 学生仅可见其所属班级已开课的课程；教师/管理员可见全部启用课程
+    if user and user.role == UserRole.student.value:
+        class_ids: set[int] = set()
+        if user.class_id is not None:
+            class_ids.add(user.class_id)
+        r_m = await db.execute(
+            select(StudentClassMembership.class_id).where(
+                StudentClassMembership.student_id == user.id
+            )
+        )
+        class_ids.update([row[0] for row in r_m.all()])
+        if not class_ids:
+            return []
+        r_t = await db.execute(
+            select(Teaching.course_id)
+            .where(Teaching.class_id.in_(list(class_ids)), Teaching.is_active == True)
+            .distinct()
+        )
+        course_ids = [row[0] for row in r_t.all()]
+        if not course_ids:
+            return []
+        result = await db.execute(
+            select(Course)
+            .where(Course.id.in_(course_ids), Course.is_active == True)
+            .order_by(Course.id)
+        )
+        rows = result.scalars().all()
+        return [CourseOut.model_validate(c) for c in rows]
+
+    result = await db.execute(select(Course).where(Course.is_active == True).order_by(Course.id))
     rows = result.scalars().all()
     return [CourseOut.model_validate(c) for c in rows]
 
