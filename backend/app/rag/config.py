@@ -35,6 +35,7 @@ class RAGSettings(BaseSettings):
     embedding_external_api_key: str = ""
     embedding_external_base_url: str = ""
     embedding_external_model: str = "text-embedding-3-small"
+    embedding_external_batch_size: int = 10
     # 千问 / 智谱 embedding 若用独立 endpoint 可在此配
     embedding_qianwen_api_key: str = ""
     embedding_zhipu_api_key: str = ""
@@ -61,7 +62,7 @@ def _coerce(value: str, field_name: str) -> str | int | float | bool:
     if value is None or value == "":
         return value
     # 根据字段名推断类型（与 RAGSettings 一致）
-    int_fields = {"embedding_dim", "top_k", "chunk_size", "chunk_overlap", "llm_max_tokens"}
+    int_fields = {"embedding_dim", "embedding_external_batch_size", "top_k", "chunk_size", "chunk_overlap", "llm_max_tokens"}
     float_fields = {"llm_temperature"}
     bool_fields = {"enabled"}
     if field_name in bool_fields:

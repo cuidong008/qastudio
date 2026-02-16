@@ -64,6 +64,23 @@ def _backfill_student_class_memberships(sync_conn):
         pass
 
 
+def _migrate_knowledge_documents_upload_fields(sync_conn):
+    """为已有 knowledge_documents 表添加文档上传与解析状态列（SQLite）"""
+    statements = [
+        "ALTER TABLE knowledge_documents ADD COLUMN file_name VARCHAR(256)",
+        "ALTER TABLE knowledge_documents ADD COLUMN file_path VARCHAR(512)",
+        "ALTER TABLE knowledge_documents ADD COLUMN file_size INTEGER",
+        "ALTER TABLE knowledge_documents ADD COLUMN parse_status VARCHAR(24)",
+        "ALTER TABLE knowledge_documents ADD COLUMN parse_error VARCHAR(512)",
+        "ALTER TABLE knowledge_documents ADD COLUMN chunk_count INTEGER",
+    ]
+    for sql in statements:
+        try:
+            sync_conn.execute(text(sql))
+        except Exception:
+            pass
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
@@ -84,3 +101,4 @@ async def init_db():
         await conn.run_sync(_migrate_class_course_owner)
         await conn.run_sync(_migrate_user_student_no)
         await conn.run_sync(_backfill_student_class_memberships)
+        await conn.run_sync(_migrate_knowledge_documents_upload_fields)

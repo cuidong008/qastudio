@@ -8,6 +8,11 @@ aiosqlite>=0.19.0
 python-jose[cryptography]>=3.3.0
 bcrypt>=4.0.0
 python-pptx>=0.6.21
+pypdf>=4.2.0
+# 扫描版 PDF OCR（可选，命令行: mineru）
+mineru>=2.7.6
+doclayout-yolo>=0.0.4
+socksio>=1.0.0
 # RAG 模块：向量库 + LLM 客户端
 chromadb>=0.4.0
 openai>=1.0.0

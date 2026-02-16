@@ -109,6 +109,12 @@ class KnowledgeDocument(Base):
     title = Column(String(256), nullable=False)
     content = Column(Text, nullable=False)
     page_ref = Column(String(64), nullable=True)  # PPT 页码等
+    file_name = Column(String(256), nullable=True)
+    file_path = Column(String(512), nullable=True)
+    file_size = Column(Integer, nullable=True)
+    parse_status = Column(String(24), nullable=True)  # processing | done | failed
+    parse_error = Column(String(512), nullable=True)
+    chunk_count = Column(Integer, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)  # 内容审核：复核通过后写入，先审后发
     created_at = Column(DateTime, default=datetime.utcnow)
 
