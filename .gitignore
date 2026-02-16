@@ -1,10 +1,13 @@
 # === Backend 临时/数据文件 ===
 backend/.env
+backend/.env.*
+!backend/.env.example
 backend/*.db
 backend/qastudio.db
 backend/uploads/
 backend/data/
 backend/rag_vector_store/
+backend/package-lock.json
 
 # === Python ===
 __pycache__/
@@ -34,7 +37,14 @@ build/
 .coverage
 htmlcov/
 .mypy_cache/
+*.tsbuildinfo
 
 # === 系统文件 ===
 .DS_Store
 Thumbs.db
+
+frontend/dist/
+frontend/node_modules/
+frontend/.env
+frontend/.env.*
+!frontend/.env.example
