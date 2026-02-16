@@ -758,6 +758,15 @@ class TeachingUpdateIn(BaseModel):
     is_active: bool | None = None
 
 
+class TeachingBatchCreateIn(BaseModel):
+    """一门课程批量开给多个班级（同一教师）"""
+    course_id: int
+    teacher_id: int
+    class_ids: list[int]
+    term: str | None = None
+    is_active: bool = True
+
+
 @router.get("/teachings", response_model=list[TeachingOut])
 async def list_teachings(
     course_id: int | None = Query(None),
@@ -843,6 +852,75 @@ async def create_teaching(
         term=t.term, is_active=t.is_active,
         course_name=c.name if c else None, class_name=cl.name if cl else None, teacher_name=(u.display_name or u.username) if u else None,
     )
+
+
+class TeachingBatchCreateOut(BaseModel):
+    created: list[TeachingOut]
+    skipped: list[dict]
+
+
+@router.post("/teachings/batch", response_model=TeachingBatchCreateOut)
+async def create_teachings_batch(
+    body: TeachingBatchCreateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    if not body.class_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个班级")
+    r = await db.execute(select(Course).where(Course.id == body.course_id))
+    if not r.scalar_one_or_none():
+        raise HTTPException(status_code=404, detail="课程不存在")
+    r = await db.execute(select(User).where(User.id == body.teacher_id, User.role == UserRole.teacher.value))
+    if not r.scalar_one_or_none():
+        raise HTTPException(status_code=400, detail="授课人须为教师角色")
+    created: list[TeachingOut] = []
+    skipped: list[dict] = []
+    term_val = body.term or ""
+    for class_id in body.class_ids:
+        r = await db.execute(select(Class).where(Class.id == class_id))
+        cl = r.scalar_one_or_none()
+        if not cl:
+            skipped.append({"class_id": class_id, "reason": "班级不存在"})
+            continue
+        r = await db.execute(
+            select(Teaching).where(
+                Teaching.course_id == body.course_id,
+                Teaching.class_id == class_id,
+                Teaching.term == term_val,
+            )
+        )
+        if r.scalar_one_or_none():
+            skipped.append({"class_id": class_id, "class_name": cl.name, "reason": "该课程、班级、学期已存在开课"})
+            continue
+        t = Teaching(
+            course_id=body.course_id,
+            class_id=class_id,
+            teacher_id=body.teacher_id,
+            term=body.term,
+            is_active=body.is_active,
+        )
+        db.add(t)
+        await db.flush()
+        await db.refresh(t)
+        r_c = await db.execute(select(Course).where(Course.id == t.course_id))
+        r_u = await db.execute(select(User).where(User.id == t.teacher_id))
+        c = r_c.scalar_one_or_none()
+        u = r_u.scalar_one_or_none()
+        created.append(
+            TeachingOut(
+                id=t.id,
+                course_id=t.course_id,
+                class_id=t.class_id,
+                teacher_id=t.teacher_id,
+                term=t.term,
+                is_active=t.is_active,
+                course_name=c.name if c else None,
+                class_name=cl.name,
+                teacher_name=(u.display_name or u.username) if u else None,
+            )
+        )
+    await db.commit()
+    return TeachingBatchCreateOut(created=created, skipped=skipped)
 
 
 @router.get("/teachings/{teaching_id}", response_model=TeachingOut)

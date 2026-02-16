@@ -226,6 +226,8 @@ export const api = {
       },
       create: (body: { course_id: number; class_id: number; teacher_id: number; term?: string; is_active?: boolean }) =>
         request<{ id: number; course_id: number; class_id: number; teacher_id: number; term: string | null; is_active: boolean; course_name: string | null; class_name: string | null; teacher_name: string | null }>("/admin/teachings", { method: "POST", body }),
+      createBatch: (body: { course_id: number; teacher_id: number; class_ids: number[]; term?: string; is_active?: boolean }) =>
+        request<{ created: { id: number; course_id: number; class_id: number; teacher_id: number; term: string | null; is_active: boolean; course_name: string | null; class_name: string | null; teacher_name: string | null }[]; skipped: { class_id: number; class_name?: string; reason: string }[] }>("/admin/teachings/batch", { method: "POST", body }),
       update: (id: number, body: { teacher_id?: number; term?: string; is_active?: boolean }) =>
         request<{ id: number; course_id: number; class_id: number; teacher_id: number; term: string | null; is_active: boolean; course_name: string | null; class_name: string | null; teacher_name: string | null }>(`/admin/teachings/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/admin/teachings/${id}`, { method: "DELETE" }),
