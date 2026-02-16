@@ -14,7 +14,7 @@ export default function Login() {
     setError("");
     try {
       const u = await login(username, password);
-      const target = u.role === "admin" ? "/admin" : u.role === "teacher" ? "/teacher" : "/student";
+      const target = u.role === "admin" ? "/admin" : u.role === "teacher" ? "/teacher" : "/student/inclass";
       navigate(target, { replace: true });
     } catch (err) {
       setError(err instanceof Error ? err.message : "登录失败");

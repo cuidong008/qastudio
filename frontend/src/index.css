@@ -180,6 +180,207 @@ button,
 .text-success { color: var(--success); }
 .text-error { color: var(--error); }
 
+/* ===== Student Chat Workspace ===== */
+.student-chat-shell {
+  min-height: calc(100vh - 73px);
+  display: flex;
+  background: var(--bg-base);
+}
+
+.student-chat-sidebar {
+  width: 280px;
+  border-right: 1px solid var(--border);
+  padding: 16px 12px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  background: var(--bg-surface);
+}
+
+.student-chat-new-btn {
+  width: 100%;
+}
+
+.student-chat-session-list {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  overflow-y: auto;
+}
+
+.student-chat-session-item {
+  width: 100%;
+  text-align: left;
+  background: transparent;
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+  padding: 10px 12px;
+  border-radius: var(--radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.student-chat-session-item:hover {
+  background: var(--bg-hover);
+}
+
+.student-chat-session-item.is-active {
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.student-chat-session-title {
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.student-chat-session-count {
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
+.student-chat-main {
+  flex: 1;
+  min-width: 0;
+  display: flex;
+  flex-direction: column;
+  padding: 16px 20px;
+}
+
+.student-chat-topbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 16px;
+}
+
+.student-chat-topbar-title {
+  font-size: 20px;
+  font-weight: 600;
+}
+
+.student-chat-course-picker {
+  display: inline-flex;
+  align-items: center;
+  gap: 10px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.student-chat-course-picker select {
+  min-width: 220px;
+}
+
+.student-chat-message-list {
+  flex: 1;
+  overflow-y: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-right: 6px;
+}
+
+.student-chat-empty {
+  margin: auto;
+  text-align: center;
+  max-width: 560px;
+}
+
+.student-chat-empty h2 {
+  margin: 0 0 8px;
+  font-size: 32px;
+}
+
+.student-chat-empty p {
+  margin: 0;
+  color: var(--text-muted);
+}
+
+.student-chat-message {
+  max-width: 760px;
+  border-radius: var(--radius-lg);
+  padding: 12px 14px;
+}
+
+.student-chat-message p {
+  margin: 0;
+  white-space: pre-wrap;
+}
+
+.student-chat-message.from-user {
+  margin-left: auto;
+  background: var(--accent-muted);
+  border: 1px solid rgba(99, 102, 241, 0.4);
+}
+
+.student-chat-message.from-assistant {
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+}
+
+.student-chat-message-meta {
+  margin-top: 8px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  color: var(--text-secondary);
+  font-size: 13px;
+}
+
+.student-chat-message-meta .btn-secondary {
+  min-height: 32px;
+  padding: 6px 10px;
+  font-size: 12px;
+}
+
+.student-chat-loading {
+  color: var(--text-muted);
+  font-size: 14px;
+}
+
+.student-chat-input-wrap {
+  margin-top: 12px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-xl);
+  background: var(--bg-surface);
+  padding: 12px;
+}
+
+.student-chat-input-row {
+  display: flex;
+  gap: 10px;
+}
+
+.student-chat-input-row input {
+  flex: 1;
+}
+
+.student-chat-menu-row {
+  margin-top: 10px;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.student-chat-menu-link {
+  display: inline-flex;
+  align-items: center;
+  padding: 6px 10px;
+  border-radius: var(--radius-md);
+  font-size: 13px;
+  color: var(--text-secondary) !important;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+}
+
+.student-chat-menu-link:hover {
+  color: var(--text-primary) !important;
+  border-color: var(--text-muted);
+}
+
 /* ===== Mobile ===== */
 @media (max-width: 640px) {
   main {
@@ -190,5 +391,38 @@ button,
   input[type="password"],
   select {
     min-height: 44px;
+  }
+
+  .student-chat-shell {
+    min-height: calc(100vh - 64px);
+    flex-direction: column;
+  }
+
+  .student-chat-sidebar {
+    width: 100%;
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+  }
+
+  .student-chat-main {
+    padding: 12px;
+  }
+
+  .student-chat-empty h2 {
+    font-size: 24px;
+  }
+
+  .student-chat-topbar {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .student-chat-course-picker select {
+    min-width: 0;
+    width: 100%;
+  }
+
+  .student-chat-input-row {
+    flex-direction: column;
   }
 }

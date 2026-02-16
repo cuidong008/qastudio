@@ -1,5 +1,5 @@
 import { ReactNode, useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { Link, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
 const nav = [
@@ -22,6 +22,7 @@ export default function Layout({
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
 
   const redirectTo =
     requireAuth && !user
@@ -29,7 +30,7 @@ export default function Layout({
       : requireAuth && user && user.role !== role
         ? user.role === "teacher"
           ? "/teacher"
-          : "/student"
+          : "/student/inclass"
         : null;
 
   useEffect(() => {
@@ -37,6 +38,11 @@ export default function Layout({
   }, [redirectTo, navigate]);
 
   if (redirectTo) return null;
+
+  const isStudent = role === "student";
+  const isStudentChatShell =
+    isStudent &&
+    (location.pathname === "/student" || location.pathname === "/student/inclass");
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
@@ -52,13 +58,15 @@ export default function Layout({
           gap: 12,
         }}
       >
-        <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          {nav.map(({ to, label }) => (
-            <Link key={to} to={to} className="nav-link">
-              {label}
-            </Link>
-          ))}
-        </nav>
+        {!isStudent && (
+          <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+            {nav.map(({ to, label }) => (
+              <Link key={to} to={to} className="nav-link">
+                {label}
+              </Link>
+            ))}
+          </nav>
+        )}
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
             {user?.display_name || user?.username}
@@ -79,9 +87,9 @@ export default function Layout({
       <main
         style={{
           flex: 1,
-          padding: 24,
-          maxWidth: 900,
-          margin: "0 auto",
+          padding: isStudentChatShell ? 0 : 24,
+          maxWidth: isStudentChatShell ? "none" : 900,
+          margin: isStudentChatShell ? 0 : "0 auto",
           width: "100%",
         }}
       >

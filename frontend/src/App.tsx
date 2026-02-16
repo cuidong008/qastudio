@@ -1,7 +1,6 @@
 import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./api/auth";
 import Layout from "./components/Layout";
-import StudentHome from "./pages/student/StudentHome";
 import Preview from "./pages/student/Preview";
 import InClass from "./pages/student/InClass";
 import Review from "./pages/student/Review";
@@ -42,7 +41,7 @@ function App() {
   return (
     <Routes>
       <Route path="/login" element={<Login />} />
-      <Route path="/student" element={<Layout role="student" requireAuth><StudentHome /></Layout>} />
+      <Route path="/student" element={<Navigate to="/student/inclass" replace />} />
       <Route path="/student/preview" element={<Layout role="student" requireAuth><Preview /></Layout>} />
       <Route path="/student/inclass" element={<Layout role="student" requireAuth><InClass /></Layout>} />
       <Route path="/student/review" element={<Layout role="student" requireAuth><Review /></Layout>} />
@@ -58,7 +57,7 @@ function App() {
         <Route path="rag" element={<AdminRag />} />
         <Route path="teachings" element={<AdminTeachings />} />
       </Route>
-      <Route path="/" element={<Navigate to={user?.role === "admin" ? "/admin" : user?.role === "teacher" ? "/teacher" : "/student"} replace />} />
+      <Route path="/" element={<Navigate to={user?.role === "admin" ? "/admin" : user?.role === "teacher" ? "/teacher" : "/student/inclass"} replace />} />
       <Route path="*" element={<Navigate to="/" replace />} />
     </Routes>
   );
