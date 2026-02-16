@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 
-export default function Feedback() {
+export default function Feedback({ inWorkspace = false, onGoQa }: { inWorkspace?: boolean; onGoQa?: () => void }) {
   const [content, setContent] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
@@ -82,7 +82,15 @@ export default function Feedback() {
       <div className="card" style={{ background: "var(--bg-muted)" }}>
         <h3 style={{ margin: "0 0 8px", fontSize: 15 }}>通过对话提交反馈</h3>
         <p style={{ color: "var(--text-muted)", margin: 0, fontSize: 14, lineHeight: 1.5 }}>
-          您也可以在「<Link to="/student/inclass">课中辅助</Link>」或课后答疑中直接向智能体说出您的意见或建议，系统会同时记录为反馈内容，便于教师与运营汇总改进。
+          您也可以在「
+          {inWorkspace ? (
+            <button type="button" className="btn-ghost" onClick={onGoQa} style={{ padding: "0 6px", minHeight: "auto" }}>
+              课中辅助
+            </button>
+          ) : (
+            <Link to="/student/inclass">课中辅助</Link>
+          )}
+          」或课后答疑中直接向智能体说出您的意见或建议，系统会同时记录为反馈内容，便于教师与运营汇总改进。
         </p>
       </div>
     </div>

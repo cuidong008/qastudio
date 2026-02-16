@@ -365,20 +365,40 @@ button,
   gap: 8px;
 }
 
-.student-chat-menu-link {
+.student-chat-menu-btn {
   display: inline-flex;
   align-items: center;
   padding: 6px 10px;
   border-radius: var(--radius-md);
   font-size: 13px;
-  color: var(--text-secondary) !important;
+  color: var(--text-secondary);
   background: var(--bg-elevated);
   border: 1px solid var(--border);
+  min-height: 32px;
 }
 
-.student-chat-menu-link:hover {
-  color: var(--text-primary) !important;
+.student-chat-menu-btn.is-active {
+  color: var(--text-primary);
+  border-color: var(--accent);
+  background: var(--accent-muted);
+}
+
+.student-chat-menu-btn:hover {
+  color: var(--text-primary);
   border-color: var(--text-muted);
+}
+
+.student-chat-tool-content {
+  max-width: 860px;
+}
+
+.student-chat-mode-hint {
+  color: var(--text-secondary);
+  font-size: 14px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 8px;
 }
 
 /* ===== Mobile ===== */

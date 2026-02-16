@@ -1,6 +1,9 @@
 import { useEffect, useMemo, useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../../api/client";
+import Preview from "./Preview";
+import Review from "./Review";
+import Exercises from "./Exercises";
+import Feedback from "./Feedback";
 
 type ChatMessage = {
   id: number;
@@ -19,12 +22,13 @@ type ChatSession = {
 };
 
 const studentMenus = [
-  { to: "/student/preview", label: "课前预习" },
-  { to: "/student/inclass", label: "课中辅助" },
-  { to: "/student/review", label: "课后复习" },
-  { to: "/student/exercises", label: "习题训练" },
-  { to: "/student/feedback", label: "反馈" },
-];
+  { key: "qa", label: "问答模式" },
+  { key: "preview", label: "课前预习" },
+  { key: "review", label: "课后复习" },
+  { key: "exercises", label: "习题训练" },
+  { key: "feedback", label: "反馈" },
+] as const;
+type WorkspaceMode = (typeof studentMenus)[number]["key"];
 
 function makeSession(id: number): ChatSession {
   return {
@@ -41,6 +45,7 @@ export default function InClass() {
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
   const [feedbackSendingId, setFeedbackSendingId] = useState<number | null>(null);
   const [submittedQaIds, setSubmittedQaIds] = useState<Set<number>>(new Set());
+  const [mode, setMode] = useState<WorkspaceMode>("qa");
   const [sessionSeq, setSessionSeq] = useState(2);
   const [sessions, setSessions] = useState<ChatSession[]>([makeSession(1)]);
   const [activeSessionId, setActiveSessionId] = useState(1);
@@ -157,62 +162,87 @@ export default function InClass() {
         </div>
 
         <div className="student-chat-message-list">
-          {activeSession.messages.length === 0 ? (
-            <div className="student-chat-empty">
-              <h2>有什么我能帮你的吗？</h2>
-              <p>你可以提问课堂疑点、PPT 知识点定位、知识点解释等问题。</p>
-            </div>
-          ) : (
-            activeSession.messages.map((msg) => (
-              <div
-                key={msg.id}
-                className={`student-chat-message ${msg.role === "user" ? "from-user" : "from-assistant"}`}
-              >
-                <p>{msg.content}</p>
-                {msg.role === "assistant" && (
-                  <div className="student-chat-message-meta">
-                    {msg.ppt_ref && <span>参考 PPT：{msg.ppt_ref}</span>}
-                    {msg.knowledge_point && <span>关联知识点：{msg.knowledge_point}</span>}
-                    {msg.question_asked_id && (
-                      <button
-                        type="button"
-                        className="btn-secondary"
-                        disabled={feedbackSendingId === msg.question_asked_id || submittedQaIds.has(msg.question_asked_id)}
-                        onClick={() => handleSubmitAsFeedback(msg.question_asked_id!)}
-                      >
-                        {submittedQaIds.has(msg.question_asked_id)
-                          ? "已提交反馈"
-                          : feedbackSendingId === msg.question_asked_id
-                            ? "提交中…"
-                            : "提交为学习反馈"}
-                      </button>
+          {mode === "qa" ? (
+            <>
+              {activeSession.messages.length === 0 ? (
+                <div className="student-chat-empty">
+                  <h2>有什么我能帮你的吗？</h2>
+                  <p>你可以提问课堂疑点、PPT 知识点定位、知识点解释等问题。</p>
+                </div>
+              ) : (
+                activeSession.messages.map((msg) => (
+                  <div
+                    key={msg.id}
+                    className={`student-chat-message ${msg.role === "user" ? "from-user" : "from-assistant"}`}
+                  >
+                    <p>{msg.content}</p>
+                    {msg.role === "assistant" && (
+                      <div className="student-chat-message-meta">
+                        {msg.ppt_ref && <span>参考 PPT：{msg.ppt_ref}</span>}
+                        {msg.knowledge_point && <span>关联知识点：{msg.knowledge_point}</span>}
+                        {msg.question_asked_id && (
+                          <button
+                            type="button"
+                            className="btn-secondary"
+                            disabled={feedbackSendingId === msg.question_asked_id || submittedQaIds.has(msg.question_asked_id)}
+                            onClick={() => handleSubmitAsFeedback(msg.question_asked_id!)}
+                          >
+                            {submittedQaIds.has(msg.question_asked_id)
+                              ? "已提交反馈"
+                              : feedbackSendingId === msg.question_asked_id
+                                ? "提交中…"
+                                : "提交为学习反馈"}
+                          </button>
+                        )}
+                      </div>
                     )}
                   </div>
-                )}
-              </div>
-            ))
+                ))
+              )}
+              {loading && <div className="student-chat-loading">回答中…</div>}
+            </>
+          ) : (
+            <div className="student-chat-tool-content">
+              {mode === "preview" && <Preview />}
+              {mode === "review" && <Review inWorkspace onGoQa={() => setMode("qa")} />}
+              {mode === "exercises" && <Exercises />}
+              {mode === "feedback" && <Feedback inWorkspace onGoQa={() => setMode("qa")} />}
+            </div>
           )}
-          {loading && <div className="student-chat-loading">回答中…</div>}
         </div>
 
         <div className="student-chat-input-wrap">
-          <div className="student-chat-input-row">
-            <input
-              type="text"
-              placeholder="请输入你的问题"
-              value={question}
-              onChange={(e) => setQuestion(e.target.value)}
-              onKeyDown={(e) => e.key === "Enter" && handleAsk()}
-            />
-            <button type="button" className="btn-primary" onClick={handleAsk} disabled={loading || !question.trim()}>
-              发送
-            </button>
-          </div>
+          {mode === "qa" ? (
+            <div className="student-chat-input-row">
+              <input
+                type="text"
+                placeholder="请输入你的问题"
+                value={question}
+                onChange={(e) => setQuestion(e.target.value)}
+                onKeyDown={(e) => e.key === "Enter" && handleAsk()}
+              />
+              <button type="button" className="btn-primary" onClick={handleAsk} disabled={loading || !question.trim()}>
+                发送
+              </button>
+            </div>
+          ) : (
+            <div className="student-chat-mode-hint">
+              当前在「{studentMenus.find((m) => m.key === mode)?.label}」模式
+              <button type="button" className="btn-primary" onClick={() => setMode("qa")} style={{ marginLeft: 12 }}>
+                返回问答
+              </button>
+            </div>
+          )}
           <div className="student-chat-menu-row">
             {studentMenus.map((item) => (
-              <Link key={item.to} to={item.to} className="student-chat-menu-link">
+              <button
+                key={item.key}
+                type="button"
+                className={`student-chat-menu-btn ${mode === item.key ? "is-active" : ""}`}
+                onClick={() => setMode(item.key)}
+              >
                 {item.label}
-              </Link>
+              </button>
             ))}
           </div>
         </div>

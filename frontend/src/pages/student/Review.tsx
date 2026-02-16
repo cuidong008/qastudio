@@ -2,7 +2,7 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 
-export default function Review() {
+export default function Review({ inWorkspace = false, onGoQa }: { inWorkspace?: boolean; onGoQa?: () => void }) {
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
   const [detail, setDetail] = useState<{ id: number; title: string; knowledge_points: { id: number; title: string; ppt_slide_ref: string | null }[] } | null>(null);
 
@@ -23,7 +23,14 @@ export default function Review() {
         按章节回顾知识框架，结合电商场景巩固
       </p>
       <p style={{ marginBottom: 20 }}>
-        <Link to="/student/inclass">7×24 答疑入口</Link>（与课中辅助共用）
+        {inWorkspace ? (
+          <button type="button" className="btn-ghost" onClick={onGoQa} style={{ padding: "0 6px", minHeight: "auto" }}>
+            7×24 答疑入口
+          </button>
+        ) : (
+          <Link to="/student/inclass">7×24 答疑入口</Link>
+        )}
+        （与课中辅助共用）
       </p>
       <div style={{ marginBottom: 20 }}>
         <label style={{ marginRight: 10, color: "var(--text-secondary)", fontSize: 14 }}>
