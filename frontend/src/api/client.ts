@@ -150,7 +150,11 @@ export const api = {
   auth: {
     login: (username: string, password: string) =>
       request<{ access_token: string; role: string }>("/auth/login", { method: "POST", body: { username, password } }),
-    me: () => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null } | null>("/auth/me"),
+    me: () => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; avatar_url: string | null } | null>("/auth/me"),
+    updateProfile: (body: { display_name?: string | null; avatar_url?: string | null }) =>
+      request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; avatar_url: string | null }>("/auth/profile", { method: "PUT", body }),
+    changePassword: (body: { current_password: string; new_password: string }) =>
+      request<{ ok: boolean }>("/auth/password", { method: "POST", body }),
   },
   chapters: {
     list: (params?: { course_id?: number }) => {

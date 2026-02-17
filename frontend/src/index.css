@@ -182,9 +182,11 @@ button,
 
 /* ===== Student Chat Workspace ===== */
 .student-chat-shell {
-  min-height: calc(100vh - 73px);
+  min-height: 100vh;
+  height: 100vh;
   display: flex;
   background: var(--bg-base);
+  overflow: hidden;
 }
 
 .student-chat-sidebar {
@@ -195,6 +197,8 @@ button,
   flex-direction: column;
   gap: 12px;
   background: var(--bg-surface);
+  height: 100%;
+  min-height: 0;
 }
 
 .student-chat-new-btn {
@@ -205,7 +209,96 @@ button,
   display: flex;
   flex-direction: column;
   gap: 8px;
+  flex: 1;
+  min-height: 0;
   overflow-y: auto;
+}
+
+.student-chat-user-wrap {
+  position: relative;
+  margin-top: auto;
+  border-top: 1px solid var(--border);
+  padding-top: 10px;
+}
+
+.student-chat-user-trigger {
+  width: 100%;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 42px;
+  padding: 8px;
+  background: var(--bg-elevated);
+  border: 1px solid var(--border);
+  color: var(--text-primary);
+}
+
+.student-chat-user-trigger:hover {
+  border-color: rgba(255, 255, 255, 0.2);
+}
+
+.student-chat-user-avatar {
+  width: 28px;
+  height: 28px;
+  border-radius: 999px;
+  overflow: hidden;
+  background: var(--accent-muted);
+  color: var(--text-primary);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 13px;
+  font-weight: 600;
+  flex-shrink: 0;
+}
+
+.student-chat-user-avatar.lg {
+  width: 56px;
+  height: 56px;
+  font-size: 22px;
+}
+
+.student-chat-user-avatar img {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+}
+
+.student-chat-user-name {
+  font-size: 14px;
+  font-weight: 600;
+  text-align: left;
+}
+
+.student-chat-user-menu {
+  position: absolute;
+  left: 0;
+  right: 0;
+  bottom: calc(100% + 8px);
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  box-shadow: var(--shadow-md);
+  padding: 6px;
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+}
+
+.student-chat-user-menu button {
+  width: 100%;
+  min-height: 34px;
+  border: none;
+  border-radius: var(--radius-sm);
+  background: transparent;
+  color: var(--text-secondary);
+  text-align: left;
+  padding: 6px 10px;
+}
+
+.student-chat-user-menu button:hover {
+  background: var(--bg-hover);
+  color: var(--text-primary);
 }
 
 .student-chat-session-group {
@@ -307,6 +400,7 @@ button,
 .student-chat-main {
   flex: 1;
   min-width: 0;
+  min-height: 0;
   display: flex;
   flex-direction: column;
   padding: 16px 20px;
@@ -475,6 +569,67 @@ button,
   gap: 8px;
 }
 
+.student-chat-settings-mask {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  padding: 16px;
+  z-index: 1000;
+}
+
+.student-chat-settings-dialog {
+  width: min(520px, 100%);
+  max-height: 90vh;
+  overflow-y: auto;
+  background: var(--bg-card);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-lg);
+  padding: 18px;
+}
+
+.student-chat-settings-dialog h3 {
+  margin: 0 0 14px;
+  font-size: 20px;
+}
+
+.student-chat-settings-avatar-row {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  margin-bottom: 12px;
+}
+
+.student-chat-settings-field {
+  display: block;
+  margin-bottom: 10px;
+}
+
+.student-chat-settings-field span {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.student-chat-settings-field input {
+  width: 100%;
+}
+
+.student-chat-settings-divider {
+  border-top: 1px solid var(--border);
+  margin: 14px 0;
+}
+
+.student-chat-settings-help {
+  margin: 8px 0 0;
+  font-size: 12px;
+  color: var(--text-muted);
+}
+
 /* ===== Mobile ===== */
 @media (max-width: 640px) {
   main {
@@ -488,14 +643,17 @@ button,
   }
 
   .student-chat-shell {
-    min-height: calc(100vh - 64px);
+    min-height: auto;
+    height: auto;
     flex-direction: column;
+    overflow: visible;
   }
 
   .student-chat-sidebar {
     width: 100%;
     border-right: none;
     border-bottom: 1px solid var(--border);
+    height: auto;
   }
 
   .student-chat-main {

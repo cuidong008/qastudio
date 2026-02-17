@@ -1,11 +1,122 @@
 import { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
+import { useAuth } from "../../api/auth";
 import Preview from "./Preview";
 import Review from "./Review";
 import Exercises from "./Exercises";
 import Feedback from "./Feedback";
 
 const CHAT_STORAGE_KEY = "qastudio.student.chat.v1";
+const MAX_AVATAR_FILE_BYTES = 1.5 * 1024 * 1024;
+const SUPPORTED_AVATAR_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/jpg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+  "image/avif",
+  "image/tiff",
+  "image/heic",
+  "image/heif",
+]);
+
+function blobToDataUrl(blob: Blob): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result || ""));
+    reader.onerror = () => reject(new Error("图片读取失败"));
+    reader.readAsDataURL(blob);
+  });
+}
+
+function canvasToBlob(canvas: HTMLCanvasElement, type: string, quality?: number): Promise<Blob> {
+  return new Promise((resolve, reject) => {
+    canvas.toBlob((blob) => {
+      if (!blob) {
+        reject(new Error("图片压缩失败"));
+        return;
+      }
+      resolve(blob);
+    }, type, quality);
+  });
+}
+
+async function loadImageElement(file: File): Promise<HTMLImageElement> {
+  const objectUrl = URL.createObjectURL(file);
+  const image = new Image();
+  try {
+    await new Promise<void>((resolve, reject) => {
+      image.onload = () => {
+        resolve();
+      };
+      image.onerror = () => {
+        reject(new Error("图片解码失败，请更换图片格式"));
+      };
+      image.src = objectUrl;
+    });
+    return image;
+  } finally {
+    URL.revokeObjectURL(objectUrl);
+  }
+}
+
+async function compressAvatarToDataUrl(file: File): Promise<{ dataUrl: string; bytes: number }> {
+  const image = await loadImageElement(file);
+  let width = image.naturalWidth || image.width;
+  let height = image.naturalHeight || image.height;
+  const maxDimension = 1600;
+  if (width > maxDimension || height > maxDimension) {
+    const ratio = Math.min(maxDimension / width, maxDimension / height);
+    width = Math.max(1, Math.round(width * ratio));
+    height = Math.max(1, Math.round(height * ratio));
+  }
+
+  const canvas = document.createElement("canvas");
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    throw new Error("浏览器不支持图片压缩");
+  }
+
+  let bestBlob: Blob | null = null;
+  const qualities = [0.9, 0.82, 0.74, 0.66, 0.58, 0.5, 0.42, 0.34];
+  const mimeTypes = ["image/webp", "image/jpeg", "image/png"];
+
+  for (let round = 0; round < 6; round += 1) {
+    canvas.width = width;
+    canvas.height = height;
+    ctx.clearRect(0, 0, width, height);
+    ctx.drawImage(image, 0, 0, width, height);
+
+    for (const mime of mimeTypes) {
+      for (const q of qualities) {
+        const blob = await canvasToBlob(canvas, mime, q);
+        if (!bestBlob || blob.size < bestBlob.size) {
+          bestBlob = blob;
+        }
+        if (blob.size <= MAX_AVATAR_FILE_BYTES) {
+          return { dataUrl: await blobToDataUrl(blob), bytes: blob.size };
+        }
+      }
+      const blob = await canvasToBlob(canvas, mime);
+      if (!bestBlob || blob.size < bestBlob.size) {
+        bestBlob = blob;
+      }
+      if (blob.size <= MAX_AVATAR_FILE_BYTES) {
+        return { dataUrl: await blobToDataUrl(blob), bytes: blob.size };
+      }
+    }
+
+    width = Math.max(1, Math.round(width * 0.85));
+    height = Math.max(1, Math.round(height * 0.85));
+  }
+
+  if (bestBlob && bestBlob.size <= MAX_AVATAR_FILE_BYTES) {
+    return { dataUrl: await blobToDataUrl(bestBlob), bytes: bestBlob.size };
+  }
+  throw new Error("图片压缩后仍超过 1.5MB，请换一张更小的图片");
+}
 
 type ChatMessage = {
   id: number;
@@ -90,6 +201,8 @@ function loadChatState(): { sessions: ChatSession[]; sessionSeq: number; activeS
 }
 
 export default function InClass() {
+  const { user, logout, updateProfile, changePassword } = useAuth();
+  const navigate = useNavigate();
   const initialState = useMemo(() => loadChatState(), []);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
@@ -100,11 +213,36 @@ export default function InClass() {
   const [renameValue, setRenameValue] = useState("");
   const [sessionSearch, setSessionSearch] = useState("");
   const [collapsedCourseGroups, setCollapsedCourseGroups] = useState<Record<string, boolean>>({});
+  const [userMenuOpen, setUserMenuOpen] = useState(false);
+  const [settingsOpen, setSettingsOpen] = useState(false);
+  const [displayName, setDisplayName] = useState("");
+  const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [profileSaving, setProfileSaving] = useState(false);
+  const [passwordSaving, setPasswordSaving] = useState(false);
+  const [avatarProcessing, setAvatarProcessing] = useState(false);
+  const [currentPassword, setCurrentPassword] = useState("");
+  const [newPassword, setNewPassword] = useState("");
+  const [confirmPassword, setConfirmPassword] = useState("");
+  const [settingsError, setSettingsError] = useState("");
+  const [settingsSuccess, setSettingsSuccess] = useState("");
   const [mode, setMode] = useState<WorkspaceMode>("qa");
   const [sessionSeq, setSessionSeq] = useState(initialState.sessionSeq);
   const [sessions, setSessions] = useState<ChatSession[]>(initialState.sessions);
   const [activeSessionId, setActiveSessionId] = useState(initialState.activeSessionId);
   const inputRef = useRef<HTMLInputElement | null>(null);
+  const avatarInputRef = useRef<HTMLInputElement | null>(null);
+  const userMenuRef = useRef<HTMLDivElement | null>(null);
+
+  useEffect(() => {
+    const onDocClick = (e: MouseEvent) => {
+      if (!userMenuRef.current) return;
+      if (!userMenuRef.current.contains(e.target as Node)) {
+        setUserMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", onDocClick);
+    return () => document.removeEventListener("mousedown", onDocClick);
+  }, []);
 
   useEffect(() => {
     api.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
@@ -345,6 +483,95 @@ export default function InClass() {
     setCollapsedCourseGroups((prev) => ({ ...prev, [key]: !prev[key] }));
   };
 
+  const openSettings = () => {
+    setDisplayName(user?.display_name || user?.username || "");
+    setAvatarUrl(user?.avatar_url || null);
+    setCurrentPassword("");
+    setNewPassword("");
+    setConfirmPassword("");
+    setSettingsError("");
+    setSettingsSuccess("");
+    setUserMenuOpen(false);
+    setSettingsOpen(true);
+  };
+
+  const onPickAvatar = () => avatarInputRef.current?.click();
+
+  const onAvatarChange = (file: File | null) => {
+    if (!file) return;
+    if (!file.type.startsWith("image/")) {
+      setSettingsError("请选择图片文件作为头像");
+      return;
+    }
+    if (!SUPPORTED_AVATAR_TYPES.has(file.type.toLowerCase())) {
+      setSettingsError("图片格式暂不支持，请使用 JPG/PNG/WebP/GIF/BMP/AVIF/TIFF/HEIC");
+      return;
+    }
+    setAvatarProcessing(true);
+    setSettingsError("");
+    setSettingsSuccess("");
+    compressAvatarToDataUrl(file)
+      .then(({ dataUrl, bytes }) => {
+        setAvatarUrl(dataUrl);
+        const sizeMb = (bytes / (1024 * 1024)).toFixed(2);
+        setSettingsSuccess(`头像已处理并压缩为 ${sizeMb}MB`);
+      })
+      .catch((e) => {
+        const msg = (e as Error)?.message || "头像处理失败";
+        if (file.size > MAX_AVATAR_FILE_BYTES && msg === "头像处理失败") {
+          const fileSizeMb = (file.size / (1024 * 1024)).toFixed(2);
+          setSettingsError(`头像文件过大（当前 ${fileSizeMb}MB），请上传不超过 1.5MB 的图片`);
+          return;
+        }
+        setSettingsError(msg);
+      })
+      .finally(() => {
+        setAvatarProcessing(false);
+      });
+  };
+
+  const handleSaveProfile = async () => {
+    setSettingsError("");
+    setSettingsSuccess("");
+    try {
+      setProfileSaving(true);
+      await updateProfile({
+        display_name: displayName.trim() || null,
+        avatar_url: avatarUrl ?? null,
+      });
+      setSettingsSuccess("资料已更新");
+    } catch (e) {
+      setSettingsError((e as Error)?.message || "保存失败");
+    } finally {
+      setProfileSaving(false);
+    }
+  };
+
+  const handleSavePassword = async () => {
+    setSettingsError("");
+    setSettingsSuccess("");
+    if (!currentPassword || !newPassword || !confirmPassword) {
+      setSettingsError("请完整填写密码项");
+      return;
+    }
+    if (newPassword !== confirmPassword) {
+      setSettingsError("两次输入的新密码不一致");
+      return;
+    }
+    try {
+      setPasswordSaving(true);
+      await changePassword(currentPassword, newPassword);
+      setCurrentPassword("");
+      setNewPassword("");
+      setConfirmPassword("");
+      setSettingsSuccess("密码已修改");
+    } catch (e) {
+      setSettingsError((e as Error)?.message || "密码修改失败");
+    } finally {
+      setPasswordSaving(false);
+    }
+  };
+
   return (
     <div className="student-chat-shell">
       <aside className="student-chat-sidebar">
@@ -417,6 +644,36 @@ export default function InClass() {
           ))}
           {groupedSessions.length === 0 && (
             <div className="student-chat-session-empty">没有匹配的会话</div>
+          )}
+        </div>
+        <div className="student-chat-user-wrap" ref={userMenuRef}>
+          <button
+            type="button"
+            className="student-chat-user-trigger"
+            onClick={() => setUserMenuOpen((v) => !v)}
+          >
+            <span className="student-chat-user-avatar">
+              {avatarUrl || user?.avatar_url ? (
+                <img src={avatarUrl || user?.avatar_url || ""} alt="头像" />
+              ) : (
+                (user?.display_name || user?.username || "U").slice(0, 1).toUpperCase()
+              )}
+            </span>
+            <span className="student-chat-user-name">{user?.display_name || user?.username || "未登录用户"}</span>
+          </button>
+          {userMenuOpen && (
+            <div className="student-chat-user-menu">
+              <button type="button" onClick={openSettings}>设置</button>
+              <button
+                type="button"
+                onClick={() => {
+                  logout();
+                  navigate("/login");
+                }}
+              >
+                退出
+              </button>
+            </div>
           )}
         </div>
       </aside>
@@ -535,6 +792,96 @@ export default function InClass() {
           </div>
         </div>
       </section>
+      {settingsOpen && (
+        <div className="student-chat-settings-mask" onClick={() => setSettingsOpen(false)}>
+          <div className="student-chat-settings-dialog" onClick={(e) => e.stopPropagation()}>
+            <h3>设置</h3>
+            <div className="student-chat-settings-avatar-row">
+              <span className="student-chat-user-avatar lg">
+                {avatarUrl ? (
+                  <img src={avatarUrl} alt="头像" />
+                ) : (
+                  (displayName || user?.username || "U").slice(0, 1).toUpperCase()
+                )}
+              </span>
+              <div>
+                <button type="button" className="btn-secondary" onClick={onPickAvatar} disabled={avatarProcessing}>
+                  {avatarProcessing ? "头像处理中…" : "修改头像"}
+                </button>
+                <button
+                  type="button"
+                  className="btn-ghost"
+                  style={{ marginLeft: 8 }}
+                  onClick={() => setAvatarUrl(null)}
+                >
+                  清除头像
+                </button>
+                <input
+                  ref={avatarInputRef}
+                  type="file"
+                  accept="image/*"
+                  style={{ display: "none" }}
+                  onChange={(e) => onAvatarChange(e.target.files?.[0] ?? null)}
+                />
+                <p className="student-chat-settings-help">支持 JPG/PNG/WebP/GIF/BMP/AVIF/TIFF/HEIC，大小不超过 1.5MB</p>
+              </div>
+            </div>
+
+            <label className="student-chat-settings-field">
+              <span>显示姓名</span>
+              <input
+                type="text"
+                maxLength={64}
+                value={displayName}
+                onChange={(e) => setDisplayName(e.target.value)}
+                placeholder="请输入显示姓名"
+              />
+            </label>
+            <button type="button" className="btn-primary" onClick={handleSaveProfile} disabled={profileSaving || avatarProcessing}>
+              {profileSaving ? "保存中…" : "保存资料"}
+            </button>
+
+            <div className="student-chat-settings-divider" />
+            <label className="student-chat-settings-field">
+              <span>当前密码</span>
+              <input
+                type="password"
+                value={currentPassword}
+                onChange={(e) => setCurrentPassword(e.target.value)}
+                placeholder="请输入当前密码"
+              />
+            </label>
+            <label className="student-chat-settings-field">
+              <span>新密码</span>
+              <input
+                type="password"
+                value={newPassword}
+                onChange={(e) => setNewPassword(e.target.value)}
+                placeholder="请输入新密码（至少 6 位）"
+              />
+            </label>
+            <label className="student-chat-settings-field">
+              <span>确认新密码</span>
+              <input
+                type="password"
+                value={confirmPassword}
+                onChange={(e) => setConfirmPassword(e.target.value)}
+                placeholder="请再次输入新密码"
+              />
+            </label>
+            <button type="button" className="btn-primary" onClick={handleSavePassword} disabled={passwordSaving}>
+              {passwordSaving ? "提交中…" : "修改密码"}
+            </button>
+
+            {settingsError && <p className="text-error" style={{ margin: "8px 0 0" }}>{settingsError}</p>}
+            {settingsSuccess && <p className="text-success" style={{ margin: "8px 0 0" }}>{settingsSuccess}</p>}
+
+            <div style={{ display: "flex", justifyContent: "flex-end", marginTop: 8 }}>
+              <button type="button" className="btn-ghost" onClick={() => setSettingsOpen(false)}>关闭</button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

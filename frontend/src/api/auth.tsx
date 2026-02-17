@@ -1,13 +1,15 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { api, setToken, clearToken } from "./client";
 
-type User = { id: number; username: string; role: string; display_name: string | null };
+type User = { id: number; username: string; role: string; display_name: string | null; avatar_url: string | null };
 
 const AuthContext = createContext<{
   user: User | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<User>;
   logout: () => void;
+  updateProfile: (payload: { display_name?: string | null; avatar_url?: string | null }) => Promise<User>;
+  changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }>(null!);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
@@ -32,8 +34,19 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
+  const updateProfile = async (payload: { display_name?: string | null; avatar_url?: string | null }): Promise<User> => {
+    const updated = await api.auth.updateProfile(payload);
+    const next = updated as User;
+    setUser(next);
+    return next;
+  };
+
+  const changePassword = async (currentPassword: string, newPassword: string): Promise<void> => {
+    await api.auth.changePassword({ current_password: currentPassword, new_password: newPassword });
+  };
+
   return (
-    <AuthContext.Provider value={{ user, loading, login, logout }}>
+    <AuthContext.Provider value={{ user, loading, login, logout, updateProfile, changePassword }}>
       {children}
     </AuthContext.Provider>
   );

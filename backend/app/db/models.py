@@ -28,6 +28,7 @@ class User(Base):
     hashed_password = Column(String(128), nullable=False)
     role = Column(String(20), default=UserRole.student.value, nullable=False)
     display_name = Column(String(64), nullable=True)
+    avatar_url = Column(Text, nullable=True)
     class_id = Column(Integer, ForeignKey("classes.id"), nullable=True)  # 学生所属班级
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)

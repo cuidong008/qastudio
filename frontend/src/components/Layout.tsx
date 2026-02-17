@@ -46,44 +46,46 @@ export default function Layout({
 
   return (
     <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
-      <header
-        style={{
-          background: "var(--bg-surface)",
-          borderBottom: "1px solid var(--border)",
-          padding: "14px 24px",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 12,
-        }}
-      >
-        {!isStudent && (
-          <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-            {nav.map(({ to, label }) => (
-              <Link key={to} to={to} className="nav-link">
-                {label}
-              </Link>
-            ))}
-          </nav>
-        )}
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
-            {user?.display_name || user?.username}
-          </span>
-          <button
-            type="button"
-            className="btn-ghost"
-            onClick={() => {
-              logout();
-              navigate("/login");
-            }}
-            style={{ padding: "8px 14px", minHeight: 36 }}
-          >
-            退出
-          </button>
-        </div>
-      </header>
+      {!isStudentChatShell && (
+        <header
+          style={{
+            background: "var(--bg-surface)",
+            borderBottom: "1px solid var(--border)",
+            padding: "14px 24px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 12,
+          }}
+        >
+          {!isStudent && (
+            <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+              {nav.map(({ to, label }) => (
+                <Link key={to} to={to} className="nav-link">
+                  {label}
+                </Link>
+              ))}
+            </nav>
+          )}
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
+              {user?.display_name || user?.username}
+            </span>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => {
+                logout();
+                navigate("/login");
+              }}
+              style={{ padding: "8px 14px", minHeight: 36 }}
+            >
+              退出
+            </button>
+          </div>
+        </header>
+      )}
       <main
         style={{
           flex: 1,
