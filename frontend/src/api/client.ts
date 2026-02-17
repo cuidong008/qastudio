@@ -14,13 +14,12 @@ export type RagProvidersResponse = {
   providers: RagProvider[];
   default_llm: string;
   default_embedding: string;
-  default_vlm: string;
   default_rerank: string;
   default_pdf_parser: string;
   provider_types: { id: string; name: string; need_base_url: boolean }[];
   llm_models_by_type: Record<string, string[]>;
   embedding_models_by_type: Record<string, string[]>;
-  vlm_models_by_type: Record<string, string[]>;
+  pdf_parser_models_by_type: Record<string, string[]>;
   rerank_models_by_type: Record<string, string[]>;
 };
 
@@ -29,7 +28,6 @@ export type RagProvidersUpdateBody = {
   providers: { id?: string; type: string; name: string; base_url?: string; api_key?: string }[];
   default_llm: string;
   default_embedding: string;
-  default_vlm: string;
   default_rerank: string;
   default_pdf_parser: string;
 };
@@ -59,6 +57,19 @@ export type RagConfig = {
   top_k: number;
   chunk_size: number;
   chunk_overlap: number;
+  hybrid_enabled: boolean;
+  vector_recall_k: number;
+  sparse_recall_k: number;
+  fused_top_n: number;
+  rrf_k: number;
+  query_rewrite_enabled: boolean;
+  query_rewrite_count: number;
+  hyde_enabled: boolean;
+  hyde_max_tokens: number;
+  hyde_temperature: number;
+  rerank_enabled: boolean;
+  rerank_top_n: number;
+  no_answer_threshold: number;
   llm_max_tokens: number;
   llm_temperature: number;
 };

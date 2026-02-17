@@ -1,6 +1,7 @@
 """课中/课后答疑：自然语言提问，基于知识库检索返回答案与参考文档定位"""
 from pathlib import Path
 import re
+import logging
 
 from fastapi import APIRouter, Depends, HTTPException
 from fastapi.responses import FileResponse
@@ -15,6 +16,7 @@ from ..api.auth import get_current_user
 from ..services.qa_engine import answer_from_documents, answer_question, QAResponse
 
 router = APIRouter(prefix="/qa", tags=["qa"])
+logger = logging.getLogger(__name__)
 
 
 class AskIn(BaseModel):
@@ -202,44 +204,57 @@ async def ask(
     r_ids = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id))
     chapter_ids_by_course = [row[0] for row in r_ids.all()]
 
-    # RAG 开关：仅当启用时走 RAG 管道
-    import os
-    if os.environ.get("RAG_ENABLED", "false").lower() in ("true", "1"):
-        try:
-            from ..rag import get_rag_settings, rag_ask
-            settings = get_rag_settings()
-            if settings.enabled:
-                answer, ppt_ref, knowledge_point, in_scope = rag_ask(
-                    question, course_id, chapter_id=None
+    # RAG 开关：以数据库配置（后管台）为准；不再受环境变量 RAG_ENABLED 额外门控
+    try:
+        from ..rag import get_rag_settings, rag_ask
+
+        settings = get_rag_settings()
+        if settings.enabled:
+            answer, ppt_ref, knowledge_point, in_scope, rag_reference_doc_id, rag_reference_page = rag_ask(
+                question, course_id, chapter_id=None
+            )
+            # 仅在确实没有任何引用信息时，才降级为“知识库无答案”兜底
+            if "未在课程知识库" in (answer or "") and not (ppt_ref or knowledge_point):
+                logger.warning("[RAG-TRACE] qa_api_rag_miss_to_general_answer q=%r course_id=%s", question, course_id)
+                answer = _build_knowledge_miss_answer(question)
+                ppt_ref = "当前问题在知识库中没有参考答案"
+                knowledge_point = None
+                in_scope = False
+            else:
+                logger.warning(
+                    "[RAG-TRACE] qa_api_rag_hit q=%r course_id=%s ref=%r kp=%r in_scope=%s",
+                    question,
+                    course_id,
+                    ppt_ref,
+                    knowledge_point,
+                    in_scope,
                 )
-                if "未在课程知识库" in (answer or ""):
-                    answer = _build_knowledge_miss_answer(question)
-                    ppt_ref = "当前问题在知识库中没有参考答案"
-                    knowledge_point = None
-                    in_scope = False
-                question_asked_id = None
-                if user:
-                    record = QuestionAsked(
-                        user_id=user.id,
-                        chapter_id=None,
-                        question_text=body.question,
-                        answer_text=answer,
-                        ppt_ref=ppt_ref,
-                    )
-                    db.add(record)
-                    await db.flush()
-                    question_asked_id = record.id
-                return AskOut(
-                    answer=answer,
-                    document_ref=ppt_ref,
-                    reference_doc_id=None,
-                    reference_page=None if _looks_like_total_pages_ref(ppt_ref) else _parse_page_num(ppt_ref),
-                    knowledge_point=knowledge_point,
-                    in_scope=in_scope,
-                    question_asked_id=question_asked_id,
+            question_asked_id = None
+            if user:
+                record = QuestionAsked(
+                    user_id=user.id,
+                    chapter_id=None,
+                    question_text=body.question,
+                    answer_text=answer,
+                    ppt_ref=ppt_ref,
                 )
-        except Exception:
-            pass  # RAG 失败时回退到下方关键词检索
+                db.add(record)
+                await db.flush()
+                question_asked_id = record.id
+            return AskOut(
+                answer=answer,
+                document_ref=ppt_ref,
+                reference_doc_id=rag_reference_doc_id,
+                reference_page=rag_reference_page if rag_reference_page and rag_reference_page > 0 else (
+                    None if _looks_like_total_pages_ref(ppt_ref) else _parse_page_num(ppt_ref)
+                ),
+                knowledge_point=knowledge_point,
+                in_scope=in_scope,
+                question_asked_id=question_asked_id,
+            )
+        logger.warning("[RAG-TRACE] qa_api_rag_disabled_by_config course_id=%s", course_id)
+    except Exception:
+        pass  # RAG 失败时回退到下方关键词检索
 
     # 从知识库检索：按课程下全部章节检索，按关键词在 content/title 中匹配（简单 LIKE）
     q_docs = select(KnowledgeDocument)

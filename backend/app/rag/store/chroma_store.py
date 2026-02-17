@@ -86,3 +86,26 @@ class ChromaVectorStore(BaseVectorStore):
 
     def delete_by_course(self, course_id: int) -> None:
         self._coll.delete(where={"course_id": course_id})
+
+    def list_by_course(
+        self,
+        course_id: int,
+        *,
+        chapter_id: int | None = None,
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        where: dict[str, Any] = {"course_id": course_id}
+        if chapter_id is not None:
+            where["chapter_id"] = chapter_id
+        result = self._coll.get(
+            where=where,
+            include=["documents", "metadatas"],
+        )
+        out: list[tuple[str, str, dict[str, Any]]] = []
+        ids = result.get("ids") or []
+        docs = result.get("documents") or []
+        metas = result.get("metadatas") or []
+        for i, chunk_id in enumerate(ids):
+            text = docs[i] if i < len(docs) else ""
+            meta = metas[i] if i < len(metas) else {}
+            out.append((chunk_id, text or "", meta or {}))
+        return out

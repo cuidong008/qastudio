@@ -46,6 +46,23 @@ class RAGSettings(BaseSettings):
     top_k: int = 5
     chunk_size: int = 400
     chunk_overlap: int = 80
+    # ----- 混合检索 -----
+    hybrid_enabled: bool = True
+    vector_recall_k: int = 30
+    sparse_recall_k: int = 30
+    fused_top_n: int = 60
+    rrf_k: int = 60
+    # ----- Query Rewrite / HyDE -----
+    query_rewrite_enabled: bool = True
+    query_rewrite_count: int = 4
+    hyde_enabled: bool = True
+    hyde_max_tokens: int = 220
+    hyde_temperature: float = 0.2
+    # ----- Rerank -----
+    rerank_enabled: bool = True
+    rerank_top_n: int = 60
+    # ----- 无答案阈值与兜底 -----
+    no_answer_threshold: float = 0.12
 
     # ----- 生成参数 -----
     llm_max_tokens: int = 512
@@ -62,9 +79,29 @@ def _coerce(value: str, field_name: str) -> str | int | float | bool:
     if value is None or value == "":
         return value
     # 根据字段名推断类型（与 RAGSettings 一致）
-    int_fields = {"embedding_dim", "embedding_external_batch_size", "top_k", "chunk_size", "chunk_overlap", "llm_max_tokens"}
-    float_fields = {"llm_temperature"}
-    bool_fields = {"enabled"}
+    int_fields = {
+        "embedding_dim",
+        "embedding_external_batch_size",
+        "top_k",
+        "chunk_size",
+        "chunk_overlap",
+        "vector_recall_k",
+        "sparse_recall_k",
+        "fused_top_n",
+        "rrf_k",
+        "query_rewrite_count",
+        "hyde_max_tokens",
+        "rerank_top_n",
+        "llm_max_tokens",
+    }
+    float_fields = {"llm_temperature", "hyde_temperature", "no_answer_threshold"}
+    bool_fields = {
+        "enabled",
+        "hybrid_enabled",
+        "query_rewrite_enabled",
+        "hyde_enabled",
+        "rerank_enabled",
+    }
     if field_name in bool_fields:
         return value.lower() in ("true", "1", "yes")
     if field_name in int_fields:

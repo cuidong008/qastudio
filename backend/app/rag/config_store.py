@@ -18,7 +18,6 @@ SECRET_KEYS = frozenset({
 RAG_PROVIDERS_KEY = "rag_providers"
 DEFAULT_LLM_KEY = "default_llm"
 DEFAULT_EMBEDDING_KEY = "default_embedding"
-DEFAULT_VLM_KEY = "default_vlm"
 DEFAULT_RERANK_KEY = "default_rerank"
 DEFAULT_PDF_PARSER_KEY = "default_pdf_parser"
 
@@ -121,10 +120,6 @@ def get_default_embedding() -> str:
     return (_cache.get(DEFAULT_EMBEDDING_KEY) or "").strip()
 
 
-def get_default_vlm() -> str:
-    return (_cache.get(DEFAULT_VLM_KEY) or "").strip()
-
-
 def get_default_rerank() -> str:
     return (_cache.get(DEFAULT_RERANK_KEY) or "").strip()
 
@@ -138,7 +133,6 @@ async def save_providers_and_defaults(
     providers: list[dict],
     default_llm: str = "",
     default_embedding: str = "",
-    default_vlm: str = "",
     default_rerank: str = "",
     default_pdf_parser: str = "",
 ) -> None:
@@ -169,7 +163,6 @@ async def save_providers_and_defaults(
     _cache[RAG_PROVIDERS_KEY] = json.dumps(merged, ensure_ascii=False)
     _cache[DEFAULT_LLM_KEY] = (default_llm or "").strip()
     _cache[DEFAULT_EMBEDDING_KEY] = (default_embedding or "").strip()
-    _cache[DEFAULT_VLM_KEY] = (default_vlm or "").strip()
     _cache[DEFAULT_RERANK_KEY] = (default_rerank or "").strip()
     _cache[DEFAULT_PDF_PARSER_KEY] = (default_pdf_parser or "").strip()
 
@@ -177,7 +170,6 @@ async def save_providers_and_defaults(
         (RAG_PROVIDERS_KEY, _cache[RAG_PROVIDERS_KEY]),
         (DEFAULT_LLM_KEY, _cache[DEFAULT_LLM_KEY]),
         (DEFAULT_EMBEDDING_KEY, _cache[DEFAULT_EMBEDDING_KEY]),
-        (DEFAULT_VLM_KEY, _cache[DEFAULT_VLM_KEY]),
         (DEFAULT_RERANK_KEY, _cache[DEFAULT_RERANK_KEY]),
         (DEFAULT_PDF_PARSER_KEY, _cache[DEFAULT_PDF_PARSER_KEY]),
     ):

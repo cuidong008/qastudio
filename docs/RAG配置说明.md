@@ -5,7 +5,7 @@ RAG 模块与业务解耦。**优先通过后管台 Web 界面配置**（与 [RA
 ## 通过 Web 界面配置（推荐）
 
 1. 管理员登录 → 进入 **RAG 配置**（或 `/admin/rag`）。
-2. 在页面中填写或修改：总开关、模型提供商、默认 LLM/Embedding/VLM/Rerank、**默认 PDF 解析器（外部模型）**、向量库路径与切片参数等。
+2. 在页面中填写或修改：总开关、模型提供商、默认 LLM/Embedding/Rerank、**默认 PDF 解析器（外部模型）**、向量库路径与切片参数等。
 3. 点击「保存配置」，配置写入数据库并立即生效，无需改 .env 或重启。
 4. API Key 等敏感项在页面上显示为 `***`；留空或保持 `***` 保存表示不修改该 Key。
 
@@ -51,6 +51,22 @@ RAG 模块与业务解耦。**优先通过后管台 Web 界面配置**（与 [RA
 - `RAG_TOP_K`：检索条数，默认 5
 - `RAG_CHUNK_SIZE`：切片长度，默认 400
 - `RAG_CHUNK_OVERLAP`：切片重叠，默认 80
+
+### 混合检索与重排（推荐开启）
+
+- `RAG_HYBRID_ENABLED`：是否启用混合检索，默认 `true`
+- `RAG_VECTOR_RECALL_K`：向量召回候选数，默认 `30`
+- `RAG_SPARSE_RECALL_K`：稀疏召回候选数，默认 `30`
+- `RAG_FUSED_TOP_N`：RRF 融合后保留候选数，默认 `60`
+- `RAG_RRF_K`：RRF 常量，默认 `60`
+- `RAG_QUERY_REWRITE_ENABLED`：是否启用多查询改写，默认 `true`
+- `RAG_QUERY_REWRITE_COUNT`：改写路数上限，默认 `4`
+- `RAG_HYDE_ENABLED`：是否启用 HyDE 伪文档扩展，默认 `true`
+- `RAG_HYDE_MAX_TOKENS`：HyDE 生成长度，默认 `220`
+- `RAG_HYDE_TEMPERATURE`：HyDE 温度，默认 `0.2`
+- `RAG_RERANK_ENABLED`：是否启用重排，默认 `true`
+- `RAG_RERANK_TOP_N`：进入重排的候选数，默认 `60`
+- `RAG_NO_ANSWER_THRESHOLD`：无答案阈值（低于该值触发弱兜底），默认 `0.12`
 
 ## 建索引
 

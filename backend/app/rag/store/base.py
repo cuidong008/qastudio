@@ -32,3 +32,13 @@ class BaseVectorStore(ABC):
     def delete_by_course(self, course_id: int) -> None:
         """删除某课程下全部向量，用于重建索引。"""
         pass
+
+    @abstractmethod
+    def list_by_course(
+        self,
+        course_id: int,
+        *,
+        chapter_id: int | None = None,
+    ) -> list[tuple[str, str, dict[str, Any]]]:
+        """枚举课程（及可选章节）下全部 chunk。返回 [(id, text, metadata), ...]。"""
+        pass

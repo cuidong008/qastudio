@@ -10,7 +10,6 @@ export default function AdminRag() {
   const [providers, setProviders] = useState<RagProvider[]>([]);
   const [defaultLlm, setDefaultLlm] = useState("");
   const [defaultEmbedding, setDefaultEmbedding] = useState("");
-  const [defaultVlm, setDefaultVlm] = useState("");
   const [defaultRerank, setDefaultRerank] = useState("");
   const [defaultPdfParser, setDefaultPdfParser] = useState("");
   const [loading, setLoading] = useState(true);
@@ -33,7 +32,6 @@ export default function AdminRag() {
         setProviders(p.providers);
         setDefaultLlm(p.default_llm || "");
         setDefaultEmbedding(p.default_embedding || "");
-        setDefaultVlm(p.default_vlm || "");
         setDefaultRerank(p.default_rerank || "");
         setDefaultPdfParser(p.default_pdf_parser || "");
       })
@@ -52,7 +50,7 @@ export default function AdminRag() {
   const providerTypes = providersData?.provider_types ?? [];
   const llmModelsByType = providersData?.llm_models_by_type ?? {};
   const embeddingModelsByType = providersData?.embedding_models_by_type ?? {};
-  const vlmModelsByType = providersData?.vlm_models_by_type ?? {};
+  const pdfParserModelsByType = providersData?.pdf_parser_models_by_type ?? {};
   const rerankModelsByType = providersData?.rerank_models_by_type ?? {};
 
   const defaultLlmOptions = useMemo(() => {
@@ -85,10 +83,10 @@ export default function AdminRag() {
     return out;
   }, [providers, embeddingModelsByType]);
 
-  const defaultVlmOptions = useMemo(() => {
+  const defaultPdfParserOptions = useMemo(() => {
     const out: { value: string; label: string }[] = [];
     for (const p of providers) {
-      const models = vlmModelsByType[p.type];
+      const models = pdfParserModelsByType[p.type];
       if (models?.length) {
         for (const m of models) {
           if (m === "custom") continue;
@@ -97,7 +95,7 @@ export default function AdminRag() {
       }
     }
     return out;
-  }, [providers, vlmModelsByType]);
+  }, [providers, pdfParserModelsByType]);
 
   const defaultRerankOptions = useMemo(() => {
     const out: { value: string; label: string }[] = [];
@@ -124,6 +122,19 @@ export default function AdminRag() {
       top_k: form.top_k,
       chunk_size: form.chunk_size,
       chunk_overlap: form.chunk_overlap,
+      hybrid_enabled: form.hybrid_enabled,
+      vector_recall_k: form.vector_recall_k,
+      sparse_recall_k: form.sparse_recall_k,
+      fused_top_n: form.fused_top_n,
+      rrf_k: form.rrf_k,
+      query_rewrite_enabled: form.query_rewrite_enabled,
+      query_rewrite_count: form.query_rewrite_count,
+      hyde_enabled: form.hyde_enabled,
+      hyde_max_tokens: form.hyde_max_tokens,
+      hyde_temperature: form.hyde_temperature,
+      rerank_enabled: form.rerank_enabled,
+      rerank_top_n: form.rerank_top_n,
+      no_answer_threshold: form.no_answer_threshold,
       llm_max_tokens: form.llm_max_tokens,
       llm_temperature: form.llm_temperature,
     };
@@ -138,7 +149,6 @@ export default function AdminRag() {
         })),
         default_llm: defaultLlm,
         default_embedding: defaultEmbedding,
-        default_vlm: defaultVlm,
         default_rerank: defaultRerank,
         default_pdf_parser: defaultPdfParser,
       })
@@ -190,7 +200,6 @@ export default function AdminRag() {
     }
     setDefaultLlm((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultEmbedding((v) => (v.startsWith(id + ":") ? "" : v));
-    setDefaultVlm((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultRerank((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultPdfParser((v) => (v.startsWith(id + ":") ? "" : v));
   };
@@ -363,7 +372,7 @@ export default function AdminRag() {
       <div className="card" style={{ maxWidth: 640, marginBottom: 24 }}>
         <h3 style={{ marginBottom: 12, fontSize: 16 }}>设置默认模型</h3>
         <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>
-          从已添加的提供商中选择默认使用的 LLM、Embedding、VLM、Rerank，以及 PDF 外部解析器。
+          从已添加的提供商中选择默认使用的 LLM、Embedding、Rerank，以及 PDF 外部解析器。
         </p>
         <div style={sectionStyle}>
           <label style={labelStyle}>默认 LLM（大模型）</label>
@@ -392,19 +401,6 @@ export default function AdminRag() {
           </select>
         </div>
         <div style={sectionStyle}>
-          <label style={labelStyle}>默认 VLM（视觉语言模型，图文理解）</label>
-          <select
-            style={inputStyle}
-            value={defaultVlm}
-            onChange={(e) => setDefaultVlm(e.target.value)}
-          >
-            <option value="">暂不使用</option>
-            {defaultVlmOptions.map((o) => (
-              <option key={o.value} value={o.value}>{o.label}</option>
-            ))}
-          </select>
-        </div>
-        <div style={sectionStyle}>
           <label style={labelStyle}>默认 Rerank（检索重排）</label>
           <select
             style={inputStyle}
@@ -425,7 +421,7 @@ export default function AdminRag() {
             onChange={(e) => setDefaultPdfParser(e.target.value)}
           >
             <option value="">不使用外部模型（沿用服务器 PDF_PARSE_ENGINE）</option>
-            {defaultVlmOptions.map((o) => (
+            {defaultPdfParserOptions.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>
@@ -508,6 +504,143 @@ export default function AdminRag() {
               value={c.chunk_overlap ?? 80}
               onChange={(e) => update("chunk_overlap", parseInt(e.target.value, 10) || 80)}
               min={0}
+            />
+          </div>
+        </div>
+      </div>
+
+      {/* 混合检索与重排 */}
+      <div className="card" style={{ maxWidth: 640, marginBottom: 24 }}>
+        <h3 style={{ marginBottom: 12, fontSize: 16 }}>混合检索与重排</h3>
+        <div style={{ display: "flex", gap: 24, flexWrap: "wrap", marginBottom: 12 }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={!!c.hybrid_enabled}
+              onChange={(e) => update("hybrid_enabled", e.target.checked)}
+            />
+            <span>启用混合检索（Vector + Sparse）</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={!!c.query_rewrite_enabled}
+              onChange={(e) => update("query_rewrite_enabled", e.target.checked)}
+            />
+            <span>启用多查询改写</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={!!c.hyde_enabled}
+              onChange={(e) => update("hyde_enabled", e.target.checked)}
+            />
+            <span>启用 HyDE</span>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+            <input
+              type="checkbox"
+              checked={!!c.rerank_enabled}
+              onChange={(e) => update("rerank_enabled", e.target.checked)}
+            />
+            <span>启用重排</span>
+          </label>
+        </div>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
+          <div style={blockStyle}>
+            <label style={labelStyle}>vector_recall_k</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.vector_recall_k ?? 30}
+              onChange={(e) => update("vector_recall_k", parseInt(e.target.value, 10) || 30)}
+              min={1}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>sparse_recall_k</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.sparse_recall_k ?? 30}
+              onChange={(e) => update("sparse_recall_k", parseInt(e.target.value, 10) || 30)}
+              min={1}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>fused_top_n</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.fused_top_n ?? 60}
+              onChange={(e) => update("fused_top_n", parseInt(e.target.value, 10) || 60)}
+              min={1}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>rrf_k</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.rrf_k ?? 60}
+              onChange={(e) => update("rrf_k", parseInt(e.target.value, 10) || 60)}
+              min={1}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>query_rewrite_count</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.query_rewrite_count ?? 4}
+              onChange={(e) => update("query_rewrite_count", parseInt(e.target.value, 10) || 4)}
+              min={1}
+              max={10}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>hyde_max_tokens</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.hyde_max_tokens ?? 220}
+              onChange={(e) => update("hyde_max_tokens", parseInt(e.target.value, 10) || 220)}
+              min={32}
+              max={1024}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>hyde_temperature</label>
+            <input
+              type="number"
+              step={0.1}
+              style={{ ...inputStyle, width: 120 }}
+              value={c.hyde_temperature ?? 0.2}
+              onChange={(e) => update("hyde_temperature", parseFloat(e.target.value) || 0.2)}
+              min={0}
+              max={2}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>rerank_top_n</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 120 }}
+              value={c.rerank_top_n ?? 60}
+              onChange={(e) => update("rerank_top_n", parseInt(e.target.value, 10) || 60)}
+              min={1}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>no_answer_threshold</label>
+            <input
+              type="number"
+              step={0.01}
+              style={{ ...inputStyle, width: 140 }}
+              value={c.no_answer_threshold ?? 0.12}
+              onChange={(e) => update("no_answer_threshold", parseFloat(e.target.value) || 0.12)}
+              min={0}
+              max={1}
             />
           </div>
         </div>

@@ -12,7 +12,7 @@ def ask(
     course_id: int,
     *,
     chapter_id: int | None = None,
-) -> tuple[str, str | None, str | None, bool]:
+) -> tuple[str, str | None, str | None, bool, int | None, int | None]:
     """
     基于 RAG 回答课程问题。
     返回 (answer, ppt_ref, knowledge_point, in_scope)。
@@ -25,6 +25,8 @@ def ask(
             None,
             None,
             True,
+            None,
+            None,
         )
     chunks = retrieve(question, course_id, chapter_id=chapter_id)
     return generate_answer(question, chunks)

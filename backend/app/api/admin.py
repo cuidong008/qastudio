@@ -68,6 +68,19 @@ class RAGConfigOut(BaseModel):
     top_k: int
     chunk_size: int
     chunk_overlap: int
+    hybrid_enabled: bool
+    vector_recall_k: int
+    sparse_recall_k: int
+    fused_top_n: int
+    rrf_k: int
+    query_rewrite_enabled: bool
+    query_rewrite_count: int
+    hyde_enabled: bool
+    hyde_max_tokens: int
+    hyde_temperature: float
+    rerank_enabled: bool
+    rerank_top_n: int
+    no_answer_threshold: float
     llm_max_tokens: int
     llm_temperature: float
 
@@ -97,6 +110,19 @@ class RAGConfigUpdateIn(BaseModel):
     top_k: int | None = None
     chunk_size: int | None = None
     chunk_overlap: int | None = None
+    hybrid_enabled: bool | None = None
+    vector_recall_k: int | None = None
+    sparse_recall_k: int | None = None
+    fused_top_n: int | None = None
+    rrf_k: int | None = None
+    query_rewrite_enabled: bool | None = None
+    query_rewrite_count: int | None = None
+    hyde_enabled: bool | None = None
+    hyde_max_tokens: int | None = None
+    hyde_temperature: float | None = None
+    rerank_enabled: bool | None = None
+    rerank_top_n: int | None = None
+    no_answer_threshold: float | None = None
     llm_max_tokens: int | None = None
     llm_temperature: float | None = None
 
@@ -182,7 +208,7 @@ RAG_EMBEDDING_MODELS_BY_TYPE = {
         "embedding-2", "embedding-3",
     ],
 }
-RAG_VLM_MODELS_BY_TYPE = {
+RAG_PDF_PARSER_MODELS_BY_TYPE = {
     "openai_compatible": ["gpt-4o", "gpt-4o-mini", "gpt-4-turbo", "gpt-4-vision", "custom"],
     "qianwen": ["qwen-vl-max", "qwen-vl-plus", "qwen2-vl-7b-instruct", "qwen2-vl-72b-instruct"],
     "zhipu": ["glm-4v-flash", "glm-4v-plus", "glm-4v", "custom"],
@@ -206,13 +232,12 @@ class RAGProvidersGetOut(BaseModel):
     providers: list[RAGProviderOut]
     default_llm: str
     default_embedding: str
-    default_vlm: str
     default_rerank: str
     default_pdf_parser: str
     provider_types: list[dict]
     llm_models_by_type: dict
     embedding_models_by_type: dict
-    vlm_models_by_type: dict
+    pdf_parser_models_by_type: dict
     rerank_models_by_type: dict
 
 
@@ -228,7 +253,6 @@ class RAGProvidersPutIn(BaseModel):
     providers: list[RAGProviderIn]
     default_llm: str = ""
     default_embedding: str = ""
-    default_vlm: str = ""
     default_rerank: str = ""
     default_pdf_parser: str = ""
 
@@ -240,7 +264,6 @@ async def get_rag_providers(user: User = Depends(require_admin)):
         get_providers_list,
         get_default_llm,
         get_default_embedding,
-        get_default_vlm,
         get_default_rerank,
         get_default_pdf_parser,
     )
@@ -249,13 +272,12 @@ async def get_rag_providers(user: User = Depends(require_admin)):
         providers=[RAGProviderOut(id=p["id"], type=p["type"], name=p["name"], base_url=p.get("base_url", ""), api_key=p.get("api_key", "")) for p in providers],
         default_llm=get_default_llm(),
         default_embedding=get_default_embedding(),
-        default_vlm=get_default_vlm(),
         default_rerank=get_default_rerank(),
         default_pdf_parser=get_default_pdf_parser(),
         provider_types=RAG_PROVIDER_TYPES,
         llm_models_by_type=RAG_LLM_MODELS_BY_TYPE,
         embedding_models_by_type=RAG_EMBEDDING_MODELS_BY_TYPE,
-        vlm_models_by_type=RAG_VLM_MODELS_BY_TYPE,
+        pdf_parser_models_by_type=RAG_PDF_PARSER_MODELS_BY_TYPE,
         rerank_models_by_type=RAG_RERANK_MODELS_BY_TYPE,
     )
 
@@ -266,19 +288,18 @@ async def put_rag_providers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    """保存模型提供商与默认 LLM/Embedding/VLM/Rerank/PDF 解析器 选择"""
+    """保存模型提供商与默认 LLM/Embedding/Rerank/PDF 解析器 选择"""
     from ..rag.config_store import save_providers_and_defaults
     providers = [{"id": p.id, "type": p.type, "name": p.name, "base_url": p.base_url or "", "api_key": p.api_key or ""} for p in body.providers]
     await save_providers_and_defaults(
         db, providers,
         body.default_llm, body.default_embedding,
-        body.default_vlm, body.default_rerank, body.default_pdf_parser,
+        body.default_rerank, body.default_pdf_parser,
     )
     from ..rag.config_store import (
         get_providers_list,
         get_default_llm,
         get_default_embedding,
-        get_default_vlm,
         get_default_rerank,
         get_default_pdf_parser,
     )
@@ -287,13 +308,12 @@ async def put_rag_providers(
         providers=[RAGProviderOut(id=p["id"], type=p["type"], name=p["name"], base_url=p.get("base_url", ""), api_key=p.get("api_key", "")) for p in providers_out],
         default_llm=get_default_llm(),
         default_embedding=get_default_embedding(),
-        default_vlm=get_default_vlm(),
         default_rerank=get_default_rerank(),
         default_pdf_parser=get_default_pdf_parser(),
         provider_types=RAG_PROVIDER_TYPES,
         llm_models_by_type=RAG_LLM_MODELS_BY_TYPE,
         embedding_models_by_type=RAG_EMBEDDING_MODELS_BY_TYPE,
-        vlm_models_by_type=RAG_VLM_MODELS_BY_TYPE,
+        pdf_parser_models_by_type=RAG_PDF_PARSER_MODELS_BY_TYPE,
         rerank_models_by_type=RAG_RERANK_MODELS_BY_TYPE,
     )
 
