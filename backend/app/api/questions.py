@@ -1,4 +1,6 @@
 """习题：列表、作答、错题本"""
+import re
+
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
 from sqlalchemy import select, func
@@ -13,8 +15,10 @@ router = APIRouter(prefix="/questions", tags=["questions"])
 
 class QuestionOut(BaseModel):
     id: int
+    course_id: int | None
     chapter_id: int
     difficulty: str
+    question_type: str | None
     question_text: str
     options: str | None
     explanation: str | None
@@ -32,8 +36,15 @@ class SubmitAnswerIn(BaseModel):
 class SubmitAnswerOut(BaseModel):
     is_correct: bool
     correct_answer: str
+    question_type: str
     explanation: str | None
     ppt_ref: str | None
+
+
+def _normalize_multi_answer(value: str) -> str:
+    parts = re.split(r"[,，、\s]+", (value or "").strip().upper())
+    letters = sorted({p for p in parts if p in {"A", "B", "C", "D"}})
+    return ",".join(letters)
 
 
 @router.get("", response_model=list[QuestionOut])
@@ -66,7 +77,10 @@ async def submit_answer(
     question = result.scalar_one_or_none()
     if not question:
         raise HTTPException(status_code=404, detail="题目不存在")
-    is_correct = question.correct_answer.strip().lower() == body.user_answer.strip().lower()
+    if (question.question_type or "") == "multiple_choice":
+        is_correct = _normalize_multi_answer(question.correct_answer) == _normalize_multi_answer(body.user_answer)
+    else:
+        is_correct = question.correct_answer.strip().lower() == body.user_answer.strip().lower()
     record = AnswerRecord(
         user_id=user.id,
         question_id=question.id,
@@ -78,6 +92,7 @@ async def submit_answer(
     return SubmitAnswerOut(
         is_correct=is_correct,
         correct_answer=question.correct_answer,
+        question_type=question.question_type or "single_choice",
         explanation=question.explanation,
         ppt_ref=question.ppt_ref,
     )

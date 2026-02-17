@@ -16,6 +16,7 @@ type ChapterItem = {
   title: string;
   order_index: number;
   syllabus_ref: string | null;
+  question_count: number;
 };
 
 type ChapterDocItem = {
@@ -64,6 +65,15 @@ export default function TeacherCourses() {
   const [docDetailLoading, setDocDetailLoading] = useState(false);
   const [reindexingId, setReindexingId] = useState<number | null>(null);
   const [clearingId, setClearingId] = useState<number | null>(null);
+  const [questionGenModalChapter, setQuestionGenModalChapter] = useState<ChapterItem | null>(null);
+  const [questionTaskByChapter, setQuestionTaskByChapter] = useState<Record<number, { taskId: number; status: string }>>({});
+  const [questionGenForm, setQuestionGenForm] = useState({
+    single_choice_max: 5,
+    multiple_choice_max: 2,
+    judge_max: 3,
+    qa_max: 2,
+    blank_max: 2,
+  });
 
   const load = () => {
     setLoading(true);
@@ -295,6 +305,59 @@ export default function TeacherCourses() {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   };
 
+  const openGenerateQuestionsModal = (ch: ChapterItem) => {
+    setQuestionGenModalChapter(ch);
+    setQuestionGenForm({ single_choice_max: 5, multiple_choice_max: 2, judge_max: 3, qa_max: 2, blank_max: 2 });
+  };
+
+  const pollQuestionTask = async (chapterId: number, taskId: number, courseId: number | null) => {
+    const maxPoll = 180;
+    for (let i = 0; i < maxPoll; i += 1) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const task = await api.teacher.courses.getQuestionTask(taskId);
+        setQuestionTaskByChapter((prev) => ({ ...prev, [chapterId]: { taskId, status: task.status } }));
+        if (task.status === "success") {
+          if (courseId != null) {
+            await api.teacher.courses.chapters(courseId).then(setChapters).catch(() => undefined);
+          }
+          const byType = task.result_payload?.by_type;
+          alert(
+            `生成完成：共 ${task.result_payload?.created ?? 0} 题（单选 ${byType?.single_choice ?? 0}，多选 ${byType?.multiple_choice ?? 0}，判断 ${byType?.judge ?? 0}，问答 ${byType?.qa ?? 0}，填空 ${byType?.blank ?? 0}），跳过 ${task.result_payload?.skipped ?? 0} 题。`
+          );
+          return;
+        }
+        if (task.status === "failed") {
+          alert(task.error_message || "生成任务失败");
+          return;
+        }
+      } catch {
+        // ignore and keep polling
+      }
+    }
+    alert("生成任务仍在处理中，请稍后再看。");
+  };
+
+  const submitGenerateQuestions = () => {
+    if (!questionGenModalChapter) return;
+    const total =
+      questionGenForm.single_choice_max + questionGenForm.multiple_choice_max + questionGenForm.judge_max + questionGenForm.qa_max + questionGenForm.blank_max;
+    if (total <= 0) {
+      alert("请至少设置一种题型数量大于 0");
+      return;
+    }
+    const chapter = questionGenModalChapter;
+    api.teacher.courses
+      .generateChapterQuestions(chapter.id, questionGenForm)
+      .then((r) => {
+        setQuestionTaskByChapter((prev) => ({ ...prev, [chapter.id]: { taskId: r.task_id, status: r.status } }));
+        setQuestionGenModalChapter(null);
+        pollQuestionTask(chapter.id, r.task_id, chapter.course_id);
+      })
+      .catch((e) => alert(e?.message || "生成失败"))
+      .finally(() => undefined);
+  };
+
   return (
     <div>
       <h1 style={{ marginBottom: 8, fontSize: 24, fontWeight: 600 }}>我的课程</h1>
@@ -401,6 +464,25 @@ export default function TeacherCourses() {
                                 <button type="button" className="btn-ghost" style={{ fontSize: 13 }} onClick={() => openEditChapter(ch)}>
                                   编辑
                                 </button>
+                                <button
+                                  type="button"
+                                  className="btn-ghost"
+                                  style={{ fontSize: 13 }}
+                                  onClick={() => openGenerateQuestionsModal(ch)}
+                                  disabled={questionTaskByChapter[ch.id]?.status === "running" || questionTaskByChapter[ch.id]?.status === "pending"}
+                                >
+                                  {questionTaskByChapter[ch.id]?.status === "running" || questionTaskByChapter[ch.id]?.status === "pending" ? "生成中…" : "生成习题"}
+                                </button>
+                                {(ch.question_count > 0 || questionTaskByChapter[ch.id]?.status === "success") && (
+                                  <button
+                                    type="button"
+                                    className="btn-ghost"
+                                    style={{ fontSize: 13 }}
+                                    onClick={() => window.open(`/teacher/chapter-questions?chapterId=${ch.id}`, "_blank", "noopener,noreferrer")}
+                                  >
+                                    查看习题
+                                  </button>
+                                )}
                                 <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)", fontSize: 13 }} onClick={() => deleteChapter(ch.id)}>
                                   删除
                                 </button>
@@ -583,6 +665,83 @@ export default function TeacherCourses() {
               </button>
               <button type="button" className="btn-primary" onClick={submitEditChapter} disabled={chapterSaving}>
                 {chapterSaving ? "保存中…" : "保存"}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {questionGenModalChapter && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 125 }}
+          onClick={() => setQuestionGenModalChapter(null)}
+        >
+          <div className="card" style={{ minWidth: 420, width: "min(560px, 92vw)" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginBottom: 8 }}>生成习题</h3>
+            <p style={{ marginTop: 0, marginBottom: 14, color: "var(--text-muted)", fontSize: 14 }}>{questionGenModalChapter.title}</p>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>单选题最大数量</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={questionGenForm.single_choice_max}
+                  onChange={(e) => setQuestionGenForm((f) => ({ ...f, single_choice_max: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
+                  style={{ width: "100%" }}
+                />
+              </label>
+              <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>多选题最大数量</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={questionGenForm.multiple_choice_max}
+                  onChange={(e) => setQuestionGenForm((f) => ({ ...f, multiple_choice_max: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
+                  style={{ width: "100%" }}
+                />
+              </label>
+              <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>判断题最大数量</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={questionGenForm.judge_max}
+                  onChange={(e) => setQuestionGenForm((f) => ({ ...f, judge_max: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
+                  style={{ width: "100%" }}
+                />
+              </label>
+              <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>问答题最大数量</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={questionGenForm.qa_max}
+                  onChange={(e) => setQuestionGenForm((f) => ({ ...f, qa_max: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
+                  style={{ width: "100%" }}
+                />
+              </label>
+              <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>填空题最大数量</span>
+                <input
+                  type="number"
+                  min={0}
+                  max={30}
+                  value={questionGenForm.blank_max}
+                  onChange={(e) => setQuestionGenForm((f) => ({ ...f, blank_max: Math.max(0, parseInt(e.target.value, 10) || 0) }))}
+                  style={{ width: "100%" }}
+                />
+              </label>
+            </div>
+            <div style={{ marginTop: 18, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              <button type="button" className="btn-ghost" onClick={() => setQuestionGenModalChapter(null)}>
+                取消
+              </button>
+              <button type="button" className="btn-primary" onClick={submitGenerateQuestions}>
+                开始生成
               </button>
             </div>
           </div>

@@ -12,6 +12,8 @@ from .session import (
     _migrate_user_avatar_url,
     _backfill_student_class_memberships,
     _migrate_questions_asked_course_and_rag,
+    _migrate_questions_course_and_type,
+    _migrate_question_generation_tasks,
     _migrate_course_question_synonyms,
 )
 from .models import (
@@ -120,6 +122,8 @@ async def run_seed():
         await conn.run_sync(_migrate_user_avatar_url)
         await conn.run_sync(_backfill_student_class_memberships)
         await conn.run_sync(_migrate_questions_asked_course_and_rag)
+        await conn.run_sync(_migrate_questions_course_and_type)
+        await conn.run_sync(_migrate_question_generation_tasks)
         await conn.run_sync(_migrate_course_question_synonyms)
     async with AsyncSessionLocal() as session:
         await seed(session)

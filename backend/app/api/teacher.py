@@ -13,20 +13,21 @@ import time
 from datetime import datetime, timedelta
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, BackgroundTasks
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
+from ..db.session import AsyncSessionLocal
 from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
     StudentClassMembership,
     Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
-    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym,
+    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask,
 )
 from ..api.auth import require_teacher
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
@@ -158,6 +159,7 @@ class TeacherChapterOut(BaseModel):
     title: str
     order_index: int
     syllabus_ref: str | None
+    question_count: int = 0
 
 
 class TeacherChapterCreateIn(BaseModel):
@@ -170,6 +172,55 @@ class TeacherChapterUpdateIn(BaseModel):
     title: str | None = None
     order_index: int | None = None
     syllabus_ref: str | None = None
+
+
+class TeacherGenerateQuestionsIn(BaseModel):
+    single_choice_max: int = Field(default=0, ge=0, le=30)
+    multiple_choice_max: int = Field(default=0, ge=0, le=30)
+    judge_max: int = Field(default=0, ge=0, le=30)
+    qa_max: int = Field(default=0, ge=0, le=30)
+    blank_max: int = Field(default=0, ge=0, le=30)
+
+
+class TeacherGenerateTaskOut(BaseModel):
+    ok: bool = True
+    task_id: int
+    status: str
+
+
+class TeacherGenerateTaskStatusOut(BaseModel):
+    id: int
+    course_id: int
+    chapter_id: int
+    status: str
+    request_payload: dict
+    result_payload: dict | None
+    error_message: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class TeacherQuestionOut(BaseModel):
+    id: int
+    course_id: int | None
+    course_name: str | None
+    chapter_id: int
+    chapter_title: str
+    question_type: str
+    difficulty: str
+    question_text: str
+    options: str | None
+    correct_answer: str
+    explanation: str | None
+    created_at: str | None
+
+
+class TeacherQuestionUpdateIn(BaseModel):
+    difficulty: str | None = None
+    question_text: str | None = None
+    options: list[str] | None = None
+    correct_answer: str | None = None
+    explanation: str | None = None
 
 
 class TeacherDocumentChunkOut(BaseModel):
@@ -278,6 +329,179 @@ def _safe_pdf_filename(name: str) -> str:
     safe = re.sub(r"[^\w\-.]", "_", base)[:96]
     final_ext = ext.lower() if ext.lower() == ".pdf" else ".pdf"
     return (safe or "document") + final_ext
+
+
+def _normalize_text_key(text: str) -> str:
+    return re.sub(r"\s+", "", (text or "").strip().lower())
+
+
+def _extract_json_payload(raw: str) -> list[dict]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    candidates = [text]
+    for pat in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
+        for m in re.finditer(pat, text):
+            candidates.append(m.group(0))
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("questions"), list):
+            return [x for x in obj["questions"] if isinstance(x, dict)]
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+    return []
+
+
+def _to_question_type(value: str) -> str | None:
+    s = (value or "").strip().lower()
+    if s in {"single_choice", "single", "choice", "mcq", "select", "单选", "单选题", "选择题"}:
+        return "single_choice"
+    if s in {"multiple_choice", "multiple", "multi", "multi_select", "多选", "多选题"}:
+        return "multiple_choice"
+    if s in {"judge", "true_false", "tf", "判断题"}:
+        return "judge"
+    if s in {"qa", "short_answer", "essay", "问答题", "简答题"}:
+        return "qa"
+    if s in {"blank", "fill_blank", "fill", "填空题"}:
+        return "blank"
+    return None
+
+
+def _normalize_choice_options(options_raw: object) -> list[str]:
+    if not isinstance(options_raw, list):
+        return []
+    cleaned: list[str] = []
+    for item in options_raw:
+        t = str(item or "").strip()
+        if not t:
+            continue
+        t = re.sub(r"^[A-Da-d][\.\)\、\s]+", "", t).strip()
+        if t:
+            cleaned.append(t)
+    return cleaned[:4]
+
+
+def _normalize_choice_answer(answer_raw: object, options: list[str]) -> str | None:
+    s = str(answer_raw or "").strip()
+    if not s:
+        return None
+    m = re.match(r"^([A-Da-d])\b", s)
+    if m:
+        idx = ord(m.group(1).upper()) - ord("A")
+        if 0 <= idx < len(options):
+            return chr(ord("A") + idx)
+    s_clean = re.sub(r"^[A-Da-d][\.\)\、\s]+", "", s).strip().lower()
+    for i, opt in enumerate(options):
+        if opt.lower() == s_clean:
+            return chr(ord("A") + i)
+    return None
+
+
+def _normalize_judge_answer(answer_raw: object) -> str | None:
+    s = str(answer_raw or "").strip().lower()
+    if s in {"a", "正确", "对", "true", "t", "yes", "是"}:
+        return "A"
+    if s in {"b", "错误", "错", "false", "f", "no", "否"}:
+        return "B"
+    return None
+
+
+def _trim_answer(value: object, max_len: int = 32) -> str:
+    s = str(value or "").strip()
+    return s[:max_len] if len(s) > max_len else s
+
+
+def _normalize_difficulty(value: object) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"basic", "基础"}:
+        return "basic"
+    if s in {"applied", "应用"}:
+        return "applied"
+    if s in {"extended", "拓展", "提高"}:
+        return "extended"
+    return "basic"
+
+
+def _difficulty_limits(total: int) -> dict[str, int]:
+    if total <= 0:
+        return {"basic": 0, "applied": 0, "extended": 0}
+    # 默认按 4:3:3 分配（基础:应用:拓展）
+    weights = {"basic": 4, "applied": 3, "extended": 3}
+    raw = {k: total * w / 10 for k, w in weights.items()}
+    base = {k: int(v) for k, v in raw.items()}
+    remain = total - sum(base.values())
+    order = sorted(raw.keys(), key=lambda k: (raw[k] - base[k]), reverse=True)
+    i = 0
+    while remain > 0:
+        base[order[i % len(order)]] += 1
+        remain -= 1
+        i += 1
+    return base
+
+
+def _normalize_multi_answer(value: object) -> str:
+    s = str(value or "").upper().strip()
+    parts = re.split(r"[,，、\s]+", s)
+    letters = sorted({p for p in parts if p in {"A", "B", "C", "D"}})
+    return ",".join(letters)
+
+
+def _build_generate_questions_prompt(
+    chapter_title: str,
+    context: str,
+    single_choice_max: int,
+    multiple_choice_max: int,
+    judge_max: int,
+    qa_max: int,
+    blank_max: int,
+    diff_basic_target: int,
+    diff_applied_target: int,
+    diff_extended_target: int,
+) -> str:
+    return f"""你是一名严谨的课程出题助手。请仅根据给定章节内容出题，不得超纲。
+
+章节标题：{chapter_title}
+题量上限：
+- single_choice(单选题)：最多 {single_choice_max} 题
+- multiple_choice(多选题)：最多 {multiple_choice_max} 题
+- judge(判断题)：最多 {judge_max} 题
+- qa(问答题)：最多 {qa_max} 题
+- blank(填空题)：最多 {blank_max} 题
+难度目标（尽量贴近）：
+- basic(基础)：约 {diff_basic_target} 题
+- applied(应用)：约 {diff_applied_target} 题
+- extended(拓展)：约 {diff_extended_target} 题
+
+要求：
+1) 题目要清晰、覆盖关键知识点。
+2) 单选题必须提供 4 个选项，correct_answer 必须是 A/B/C/D 且仅一个答案。
+3) 多选题必须提供 4 个选项，correct_answer 用逗号分隔多个字母（如 A,C），至少 2 个答案。
+4) 判断题 correct_answer 必须是 A 或 B，A=正确，B=错误。
+5) 问答题与填空题提供标准答案（简短），不超过 32 字。
+6) 每题给 difficulty: basic|applied|extended。
+7) 仅输出 JSON，不要输出 markdown 或解释。
+
+输出格式（严格）：
+{{
+  "questions": [
+    {{
+      "type": "single_choice|multiple_choice|judge|qa|blank",
+      "difficulty": "basic|applied|extended",
+      "question_text": "题干",
+      "options": ["选项1","选项2","选项3","选项4"], 
+      "correct_answer": "A",
+      "explanation": "解析"
+    }}
+  ]
+}}
+说明：qa/blank 的 options 传 []；multiple_choice 的 correct_answer 示例 "A,C"。
+
+章节内容：
+{context}
+"""
 
 
 def _pdf_extract_text(content: bytes) -> tuple[str, int]:
@@ -799,7 +1023,26 @@ async def list_teacher_course_chapters(
     await _require_owned_course(db, user.id, course_id)
     r = await db.execute(select(Chapter).where(Chapter.course_id == course_id).order_by(Chapter.order_index, Chapter.id))
     rows = r.scalars().all()
-    return [TeacherChapterOut(id=ch.id, course_id=ch.course_id, title=ch.title, order_index=ch.order_index, syllabus_ref=ch.syllabus_ref) for ch in rows]
+    chapter_ids = [ch.id for ch in rows]
+    q_count_map: dict[int, int] = {}
+    if chapter_ids:
+        r_count = await db.execute(
+            select(Question.chapter_id, func.count(Question.id))
+            .where(Question.chapter_id.in_(chapter_ids), Question.is_active == True)
+            .group_by(Question.chapter_id)
+        )
+        q_count_map = {int(row[0]): int(row[1]) for row in r_count.all()}
+    return [
+        TeacherChapterOut(
+            id=ch.id,
+            course_id=ch.course_id,
+            title=ch.title,
+            order_index=ch.order_index,
+            syllabus_ref=ch.syllabus_ref,
+            question_count=q_count_map.get(ch.id, 0),
+        )
+        for ch in rows
+    ]
 
 
 @router.post("/courses/{course_id}/chapters", response_model=TeacherChapterOut)
@@ -867,6 +1110,384 @@ async def delete_teacher_chapter(
         await build_index_for_course(db, course.id)
     except Exception as e:
         logger.warning("delete_chapter_reindex_failed chapter_id=%s course_id=%s err=%s", ch.id, course.id, str(e))
+    return {"ok": True}
+
+
+async def _generate_questions_for_chapter(
+    db: AsyncSession,
+    chapter: Chapter,
+    course: Course,
+    body: TeacherGenerateQuestionsIn,
+) -> tuple[dict[str, int], int]:
+    r_docs = await db.execute(
+        select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
+        .where(KnowledgeDocument.chapter_id == chapter.id)
+        .order_by(KnowledgeDocument.id.desc())
+        .limit(30)
+    )
+    doc_rows = r_docs.all()
+    r_kps = await db.execute(
+        select(KnowledgePoint.title, KnowledgePoint.content)
+        .where(KnowledgePoint.chapter_id == chapter.id)
+        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+        .limit(100)
+    )
+    kp_rows = r_kps.all()
+    context_parts: list[str] = []
+    for title, content, page_ref in doc_rows:
+        c = (content or "").strip()
+        if not c:
+            continue
+        header = f"文档：{(title or '').strip()}".strip()
+        if page_ref:
+            header += f"（{page_ref}）"
+        context_parts.append(f"{header}\n{c}")
+    for title, content in kp_rows:
+        t = (title or "").strip()
+        c = (content or "").strip()
+        if not (t or c):
+            continue
+        context_parts.append(f"知识点：{t}\n{c}".strip())
+    context = "\n\n---\n\n".join(context_parts).strip()
+    if not context:
+        raise RuntimeError("该章节暂无可用内容，请先上传或解析文档后再生成")
+    if len(context) > 18000:
+        context = context[:18000]
+
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    diff_limits = _difficulty_limits(sum([body.single_choice_max, body.multiple_choice_max, body.judge_max, body.qa_max, body.blank_max]))
+    prompt = _build_generate_questions_prompt(
+        chapter_title=chapter.title,
+        context=context,
+        single_choice_max=body.single_choice_max,
+        multiple_choice_max=body.multiple_choice_max,
+        judge_max=body.judge_max,
+        qa_max=body.qa_max,
+        blank_max=body.blank_max,
+        diff_basic_target=diff_limits["basic"],
+        diff_applied_target=diff_limits["applied"],
+        diff_extended_target=diff_limits["extended"],
+    )
+    raw = llm.generate(
+        prompt,
+        max_tokens=max(1400, int(settings.llm_max_tokens or 512)),
+        temperature=0.2,
+    )
+    candidates = _extract_json_payload(raw)
+    if not candidates:
+        raise RuntimeError("模型返回结果无法解析，请重试")
+
+    limits = {
+        "single_choice": body.single_choice_max,
+        "multiple_choice": body.multiple_choice_max,
+        "judge": body.judge_max,
+        "qa": body.qa_max,
+        "blank": body.blank_max,
+    }
+    total_expected = sum(limits.values())
+    created_by_type: dict[str, int] = {"single_choice": 0, "multiple_choice": 0, "judge": 0, "qa": 0, "blank": 0}
+    created_by_diff: dict[str, int] = {"basic": 0, "applied": 0, "extended": 0}
+    skipped = 0
+
+    r_existing = await db.execute(select(Question.question_text).where(Question.chapter_id == chapter.id))
+    existing_keys = {_normalize_text_key(row[0]) for row in r_existing.all() if (row[0] or "").strip()}
+
+    def _try_add_item(item: dict, enforce_diff_limit: bool = True) -> bool:
+        nonlocal skipped
+        q_type = _to_question_type(str(item.get("type") or ""))
+        if not q_type:
+            skipped += 1
+            return False
+        if created_by_type[q_type] >= limits[q_type]:
+            return False
+        q_text_raw = str(item.get("question_text") or "").strip()
+        if not q_text_raw:
+            skipped += 1
+            return False
+        q_text = q_text_raw
+        key = _normalize_text_key(q_text)
+        if key in existing_keys:
+            skipped += 1
+            return False
+
+        explanation = str(item.get("explanation") or "").strip() or None
+        difficulty = _normalize_difficulty(item.get("difficulty"))
+        if enforce_diff_limit and created_by_diff[difficulty] >= diff_limits[difficulty]:
+            return False
+        options_text: str | None = None
+        correct_answer: str | None = None
+        if q_type == "single_choice":
+            opts = _normalize_choice_options(item.get("options"))
+            ans = _normalize_choice_answer(item.get("correct_answer"), opts)
+            if len(opts) != 4 or not ans:
+                skipped += 1
+                return False
+            options_text = json.dumps([f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)], ensure_ascii=False)
+            correct_answer = ans
+        elif q_type == "multiple_choice":
+            opts = _normalize_choice_options(item.get("options"))
+            ans = _normalize_multi_answer(item.get("correct_answer"))
+            if len(opts) != 4 or len([x for x in ans.split(",") if x]) < 2:
+                skipped += 1
+                return False
+            options_text = json.dumps([f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)], ensure_ascii=False)
+            correct_answer = ans
+        elif q_type == "judge":
+            ans = _normalize_judge_answer(item.get("correct_answer"))
+            if not ans:
+                skipped += 1
+                return False
+            options_text = json.dumps(["A. 正确", "B. 错误"], ensure_ascii=False)
+            correct_answer = ans
+        else:
+            ans = _trim_answer(item.get("correct_answer"))
+            if not ans:
+                skipped += 1
+                return False
+            correct_answer = ans
+
+        db.add(
+            Question(
+                course_id=course.id,
+                chapter_id=chapter.id,
+                difficulty=difficulty,
+                question_type=q_type,
+                question_text=q_text,
+                options=options_text,
+                correct_answer=correct_answer,
+                explanation=explanation,
+                is_active=True,
+                is_approved=True,
+            )
+        )
+        created_by_type[q_type] += 1
+        created_by_diff[difficulty] += 1
+        existing_keys.add(key)
+        return True
+
+    for item in candidates:
+        _try_add_item(item, enforce_diff_limit=True)
+        if sum(created_by_type.values()) >= total_expected:
+            break
+
+    # 若因难度配额导致未凑齐题量，第二轮放宽配额补齐
+    if sum(created_by_type.values()) < total_expected:
+        for item in candidates:
+            _try_add_item(item, enforce_diff_limit=False)
+            if sum(created_by_type.values()) >= total_expected:
+                break
+    await db.commit()
+    return created_by_type, skipped
+
+
+async def _run_question_generation_task(task_id: int):
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(select(QuestionGenerationTask).where(QuestionGenerationTask.id == task_id))
+        task = r.scalar_one_or_none()
+        if not task:
+            return
+        task.status = "running"
+        task.error_message = None
+        await db.commit()
+        try:
+            r_ch = await db.execute(
+                select(Chapter, Course)
+                .join(Course, Course.id == Chapter.course_id)
+                .where(Chapter.id == task.chapter_id, Course.id == task.course_id)
+            )
+            row = r_ch.first()
+            if not row:
+                raise RuntimeError("章节不存在")
+            chapter, course = row[0], row[1]
+            params = json.loads(task.request_payload or "{}")
+            body = TeacherGenerateQuestionsIn(**params)
+            created_by_type, skipped = await _generate_questions_for_chapter(db, chapter, course, body)
+            task.status = "success"
+            task.result_payload = json.dumps(
+                {
+                    "created": int(sum(created_by_type.values())),
+                    "by_type": created_by_type,
+                    "skipped": int(skipped),
+                },
+                ensure_ascii=False,
+            )
+            task.error_message = None
+        except Exception as e:
+            task.status = "failed"
+            task.error_message = str(e)[:1000]
+        await db.commit()
+
+
+@router.post("/chapters/{chapter_id}/questions/generate", response_model=TeacherGenerateTaskOut)
+async def create_generate_teacher_chapter_questions_task(
+    chapter_id: int,
+    body: TeacherGenerateQuestionsIn,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, course = await _require_owned_chapter(db, user.id, chapter_id)
+    total_expected = body.single_choice_max + body.multiple_choice_max + body.judge_max + body.qa_max + body.blank_max
+    if total_expected <= 0:
+        raise HTTPException(status_code=400, detail="请至少设置一种题型数量大于 0")
+    task = QuestionGenerationTask(
+        course_id=course.id,
+        chapter_id=chapter.id,
+        teacher_id=user.id,
+        status="pending",
+        request_payload=json.dumps(body.model_dump(), ensure_ascii=False),
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    background_tasks.add_task(_run_question_generation_task, task.id)
+    return TeacherGenerateTaskOut(task_id=task.id, status=task.status)
+
+
+@router.get("/questions/tasks/{task_id}", response_model=TeacherGenerateTaskStatusOut)
+async def get_generate_teacher_chapter_questions_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(select(QuestionGenerationTask).where(QuestionGenerationTask.id == task_id, QuestionGenerationTask.teacher_id == user.id))
+    task = r.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    req_payload = {}
+    res_payload = None
+    try:
+        req_payload = json.loads(task.request_payload or "{}")
+    except Exception:
+        req_payload = {}
+    try:
+        res_payload = json.loads(task.result_payload) if task.result_payload else None
+    except Exception:
+        res_payload = None
+    return TeacherGenerateTaskStatusOut(
+        id=task.id,
+        course_id=task.course_id,
+        chapter_id=task.chapter_id,
+        status=task.status,
+        request_payload=req_payload,
+        result_payload=res_payload,
+        error_message=task.error_message,
+        created_at=task.created_at.isoformat() if task.created_at else None,
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
+    )
+
+
+@router.get("/chapters/{chapter_id}/questions", response_model=list[TeacherQuestionOut])
+async def list_teacher_chapter_questions(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_chapter(db, user.id, chapter_id)
+    r = await db.execute(
+        select(Question, Chapter, Course)
+        .join(Chapter, Chapter.id == Question.chapter_id)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(Question.chapter_id == chapter_id, Question.is_active == True, Course.owner_teacher_id == user.id)
+        .order_by(Question.id.desc())
+    )
+    rows = r.all()
+    return [
+        TeacherQuestionOut(
+            id=q.id,
+            course_id=q.course_id or c.id,
+            course_name=c.name,
+            chapter_id=ch.id,
+            chapter_title=ch.title,
+            question_type=(q.question_type or "single_choice"),
+            difficulty=q.difficulty,
+            question_text=q.question_text,
+            options=q.options,
+            correct_answer=q.correct_answer,
+            explanation=q.explanation,
+            created_at=q.created_at.isoformat() if q.created_at else None,
+        )
+        for q, ch, c in rows
+    ]
+
+
+@router.put("/questions/{question_id}", response_model=TeacherQuestionOut)
+async def update_teacher_question(
+    question_id: int,
+    body: TeacherQuestionUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(Question, Chapter, Course)
+        .join(Chapter, Chapter.id == Question.chapter_id)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(Question.id == question_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="题目不存在或无权限")
+    q, ch, c = row[0], row[1], row[2]
+    if body.difficulty is not None:
+        q.difficulty = _normalize_difficulty(body.difficulty)
+    if body.question_text is not None:
+        text = body.question_text.strip()
+        if not text:
+            raise HTTPException(status_code=400, detail="question_text 不能为空")
+        q.question_text = text
+    if body.options is not None:
+        opts = [str(x or "").strip() for x in body.options if str(x or "").strip()]
+        q.options = json.dumps(opts, ensure_ascii=False) if opts else None
+    if body.correct_answer is not None:
+        ans = body.correct_answer.strip()
+        if not ans:
+            raise HTTPException(status_code=400, detail="correct_answer 不能为空")
+        if (q.question_type or "") == "multiple_choice":
+            ans = _normalize_multi_answer(ans) or ans
+        q.correct_answer = ans
+    if body.explanation is not None:
+        q.explanation = body.explanation.strip() or None
+    q.course_id = c.id
+    await db.commit()
+    await db.refresh(q)
+    return TeacherQuestionOut(
+        id=q.id,
+        course_id=q.course_id,
+        course_name=c.name,
+        chapter_id=ch.id,
+        chapter_title=ch.title,
+        question_type=(q.question_type or "single_choice"),
+        difficulty=q.difficulty,
+        question_text=q.question_text,
+        options=q.options,
+        correct_answer=q.correct_answer,
+        explanation=q.explanation,
+        created_at=q.created_at.isoformat() if q.created_at else None,
+    )
+
+
+@router.delete("/questions/{question_id}")
+async def delete_teacher_question(
+    question_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(Question, Course)
+        .join(Chapter, Chapter.id == Question.chapter_id)
+        .join(Course, Course.id == Chapter.course_id)
+        .where(Question.id == question_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="题目不存在或无权限")
+    q = row[0]
+    await db.delete(q)
+    await db.commit()
     return {"ok": True}
 
 

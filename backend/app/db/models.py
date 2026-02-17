@@ -124,9 +124,11 @@ class KnowledgeDocument(Base):
 class Question(Base):
     __tablename__ = "questions"
     id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)
     chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False)
     knowledge_point_ids = Column(String(256), nullable=True)  # 逗号分隔考点 id
     difficulty = Column(String(20), default=Difficulty.basic.value)
+    question_type = Column(String(24), default="single_choice", nullable=False)  # single_choice | multiple_choice | judge | qa | blank
     question_text = Column(Text, nullable=False)
     options = Column(Text, nullable=True)  # JSON: ["A选项","B选项",...]
     correct_answer = Column(String(32), nullable=False)  # 选项键或简答要点
@@ -134,6 +136,20 @@ class Question(Base):
     ppt_ref = Column(String(128), nullable=True)
     is_active = Column(Boolean, default=True)
     is_approved = Column(Boolean, default=True)  # 内容审核：教师复核后为 True，先审后发
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class QuestionGenerationTask(Base):
+    __tablename__ = "question_generation_tasks"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String(24), nullable=False, default="pending")  # pending | running | success | failed
+    request_payload = Column(Text, nullable=False, default="{}")
+    result_payload = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

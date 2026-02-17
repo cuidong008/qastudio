@@ -236,12 +236,66 @@ export const api = {
           { method: "POST" }
         ),
       chapters: (courseId: number) =>
-        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }[]>(`/teacher/courses/${courseId}/chapters`),
+        request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null; question_count: number }[]>(`/teacher/courses/${courseId}/chapters`),
       createChapter: (courseId: number, body: { title: string; order_index?: number; syllabus_ref?: string }) =>
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/courses/${courseId}/chapters`, { method: "POST", body }),
       updateChapter: (chapterId: number, body: { title?: string; order_index?: number; syllabus_ref?: string }) =>
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/chapters/${chapterId}`, { method: "PUT", body }),
       deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/teacher/chapters/${chapterId}`, { method: "DELETE" }),
+      generateChapterQuestions: (
+        chapterId: number,
+        body: { single_choice_max: number; multiple_choice_max: number; judge_max: number; qa_max: number; blank_max: number }
+      ) =>
+        request<{ ok: boolean; task_id: number; status: string }>(
+          `/teacher/chapters/${chapterId}/questions/generate`,
+          { method: "POST", body }
+        ),
+      getQuestionTask: (taskId: number) =>
+        request<{
+          id: number;
+          course_id: number;
+          chapter_id: number;
+          status: string;
+          request_payload: Record<string, unknown>;
+          result_payload: { created: number; by_type: { single_choice: number; multiple_choice: number; judge: number; qa: number; blank: number }; skipped: number } | null;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/teacher/questions/tasks/${taskId}`),
+      chapterQuestions: (chapterId: number) =>
+        request<{
+          id: number;
+          course_id: number | null;
+          course_name: string | null;
+          chapter_id: number;
+          chapter_title: string;
+          question_type: string;
+          difficulty: string;
+          question_text: string;
+          options: string | null;
+          correct_answer: string;
+          explanation: string | null;
+          created_at: string | null;
+        }[]>(`/teacher/chapters/${chapterId}/questions`),
+      updateQuestion: (
+        questionId: number,
+        body: { difficulty?: string; question_text?: string; options?: string[] | null; correct_answer?: string; explanation?: string | null }
+      ) =>
+        request<{
+          id: number;
+          course_id: number | null;
+          course_name: string | null;
+          chapter_id: number;
+          chapter_title: string;
+          question_type: string;
+          difficulty: string;
+          question_text: string;
+          options: string | null;
+          correct_answer: string;
+          explanation: string | null;
+          created_at: string | null;
+        }>(`/teacher/questions/${questionId}`, { method: "PUT", body }),
+      deleteQuestion: (questionId: number) => request<{ ok: boolean }>(`/teacher/questions/${questionId}`, { method: "DELETE" }),
       chapterDocuments: (chapterId: number) =>
         request<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }[]>(
           `/teacher/chapters/${chapterId}/documents`

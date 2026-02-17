@@ -4,7 +4,9 @@ import { api } from "../../api/client";
 type QuestionItem = {
   id: number;
   chapter_id?: number;
+  course_id?: number | null;
   difficulty?: string;
+  question_type?: string | null;
   question_text: string;
   options: string | null;
   explanation: string | null;
@@ -82,6 +84,18 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
         }
       })()
     : [];
+  const isMultiChoice = (current?.question_type || "") === "multiple_choice";
+  const pickedMulti = userAnswer
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean);
+
+  const toggleMultiAnswer = (letter: string) => {
+    const next = new Set(pickedMulti);
+    if (next.has(letter)) next.delete(letter);
+    else next.add(letter);
+    setUserAnswer(Array.from(next).sort().join(","));
+  };
 
   return (
     <div>
@@ -136,7 +150,12 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
                     border: "1px solid var(--border)",
                   }}
                 >
-                  <input type="radio" name="answer" value={opt.slice(0, 1)} checked={userAnswer === opt.slice(0, 1)} onChange={() => setUserAnswer(opt.slice(0, 1))} />
+                  {isMultiChoice && (
+                    <input type="checkbox" checked={pickedMulti.includes(opt.slice(0, 1))} onChange={() => toggleMultiAnswer(opt.slice(0, 1))} />
+                  )}
+                  {!isMultiChoice && (
+                    <input type="radio" name="answer" value={opt.slice(0, 1)} checked={userAnswer === opt.slice(0, 1)} onChange={() => setUserAnswer(opt.slice(0, 1))} />
+                  )}
                   {opt}
                 </label>
               ))}

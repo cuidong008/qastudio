@@ -11,6 +11,7 @@ import TeacherDashboard from "./pages/teacher/TeacherDashboard";
 import TeacherConfig from "./pages/teacher/TeacherConfig";
 import TeacherCourses from "./pages/teacher/TeacherCourses";
 import TeacherClasses from "./pages/teacher/TeacherClasses";
+import TeacherChapterQuestions from "./pages/teacher/TeacherChapterQuestions";
 import AdminLayout from "./components/AdminLayout";
 import AdminHome from "./pages/admin/AdminHome";
 import AdminUsers from "./pages/admin/AdminUsers";
@@ -48,6 +49,7 @@ function App() {
       <Route path="/student/feedback" element={<Layout role="student" requireAuth><Feedback /></Layout>} />
       <Route path="/teacher" element={<TeacherLayout requireAuth><TeacherDashboard /></TeacherLayout>} />
       <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />
+      <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
       <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
       <Route path="/teacher/config" element={<TeacherLayout requireAuth><TeacherConfig /></TeacherLayout>} />
       <Route path="/admin" element={<AdminLayout />}>

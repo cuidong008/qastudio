@@ -117,6 +117,71 @@ def _migrate_questions_asked_course_and_rag(sync_conn):
         pass
 
 
+def _migrate_questions_course_and_type(sync_conn):
+    """为已有 questions 表添加 course_id / question_type 列，并回填 course_id（SQLite）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE questions ADD COLUMN course_id INTEGER"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("ALTER TABLE questions ADD COLUMN question_type VARCHAR(24) DEFAULT 'single_choice'"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(
+            text(
+                """
+                UPDATE questions
+                SET course_id = (
+                    SELECT chapters.course_id
+                    FROM chapters
+                    WHERE chapters.id = questions.chapter_id
+                )
+                WHERE course_id IS NULL
+                """
+            )
+        )
+    except Exception:
+        pass
+
+
+def _migrate_question_generation_tasks(sync_conn):
+    """创建习题生成任务表（SQLite 兼容）"""
+    try:
+        sync_conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS question_generation_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_id INTEGER NOT NULL,
+                    chapter_id INTEGER NOT NULL,
+                    teacher_id INTEGER NOT NULL,
+                    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                    request_payload TEXT NOT NULL DEFAULT '{}',
+                    result_payload TEXT,
+                    error_message TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_qgt_course_id ON question_generation_tasks (course_id)"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_qgt_chapter_id ON question_generation_tasks (chapter_id)"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_qgt_teacher_id ON question_generation_tasks (teacher_id)"))
+    except Exception:
+        pass
+
+
 def _migrate_course_question_synonyms(sync_conn):
     """创建课程问句同义映射表（SQLite 兼容）"""
     try:
@@ -180,4 +245,6 @@ async def init_db():
         await conn.run_sync(_backfill_student_class_memberships)
         await conn.run_sync(_migrate_knowledge_documents_upload_fields)
         await conn.run_sync(_migrate_questions_asked_course_and_rag)
+        await conn.run_sync(_migrate_questions_course_and_type)
+        await conn.run_sync(_migrate_question_generation_tasks)
         await conn.run_sync(_migrate_course_question_synonyms)
