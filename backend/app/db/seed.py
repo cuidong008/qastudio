@@ -10,6 +10,8 @@ from .session import (
     _migrate_class_course_owner,
     _migrate_user_student_no,
     _backfill_student_class_memberships,
+    _migrate_questions_asked_course_and_rag,
+    _migrate_course_question_synonyms,
 )
 from .models import (
     Base, Chapter, Class, Course, Teaching, KnowledgePoint, KnowledgeDocument,
@@ -115,6 +117,8 @@ async def run_seed():
         await conn.run_sync(_migrate_class_course_owner)
         await conn.run_sync(_migrate_user_student_no)
         await conn.run_sync(_backfill_student_class_memberships)
+        await conn.run_sync(_migrate_questions_asked_course_and_rag)
+        await conn.run_sync(_migrate_course_question_synonyms)
     async with AsyncSessionLocal() as session:
         await seed(session)
 

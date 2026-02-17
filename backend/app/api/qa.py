@@ -231,12 +231,18 @@ async def ask(
                 )
             question_asked_id = None
             if user:
+                rag_hit = bool(
+                    ((ppt_ref or "").strip() and "当前问题在知识库中没有参考答案" not in (ppt_ref or ""))
+                    or (knowledge_point or "").strip()
+                )
                 record = QuestionAsked(
                     user_id=user.id,
+                    course_id=course_id,
                     chapter_id=None,
                     question_text=body.question,
                     answer_text=answer,
                     ppt_ref=ppt_ref,
+                    rag_hit=rag_hit,
                 )
                 db.add(record)
                 await db.flush()
@@ -298,10 +304,12 @@ async def ask(
         if user:
             record = QuestionAsked(
                 user_id=user.id,
+                course_id=course_id,
                 chapter_id=None,
                 question_text=body.question,
                 answer_text=fallback_answer,
                 ppt_ref=no_ref_msg,
+                rag_hit=False,
             )
             db.add(record)
             await db.flush()
@@ -347,10 +355,12 @@ async def ask(
     if user:
         record = QuestionAsked(
             user_id=user.id,
+            course_id=course_id,
             chapter_id=primary_doc.chapter_id if primary_doc else None,
             question_text=body.question,
             answer_text=resp.answer,
             ppt_ref=resp.ppt_ref,
+            rag_hit=False,
         )
         db.add(record)
         await db.flush()

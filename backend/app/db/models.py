@@ -196,11 +196,28 @@ class QuestionAsked(Base):
     __tablename__ = "questions_asked"
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)
     chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=True)
     question_text = Column(Text, nullable=False)
     answer_text = Column(Text, nullable=True)
     ppt_ref = Column(String(128), nullable=True)
+    rag_hit = Column(Boolean, nullable=False, default=False)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class CourseQuestionSynonym(Base):
+    """课程问句同义映射：自动学习/维护，用于高频问题归并"""
+    __tablename__ = "course_question_synonyms"
+    __table_args__ = (UniqueConstraint("course_id", "source_term", name="uq_course_question_synonym"),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    source_term = Column(String(128), nullable=False)
+    target_term = Column(String(128), nullable=False)
+    confidence = Column(Float, nullable=False, default=0.8)
+    status = Column(String(16), nullable=False, default="active")  # active | disabled
+    auto_generated = Column(Boolean, nullable=False, default=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
 # ---------- 系统配置（如 RAG 通过 Web 界面配置，存库优先于 .env）----------

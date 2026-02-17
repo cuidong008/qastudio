@@ -1,6 +1,7 @@
 """教师端：教学内容配置、课程/班级管理、学情数据监控与导出"""
 import base64
 import csv
+import difflib
 import io
 import json
 import logging
@@ -9,13 +10,14 @@ import re
 import subprocess
 import tempfile
 import time
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -24,7 +26,7 @@ from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
     StudentClassMembership,
     Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
-    AnswerRecord, QuestionAsked, ChapterConfig,
+    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym,
 )
 from ..api.auth import require_teacher
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
@@ -1432,6 +1434,271 @@ async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
     return [row[0] for row in r.all()]
 
 
+AUTO_SYNONYM_REFRESH_HOURS = 24
+AUTO_SYNONYM_MIN_CONFIDENCE = 0.86
+AUTO_SYNONYM_MAX_PER_COURSE = 80
+
+
+def _normalize_question_text(question: str, course_synonyms: dict[str, str] | None = None) -> str:
+    text = (question or "").strip().lower()
+    if not text:
+        return ""
+    text = re.sub(r"\s+", "", text)
+    text = re.sub(r"[，,。.!！?？:：;；、/\\\"'“”‘’`~·()\[\]{}<>《》【】\-_=+|]+", "", text)
+    replacements = {
+        "请问一下": "请问",
+        "请问": "",
+        "一下": "",
+        "么": "吗",
+        "嘛": "吗",
+        "提交": "上交",
+        "交作业": "上交作业",
+        "练习": "作业",
+        "什么时候": "何时",
+        "啥时候": "何时",
+        "怎么": "如何",
+        "如何样": "如何",
+        "有何": "",
+        "有什么": "",
+        "有哪些": "",
+        "是什么": "",
+        "是啥": "",
+        "特征": "特点",
+        "的": "",
+    }
+    for src, dst in replacements.items():
+        text = text.replace(src, dst)
+    for phrase in ("有什么特点", "特点是什么", "有哪些特点", "有什么特征", "特征是什么", "有哪些特征"):
+        text = text.replace(phrase, "特点")
+    if course_synonyms:
+        for src in sorted(course_synonyms.keys(), key=len, reverse=True):
+            dst = course_synonyms.get(src, "")
+            if not src or not dst:
+                continue
+            text = text.replace(src, dst)
+    return text.strip()
+
+
+def _question_keys_similar(a: str, b: str) -> bool:
+    if not a or not b:
+        return False
+    if a == b:
+        return True
+    if a in b or b in a:
+        return True
+    ratio = difflib.SequenceMatcher(a=a, b=b).ratio()
+    return ratio >= 0.86
+
+
+def _extract_course_term(text: str) -> str:
+    s = _normalize_question_text(text)
+    if len(s) < 2:
+        return ""
+    return s[:40]
+
+
+def _build_rule_based_aliases(terms: set[str]) -> list[tuple[str, str, float]]:
+    pairs: list[tuple[str, str, float]] = []
+    if not terms:
+        return pairs
+    term_set = {t for t in terms if len(t) >= 2}
+    for t in term_set:
+        if t.endswith("网络"):
+            cand = t[:-2] + "网"
+            if len(cand) >= 2:
+                pairs.append((t, cand, 0.9))
+        if t.endswith("特征"):
+            cand = t[:-2] + "特点"
+            pairs.append((t, cand, 0.88))
+        if t.startswith("计算机") and len(t) > 3:
+            cand = t.replace("计算机", "", 1)
+            if len(cand) >= 2:
+                pairs.append((t, cand, 0.86))
+    out: list[tuple[str, str, float]] = []
+    seen: set[tuple[str, str]] = set()
+    for src, dst, conf in pairs:
+        if src == dst or len(src) < 2 or len(dst) < 2:
+            continue
+        k = (src, dst)
+        if k in seen:
+            continue
+        seen.add(k)
+        out.append((src, dst, conf))
+    return out
+
+
+async def _auto_generate_course_synonyms(db: AsyncSession, course_id: int) -> list[tuple[str, str, float]]:
+    # 1) 从课程内容抽取术语做规则映射
+    r_ch = await db.execute(select(Chapter.id, Chapter.title).where(Chapter.course_id == course_id).order_by(Chapter.id))
+    ch_rows = r_ch.all()
+    chapter_ids = [row[0] for row in ch_rows]
+    terms: set[str] = set()
+    for _, title in ch_rows:
+        t = _extract_course_term(title or "")
+        if t:
+            terms.add(t)
+    if chapter_ids:
+        r_kp = await db.execute(select(KnowledgePoint.title).where(KnowledgePoint.chapter_id.in_(chapter_ids)).limit(500))
+        for (title,) in r_kp.all():
+            t = _extract_course_term(title or "")
+            if t:
+                terms.add(t)
+        r_docs = await db.execute(select(KnowledgeDocument.title).where(KnowledgeDocument.chapter_id.in_(chapter_ids)).limit(500))
+        for (title,) in r_docs.all():
+            t = _extract_course_term(title or "")
+            if t:
+                terms.add(t)
+    pairs = _build_rule_based_aliases(terms)
+
+    # 2) 从真实问句自动学习（同课程、RAG 命中）
+    r_q = await db.execute(
+        select(QuestionAsked.question_text, func.count(QuestionAsked.id).label("c"))
+        .where(QuestionAsked.course_id == course_id, QuestionAsked.rag_hit == True)
+        .group_by(QuestionAsked.question_text)
+        .order_by(func.count(QuestionAsked.id).desc())
+        .limit(300)
+    )
+    rows = r_q.all()
+    norms = [_normalize_question_text(q or "") for q, _ in rows if (q or "").strip()]
+    seen_pairs: set[tuple[str, str]] = {(src, dst) for src, dst, _ in pairs}
+    for i in range(len(norms)):
+        a = norms[i]
+        if len(a) < 3:
+            continue
+        for j in range(i + 1, len(norms)):
+            b = norms[j]
+            if len(b) < 3:
+                continue
+            ratio = difflib.SequenceMatcher(a=a, b=b).ratio()
+            if ratio < AUTO_SYNONYM_MIN_CONFIDENCE:
+                continue
+            src = a if len(a) >= len(b) else b
+            dst = b if len(a) >= len(b) else a
+            if src == dst:
+                continue
+            key = (src, dst)
+            if key in seen_pairs:
+                continue
+            seen_pairs.add(key)
+            pairs.append((src, dst, min(0.99, ratio)))
+            if len(pairs) >= AUTO_SYNONYM_MAX_PER_COURSE:
+                return pairs
+    return pairs
+
+
+async def _ensure_course_synonyms(db: AsyncSession, course_id: int):
+    now = datetime.utcnow()
+    r_existing = await db.execute(
+        select(CourseQuestionSynonym)
+        .where(
+            CourseQuestionSynonym.course_id == course_id,
+            CourseQuestionSynonym.auto_generated == True,
+        )
+        .order_by(CourseQuestionSynonym.updated_at.desc())
+    )
+    existing = r_existing.scalars().all()
+    if existing:
+        latest = existing[0].updated_at or existing[0].created_at
+        if latest and latest > now - timedelta(hours=AUTO_SYNONYM_REFRESH_HOURS):
+            return
+    pairs = await _auto_generate_course_synonyms(db, course_id)
+    if not pairs:
+        return
+    existing_by_source = {_normalize_question_text(x.source_term): x for x in existing}
+    for src, dst, conf in pairs[:AUTO_SYNONYM_MAX_PER_COURSE]:
+        src_norm = _normalize_question_text(src)
+        dst_norm = _normalize_question_text(dst)
+        if len(src_norm) < 2 or len(dst_norm) < 2 or src_norm == dst_norm:
+            continue
+        match = existing_by_source.get(src_norm)
+        if match:
+            match.target_term = dst_norm
+            match.confidence = float(conf)
+            match.status = "active"
+            match.updated_at = now
+            continue
+        obj = CourseQuestionSynonym(
+            course_id=course_id,
+            source_term=src_norm,
+            target_term=dst_norm,
+            confidence=float(conf),
+            status="active",
+            auto_generated=True,
+        )
+        db.add(obj)
+        existing_by_source[src_norm] = obj
+    await db.flush()
+
+
+async def _load_course_synonym_maps(db: AsyncSession, course_ids: set[int]) -> dict[int, dict[str, str]]:
+    if not course_ids:
+        return {}
+    for course_id in course_ids:
+        await _ensure_course_synonyms(db, course_id)
+    r = await db.execute(
+        select(
+            CourseQuestionSynonym.course_id,
+            CourseQuestionSynonym.source_term,
+            CourseQuestionSynonym.target_term,
+            CourseQuestionSynonym.confidence,
+        )
+        .where(
+            CourseQuestionSynonym.course_id.in_(course_ids),
+            CourseQuestionSynonym.status == "active",
+        )
+    )
+    out: dict[int, dict[str, str]] = {cid: {} for cid in course_ids}
+    for course_id, source_term, target_term, confidence in r.all():
+        if float(confidence or 0.0) < AUTO_SYNONYM_MIN_CONFIDENCE:
+            continue
+        src = _normalize_question_text(source_term or "")
+        dst = _normalize_question_text(target_term or "")
+        if not src or not dst or src == dst:
+            continue
+        out.setdefault(course_id, {})[src] = dst
+    return out
+
+
+def _merge_similar_questions(rows: list[tuple[str, int, int | None]], course_synonym_maps: dict[int, dict[str, str]], limit: int = 5) -> list[dict]:
+    clusters: list[dict] = []
+    for question_text, count, course_id in rows:
+        question = (question_text or "").strip()
+        if not question:
+            continue
+        aliases = course_synonym_maps.get(course_id or -1, {})
+        key = _normalize_question_text(question, aliases) or question
+        hit = None
+        for c in clusters:
+            if _question_keys_similar(key, c["key"]):
+                hit = c
+                break
+        if hit is None:
+            clusters.append({
+                "key": key,
+                "question": question,
+                "count": int(count or 0),
+            })
+            continue
+        hit["count"] += int(count or 0)
+        if len(question) < len(hit["question"]):
+            hit["question"] = question
+        if len(key) < len(hit["key"]):
+            hit["key"] = key
+    merged = sorted(
+        [{"question": c["question"], "count": c["count"]} for c in clusters],
+        key=lambda x: (-x["count"], x["question"]),
+    )
+    return merged[:limit]
+
+
+async def _teacher_course_ids(db: AsyncSession, teacher_id: int) -> set[int]:
+    r_owner = await db.execute(select(Course.id).where(Course.owner_teacher_id == teacher_id))
+    owner_ids = {row[0] for row in r_owner.all()}
+    r_teaching = await db.execute(select(Teaching.course_id).where(Teaching.teacher_id == teacher_id))
+    teaching_ids = {row[0] for row in r_teaching.all()}
+    return owner_ids | teaching_ids
+
+
 @router.get("/stats/overview", response_model=StatsOverviewOut)
 async def stats_overview(
     class_id: int | None = Query(None),
@@ -1441,6 +1708,11 @@ async def stats_overview(
     if class_id is not None and user.role == UserRole.teacher.value:
         await _require_owned_class(db, user.id, class_id)
     user_ids = await _user_ids_by_class(db, class_id)
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if user.role == UserRole.teacher.value else set()
+    chapter_ids_in_teacher_courses: list[int] = []
+    if user.role == UserRole.teacher.value and teacher_course_ids:
+        r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(teacher_course_ids)))
+        chapter_ids_in_teacher_courses = [row[0] for row in r_ch.all()]
 
     # 预习完成率（可选按班级）
     q_pr = select(func.count(PreviewRecord.id))
@@ -1456,20 +1728,46 @@ async def stats_overview(
 
     # 提问总数与高频问题
     q_qa = select(func.count(QuestionAsked.id))
+    if user.role == UserRole.teacher.value:
+        if not teacher_course_ids:
+            q_qa = q_qa.where(QuestionAsked.id == -1)
+        else:
+            course_scope = QuestionAsked.course_id.in_(teacher_course_ids)
+            if chapter_ids_in_teacher_courses:
+                course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(chapter_ids_in_teacher_courses))
+            q_qa = q_qa.where(
+                QuestionAsked.rag_hit == True,
+                course_scope,
+            )
     if user_ids is not None:
         q_qa = q_qa.where(QuestionAsked.user_id.in_(user_ids))
     qa_total = await db.execute(q_qa)
     total_asked = qa_total.scalar() or 0
     top_q_stmt = (
-        select(QuestionAsked.question_text, func.count(QuestionAsked.id).label("c"))
-        .group_by(QuestionAsked.question_text)
-        .order_by(func.count(QuestionAsked.id).desc())
-        .limit(5)
+        select(
+            QuestionAsked.course_id,
+            QuestionAsked.question_text,
+            func.count(QuestionAsked.id).label("c"),
+        )
+        .group_by(QuestionAsked.course_id, QuestionAsked.question_text)
     )
+    if user.role == UserRole.teacher.value:
+        if not teacher_course_ids:
+            top_q_stmt = top_q_stmt.where(QuestionAsked.id == -1)
+        else:
+            course_scope = QuestionAsked.course_id.in_(teacher_course_ids)
+            if chapter_ids_in_teacher_courses:
+                course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(chapter_ids_in_teacher_courses))
+            top_q_stmt = top_q_stmt.where(
+                QuestionAsked.rag_hit == True,
+                course_scope,
+            )
     if user_ids is not None:
         top_q_stmt = top_q_stmt.where(QuestionAsked.user_id.in_(user_ids))
+    top_q_stmt = top_q_stmt.order_by(func.count(QuestionAsked.id).desc()).limit(200)
     top_q = await db.execute(top_q_stmt)
-    top_asked = [{"question": r[0], "count": r[1]} for r in top_q.all()]
+    course_synonym_maps = await _load_course_synonym_maps(db, teacher_course_ids) if teacher_course_ids else {}
+    top_asked = _merge_similar_questions([(r[1], r[2], r[0]) for r in top_q.all()], course_synonym_maps, limit=5)
 
     # 作答正确率
     q_ans = select(func.count(AnswerRecord.id))

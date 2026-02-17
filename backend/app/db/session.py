@@ -81,6 +81,74 @@ def _migrate_knowledge_documents_upload_fields(sync_conn):
             pass
 
 
+def _migrate_questions_asked_course_and_rag(sync_conn):
+    """为已有 questions_asked 表添加 course_id / rag_hit 列（SQLite）并尽力回填 course_id"""
+    try:
+        sync_conn.execute(text("ALTER TABLE questions_asked ADD COLUMN course_id INTEGER"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("ALTER TABLE questions_asked ADD COLUMN rag_hit BOOLEAN DEFAULT 0"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(
+            text(
+                """
+                UPDATE questions_asked
+                SET course_id = (
+                    SELECT chapters.course_id
+                    FROM chapters
+                    WHERE chapters.id = questions_asked.chapter_id
+                )
+                WHERE course_id IS NULL AND chapter_id IS NOT NULL
+                """
+            )
+        )
+    except Exception:
+        pass
+
+
+def _migrate_course_question_synonyms(sync_conn):
+    """创建课程问句同义映射表（SQLite 兼容）"""
+    try:
+        sync_conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS course_question_synonyms (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_id INTEGER NOT NULL,
+                    source_term VARCHAR(128) NOT NULL,
+                    target_term VARCHAR(128) NOT NULL,
+                    confidence FLOAT NOT NULL DEFAULT 0.8,
+                    status VARCHAR(16) NOT NULL DEFAULT 'active',
+                    auto_generated BOOLEAN NOT NULL DEFAULT 1,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(
+            text(
+                "CREATE UNIQUE INDEX IF NOT EXISTS uq_course_question_synonym ON course_question_synonyms (course_id, source_term)"
+            )
+        )
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(
+            text(
+                "CREATE INDEX IF NOT EXISTS ix_course_question_synonyms_course_id ON course_question_synonyms (course_id)"
+            )
+        )
+    except Exception:
+        pass
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
@@ -102,3 +170,5 @@ async def init_db():
         await conn.run_sync(_migrate_user_student_no)
         await conn.run_sync(_backfill_student_class_memberships)
         await conn.run_sync(_migrate_knowledge_documents_upload_fields)
+        await conn.run_sync(_migrate_questions_asked_course_and_rag)
+        await conn.run_sync(_migrate_course_question_synonyms)
