@@ -85,7 +85,14 @@ export default function AdminCourses() {
   };
   const deleteChapter = (chapterId: number) => {
     if (!confirm("确定删除该章节？")) return;
-    api.admin.courses.deleteChapter(chapterId).then(() => expandCourseId != null && api.admin.courses.chapters(expandCourseId).then(setChapters)).catch((e) => alert(e?.message || "删除失败"));
+    api.admin.courses
+      .deleteChapter(chapterId)
+      .then(() => {
+        if (expandCourseId != null) {
+          return api.admin.courses.chapters(expandCourseId).then(setChapters);
+        }
+      })
+      .catch((e) => alert(e?.message || "删除失败"));
   };
 
   const doReindex = (courseId: number, courseName: string) => {

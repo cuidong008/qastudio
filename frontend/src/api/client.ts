@@ -78,11 +78,14 @@ function getToken(): string | null {
   return localStorage.getItem("token");
 }
 
+type JsonRequestOptions = Omit<RequestInit, "body"> & { body?: unknown };
+
 export async function request<T>(
   path: string,
-  options: RequestInit & { body?: unknown } = {}
+  options: JsonRequestOptions = {}
 ): Promise<T> {
   const { body, ...rest } = options;
+  const payload = body === undefined ? undefined : JSON.stringify(body);
   const headers: HeadersInit = {
     "Content-Type": "application/json",
     ...(rest.headers as Record<string, string>),
@@ -92,7 +95,7 @@ export async function request<T>(
   const res = await fetch(`${API_BASE}${path}`, {
     ...rest,
     headers,
-    body: body !== undefined ? JSON.stringify(body) : rest.body,
+    body: payload,
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));

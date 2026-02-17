@@ -5,6 +5,8 @@ import Review from "./Review";
 import Exercises from "./Exercises";
 import Feedback from "./Feedback";
 
+const CHAT_STORAGE_KEY = "qastudio.student.chat.v1";
+
 type ChatMessage = {
   id: number;
   role: "user" | "assistant";
@@ -20,6 +22,9 @@ type ChatSession = {
   id: number;
   title: string;
   courseId: number | null;
+  customTitle: boolean;
+  createdAt: number;
+  updatedAt: number;
   messages: ChatMessage[];
 };
 
@@ -32,26 +37,74 @@ const studentMenus = [
 ] as const;
 type WorkspaceMode = (typeof studentMenus)[number]["key"];
 
-function makeSession(id: number): ChatSession {
+function makeSession(id: number, courseId: number | null = null): ChatSession {
+  const now = Date.now();
   return {
     id,
     title: "新对话",
-    courseId: null,
+    courseId,
+    customTitle: false,
+    createdAt: now,
+    updatedAt: now,
     messages: [],
   };
 }
 
+function hasUserQuestion(session: ChatSession): boolean {
+  return session.messages.some((m) => m.role === "user");
+}
+
+function loadChatState(): { sessions: ChatSession[]; sessionSeq: number; activeSessionId: number } {
+  const fallback = { sessions: [makeSession(1)], sessionSeq: 2, activeSessionId: 1 };
+  if (typeof window === "undefined") return fallback;
+  try {
+    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    if (!raw) return fallback;
+    const parsed = JSON.parse(raw) as {
+      sessions?: ChatSession[];
+      sessionSeq?: number;
+      activeSessionId?: number;
+    };
+    if (!Array.isArray(parsed.sessions) || parsed.sessions.length === 0) return fallback;
+    const sessions = parsed.sessions
+      .filter((s) => typeof s?.id === "number")
+      .map((s) => ({
+        ...s,
+        courseId: s.courseId ?? null,
+        customTitle: Boolean(s.customTitle),
+        createdAt: typeof s.createdAt === "number" ? s.createdAt : Date.now(),
+        updatedAt: typeof s.updatedAt === "number" ? s.updatedAt : Date.now(),
+        messages: Array.isArray(s.messages) ? s.messages : [],
+      }));
+    if (sessions.length === 0) return fallback;
+    const maxId = Math.max(...sessions.map((s) => s.id));
+    const active = sessions.some((s) => s.id === parsed.activeSessionId) ? parsed.activeSessionId! : sessions[0].id;
+    return {
+      sessions,
+      sessionSeq: typeof parsed.sessionSeq === "number" ? Math.max(parsed.sessionSeq, maxId + 1) : maxId + 1,
+      activeSessionId: active,
+    };
+  } catch {
+    return fallback;
+  }
+}
+
 export default function InClass() {
+  const initialState = useMemo(() => loadChatState(), []);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
   const [feedbackSendingId, setFeedbackSendingId] = useState<number | null>(null);
   const [submittedQaIds, setSubmittedQaIds] = useState<Set<number>>(new Set());
   const [openingReferenceId, setOpeningReferenceId] = useState<number | null>(null);
+  const [renameSessionId, setRenameSessionId] = useState<number | null>(null);
+  const [renameValue, setRenameValue] = useState("");
+  const [sessionSearch, setSessionSearch] = useState("");
+  const [collapsedCourseGroups, setCollapsedCourseGroups] = useState<Record<string, boolean>>({});
   const [mode, setMode] = useState<WorkspaceMode>("qa");
-  const [sessionSeq, setSessionSeq] = useState(2);
-  const [sessions, setSessions] = useState<ChatSession[]>([makeSession(1)]);
-  const [activeSessionId, setActiveSessionId] = useState(1);
+  const [sessionSeq, setSessionSeq] = useState(initialState.sessionSeq);
+  const [sessions, setSessions] = useState<ChatSession[]>(initialState.sessions);
+  const [activeSessionId, setActiveSessionId] = useState(initialState.activeSessionId);
 
   useEffect(() => {
     api.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
@@ -62,18 +115,70 @@ export default function InClass() {
     [sessions, activeSessionId]
   );
 
-  const updateActiveSession = (updater: (session: ChatSession) => ChatSession) => {
+  const courseNameMap = useMemo(() => {
+    const m = new Map<number, string>();
+    courses.forEach((c) => m.set(c.id, c.name));
+    return m;
+  }, [courses]);
+
+  const groupedSessions = useMemo(() => {
+    const keyword = sessionSearch.trim().toLowerCase();
+    const grouped = new Map<number | null, ChatSession[]>();
+    sessions.forEach((s) => {
+      if (keyword) {
+        const titleMatched = s.title.toLowerCase().includes(keyword);
+        const messageMatched = s.messages.some((m) => m.content.toLowerCase().includes(keyword));
+        if (!titleMatched && !messageMatched) return;
+      }
+      const key = s.courseId ?? null;
+      const list = grouped.get(key) ?? [];
+      list.push(s);
+      grouped.set(key, list);
+    });
+    const groups = Array.from(grouped.entries()).map(([courseId, list]) => ({
+      courseId,
+      courseName: courseId == null ? "未选择课程" : courseNameMap.get(courseId) ?? `课程 ${courseId}`,
+      sessions: list.sort((a, b) => b.updatedAt - a.updatedAt),
+    }));
+    return groups.sort((a, b) => {
+      if (a.courseId == null) return 1;
+      if (b.courseId == null) return -1;
+      return a.courseName.localeCompare(b.courseName, "zh-CN");
+    });
+  }, [sessions, courseNameMap, sessionSearch]);
+
+  const updateActiveSession = (updater: (session: ChatSession) => ChatSession, touch = true) => {
     setSessions((prev) =>
-      prev.map((session) => (session.id === activeSessionId ? updater(session) : session))
+      prev.map((session) => {
+        if (session.id !== activeSessionId) return session;
+        const next = updater(session);
+        return { ...next, updatedAt: touch ? Date.now() : next.updatedAt };
+      })
     );
   };
 
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    localStorage.setItem(
+      CHAT_STORAGE_KEY,
+      JSON.stringify({ sessions, sessionSeq, activeSessionId })
+    );
+  }, [sessions, sessionSeq, activeSessionId]);
+
   const createNewSession = () => {
+    const reusable = sessions.find((s) => !hasUserQuestion(s));
+    if (reusable) {
+      setActiveSessionId(reusable.id);
+      setMode("qa");
+      setQuestion("");
+      return;
+    }
     const id = sessionSeq;
-    const next = makeSession(id);
+    const next = makeSession(id, activeSession?.courseId ?? null);
     setSessionSeq((prev) => prev + 1);
     setSessions((prev) => [next, ...prev]);
     setActiveSessionId(id);
+    setMode("qa");
     setQuestion("");
   };
 
@@ -81,7 +186,15 @@ export default function InClass() {
     const q = question.trim();
     if (!q || !activeSession) return;
     if (!activeSession.courseId) {
-      alert("请先选择课程后再提问");
+      const tipMsg: ChatMessage = {
+        id: Date.now(),
+        role: "assistant",
+        content: "请先选择课程，再进行提问",
+      };
+      updateActiveSession((session) => ({
+        ...session,
+        messages: [...session.messages, tipMsg],
+      }));
       return;
     }
     const userMsg: ChatMessage = {
@@ -91,7 +204,7 @@ export default function InClass() {
     };
     updateActiveSession((session) => ({
       ...session,
-      title: session.messages.length === 0 ? q.slice(0, 16) : session.title,
+      title: !session.customTitle && session.messages.length === 0 ? q.slice(0, 16) : session.title,
       messages: [...session.messages, userMsg],
     }));
     setQuestion("");
@@ -164,24 +277,131 @@ export default function InClass() {
     }
   };
 
+  const startRename = (session: ChatSession) => {
+    setRenameSessionId(session.id);
+    setRenameValue(session.title);
+  };
+
+  const submitRename = (sessionId: number) => {
+    const nextTitle = renameValue.trim();
+    if (!nextTitle) {
+      cancelRename();
+      return;
+    }
+    setSessions((prev) =>
+      prev.map((s) =>
+        s.id === sessionId
+          ? { ...s, title: nextTitle.slice(0, 48), customTitle: true, updatedAt: Date.now() }
+          : s
+      )
+    );
+    setRenameSessionId(null);
+    setRenameValue("");
+  };
+
+  const cancelRename = () => {
+    setRenameSessionId(null);
+    setRenameValue("");
+  };
+
+  const handleDeleteSession = (sessionId: number) => {
+    if (!window.confirm("确认删除该对话历史吗？")) return;
+    setSessions((prev) => {
+      const next = prev.filter((s) => s.id !== sessionId);
+      if (next.length > 0) {
+        if (activeSessionId === sessionId) {
+          setActiveSessionId(next[0].id);
+        }
+        return next;
+      }
+      const created = makeSession(sessionSeq);
+      setSessionSeq((seq) => seq + 1);
+      setActiveSessionId(created.id);
+      return [created];
+    });
+  };
+
+  const getQaCount = (session: ChatSession): number =>
+    session.messages.filter((m) => m.role === "user").length;
+
+  const toggleCourseGroup = (courseId: number | null) => {
+    const key = String(courseId);
+    setCollapsedCourseGroups((prev) => ({ ...prev, [key]: !prev[key] }));
+  };
+
   return (
     <div className="student-chat-shell">
       <aside className="student-chat-sidebar">
         <button type="button" className="btn-primary student-chat-new-btn" onClick={createNewSession}>
           + 新建对话
         </button>
+        <input
+          type="text"
+          placeholder="搜索会话"
+          value={sessionSearch}
+          onChange={(e) => setSessionSearch(e.target.value)}
+        />
         <div className="student-chat-session-list">
-          {sessions.map((session) => (
-            <button
-              key={session.id}
-              type="button"
-              className={`student-chat-session-item ${session.id === activeSession.id ? "is-active" : ""}`}
-              onClick={() => setActiveSessionId(session.id)}
-            >
-              <span className="student-chat-session-title">{session.title}</span>
-              <span className="student-chat-session-count">{session.messages.length} 条消息</span>
-            </button>
+          {groupedSessions.map((group) => (
+            <div key={String(group.courseId)} className="student-chat-session-group">
+              <button
+                type="button"
+                className="student-chat-session-group-title"
+                onClick={() => toggleCourseGroup(group.courseId)}
+              >
+                <span>{group.courseName}</span>
+                <span>{collapsedCourseGroups[String(group.courseId)] ? "展开" : "收起"}</span>
+              </button>
+              {!collapsedCourseGroups[String(group.courseId)] && (
+                <>
+                  {group.sessions.map((session) => (
+                    <div
+                      key={session.id}
+                      className={`student-chat-session-item ${session.id === activeSession.id ? "is-active" : ""}`}
+                    >
+                      <button
+                        type="button"
+                        className="student-chat-session-main"
+                        onClick={() => setActiveSessionId(session.id)}
+                      >
+                        {renameSessionId === session.id ? (
+                          <input
+                            autoFocus
+                            value={renameValue}
+                            maxLength={48}
+                            onChange={(e) => setRenameValue(e.target.value)}
+                            onKeyDown={(e) => {
+                              if (e.key === "Enter") submitRename(session.id);
+                              if (e.key === "Escape") cancelRename();
+                            }}
+                            onBlur={() => submitRename(session.id)}
+                          />
+                        ) : (
+                          <>
+                            <span className="student-chat-session-title">{session.title}</span>
+                            <span className="student-chat-session-count">{getQaCount(session)} 条问答</span>
+                          </>
+                        )}
+                      </button>
+                      <div className="student-chat-session-actions">
+                        {renameSessionId !== session.id && (
+                          <button type="button" className="btn-ghost" onClick={() => startRename(session)}>
+                            重命名
+                          </button>
+                        )}
+                        <button type="button" className="btn-ghost" onClick={() => handleDeleteSession(session.id)}>
+                          删除
+                        </button>
+                      </div>
+                    </div>
+                  ))}
+                </>
+              )}
+            </div>
           ))}
+          {groupedSessions.length === 0 && (
+            <div className="student-chat-session-empty">没有匹配的会话</div>
+          )}
         </div>
       </aside>
 
@@ -278,7 +498,7 @@ export default function InClass() {
                 onChange={(e) => setQuestion(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleAsk()}
               />
-              <button type="button" className="btn-primary" onClick={handleAsk} disabled={loading || !question.trim() || !activeSession.courseId}>
+              <button type="button" className="btn-primary" onClick={handleAsk} disabled={loading || !question.trim()}>
                 发送
               </button>
             </div>
