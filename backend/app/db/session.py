@@ -182,6 +182,54 @@ def _migrate_question_generation_tasks(sync_conn):
         pass
 
 
+def _migrate_chapter_config_preview_video(sync_conn):
+    """为 chapter_configs 添加 preview_video_url 列（SQLite）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE chapter_configs ADD COLUMN preview_video_url VARCHAR(512)"))
+    except Exception:
+        pass
+
+
+def _migrate_answer_records_scene_and_wrong_reason(sync_conn):
+    """为 answer_records 添加 scene / wrong_reason 列（SQLite）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE answer_records ADD COLUMN scene VARCHAR(24) DEFAULT 'exercise'"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("ALTER TABLE answer_records ADD COLUMN wrong_reason VARCHAR(32)"))
+    except Exception:
+        pass
+
+
+def _migrate_review_records(sync_conn):
+    """创建 review_records 表（SQLite 兼容）"""
+    try:
+        sync_conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS review_records (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER NOT NULL,
+                    chapter_id INTEGER NOT NULL,
+                    recall_points TEXT NOT NULL,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_review_records_user_id ON review_records (user_id)"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_review_records_chapter_id ON review_records (chapter_id)"))
+    except Exception:
+        pass
+
+
 def _migrate_course_question_synonyms(sync_conn):
     """创建课程问句同义映射表（SQLite 兼容）"""
     try:
@@ -247,4 +295,7 @@ async def init_db():
         await conn.run_sync(_migrate_questions_asked_course_and_rag)
         await conn.run_sync(_migrate_questions_course_and_type)
         await conn.run_sync(_migrate_question_generation_tasks)
+        await conn.run_sync(_migrate_chapter_config_preview_video)
+        await conn.run_sync(_migrate_answer_records_scene_and_wrong_reason)
+        await conn.run_sync(_migrate_review_records)
         await conn.run_sync(_migrate_course_question_synonyms)

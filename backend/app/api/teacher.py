@@ -5,6 +5,7 @@ import difflib
 import io
 import json
 import logging
+import mimetypes
 import os
 import re
 import subprocess
@@ -40,6 +41,7 @@ logger = logging.getLogger(__name__)
 class ConfigChapterIn(BaseModel):
     chapter_id: int
     preview_enabled: bool = True
+    preview_video_url: str | None = None
     difficulty_filter: list[str] | None = None  # 只开放某几种难度
     question_limit: int | None = None
 
@@ -48,6 +50,7 @@ class ChapterConfigOut(BaseModel):
     chapter_id: int
     title: str
     preview_enabled: bool
+    preview_video_url: str | None
     difficulty_filter: list[str]  # 解析后的列表
     question_limit: int | None
 
@@ -87,6 +90,7 @@ async def list_chapter_configs(
             chapter_id=ch.id,
             title=ch.title,
             preview_enabled=cfg.preview_enabled if cfg else True,
+            preview_video_url=(cfg.preview_video_url if cfg else None),
             difficulty_filter=difficulty_filter,
             question_limit=cfg.question_limit if cfg else None,
         ))
@@ -115,12 +119,14 @@ async def config_chapter(
     difficulty_str = ",".join(body.difficulty_filter) if body.difficulty_filter else None
     if cfg:
         cfg.preview_enabled = body.preview_enabled
+        cfg.preview_video_url = (body.preview_video_url or "").strip() or None
         cfg.difficulty_filter = difficulty_str
         cfg.question_limit = body.question_limit
     else:
         cfg = ChapterConfig(
             chapter_id=body.chapter_id,
             preview_enabled=body.preview_enabled,
+            preview_video_url=(body.preview_video_url or "").strip() or None,
             difficulty_filter=difficulty_str,
             question_limit=body.question_limit,
         )
@@ -329,6 +335,13 @@ def _safe_pdf_filename(name: str) -> str:
     safe = re.sub(r"[^\w\-.]", "_", base)[:96]
     final_ext = ext.lower() if ext.lower() == ".pdf" else ".pdf"
     return (safe or "document") + final_ext
+
+
+def _safe_upload_filename(name: str) -> str:
+    base, ext = os.path.splitext(name or "")
+    safe = re.sub(r"[^\w\-.]", "_", base)[:96]
+    suffix = (ext or "").lower()[:10]
+    return (safe or "file") + suffix
 
 
 def _normalize_text_key(text: str) -> str:
@@ -1731,6 +1744,62 @@ async def upload_teacher_chapter_document(
     )
 
 
+@router.post("/chapters/{chapter_id}/videos/upload", response_model=TeacherKnowledgeDocumentOut)
+async def upload_teacher_chapter_video(
+    chapter_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, _ = await _require_owned_chapter(db, user.id, chapter_id)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请上传视频文件")
+    ext = Path(file.filename).suffix.lower()
+    allow_ext = {".mp4", ".webm", ".mkv", ".mov", ".m4v"}
+    if ext not in allow_ext:
+        raise HTTPException(status_code=400, detail="仅支持 mp4/webm/mkv/mov/m4v 视频文件")
+    binary = await file.read()
+    if not binary:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    subdir = root / "preview_videos"
+    subdir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_upload_filename(file.filename)
+    saved_name = f"{chapter_id}_{int(time.time())}_{safe_name}"
+    abs_path = subdir / saved_name
+    abs_path.write_bytes(binary)
+    rel_path = f"preview_videos/{saved_name}"
+    doc = KnowledgeDocument(
+        chapter_id=chapter.id,
+        source_type="preview_video",
+        title=file.filename,
+        content="",
+        file_name=file.filename,
+        file_path=rel_path,
+        file_size=len(binary),
+        parse_status="done",
+        parse_error=None,
+        chunk_count=0,
+    )
+    db.add(doc)
+    await db.commit()
+    await db.refresh(doc)
+    return TeacherKnowledgeDocumentOut(
+        id=doc.id,
+        chapter_id=doc.chapter_id,
+        source_type=doc.source_type,
+        title=doc.title,
+        page_ref=doc.page_ref,
+        file_name=doc.file_name,
+        file_size=doc.file_size,
+        parse_status=doc.parse_status,
+        parse_error=doc.parse_error,
+        chunk_count=doc.chunk_count,
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+    )
+
+
 @router.get("/documents/{doc_id}", response_model=TeacherKnowledgeDocumentDetailOut)
 async def get_teacher_document_detail(
     doc_id: int,
@@ -1778,9 +1847,10 @@ async def get_teacher_document_file(
     abs_path = Path(settings.upload_dir) / doc.file_path
     if not abs_path.exists():
         raise HTTPException(status_code=404, detail="文档文件不存在")
+    media_type = mimetypes.guess_type(str(abs_path))[0] or "application/octet-stream"
     return FileResponse(
         path=str(abs_path),
-        media_type="application/pdf",
+        media_type=media_type,
         filename=doc.file_name or abs_path.name,
     )
 

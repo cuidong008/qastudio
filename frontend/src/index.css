@@ -180,6 +180,78 @@ button,
 .text-success { color: var(--success); }
 .text-error { color: var(--error); }
 
+/* ===== Preview Materials ===== */
+.material-block {
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: rgba(99, 102, 241, 0.08);
+  padding: 12px;
+  margin-bottom: 14px;
+}
+
+.material-list {
+  list-style: none;
+  padding: 0;
+  margin: 0 0 12px;
+  display: grid;
+  gap: 8px;
+}
+
+.material-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 10px;
+  padding: 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-md);
+  background: var(--bg-elevated);
+}
+
+.material-file {
+  font-size: 14px;
+  color: var(--text-primary);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.material-actions {
+  display: inline-flex;
+  gap: 8px;
+  flex-shrink: 0;
+}
+
+.btn-material-open {
+  background: var(--info);
+  color: #fff;
+  border: 1px solid transparent;
+}
+
+.btn-material-open:hover:not(:disabled) {
+  filter: brightness(1.05);
+}
+
+.btn-material-download {
+  background: transparent;
+  color: var(--text-primary);
+  border: 1px solid rgba(255, 255, 255, 0.35);
+}
+
+.btn-material-download:hover:not(:disabled) {
+  background: var(--bg-hover);
+}
+
+.material-tag {
+  font-size: 12px;
+  color: var(--text-secondary);
+  background: rgba(255, 255, 255, 0.08);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  padding: 2px 8px;
+  margin-right: 8px;
+}
+
 /* ===== Student Chat Workspace ===== */
 .student-chat-shell {
   min-height: 100vh;

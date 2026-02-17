@@ -181,6 +181,7 @@ class ChapterConfig(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False, unique=True)
     preview_enabled = Column(Boolean, default=True)
+    preview_video_url = Column(String(512), nullable=True)  # 课前预习视频地址
     difficulty_filter = Column(String(128), nullable=True)  # 逗号分隔: basic,applied,extended
     question_limit = Column(Integer, nullable=True)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
@@ -203,8 +204,19 @@ class AnswerRecord(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
     question_id = Column(Integer, ForeignKey("questions.id"), nullable=False)
+    scene = Column(String(24), default="exercise", nullable=False)  # preview | review | exercise
     user_answer = Column(String(256), nullable=False)
     is_correct = Column(Boolean, nullable=False)
+    wrong_reason = Column(String(32), nullable=True)  # concept | reading | calculation
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+
+class ReviewRecord(Base):
+    __tablename__ = "review_records"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    user_id = Column(Integer, ForeignKey("users.id"), nullable=False)
+    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False)
+    recall_points = Column(Text, nullable=False)  # JSON: ["关键点1","关键点2","关键点3"]
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

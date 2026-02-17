@@ -168,9 +168,38 @@ export const api = {
     list: () => request<{ id: number; name: string; code: string | null; is_active: boolean }[]>("/chapters/courses"),
   },
   preview: {
-    task: (chapterId: number) => request<{ chapter_id: number; chapter_title: string; summary: string; key_points: string[]; self_check_questions: string[]; duration_minutes: number }>(`/preview/task/${chapterId}`),
+    task: (chapterId: number) =>
+      request<{
+        chapter_id: number;
+        chapter_title: string;
+        summary: string;
+        learning_goals: string[];
+        materials: { pdf_ready: boolean; pdf_count: number; video_ready: boolean; video_url: string | null };
+        pdf_materials: { id: number; title: string; file_name: string | null }[];
+        video_materials: { id: number; title: string; file_name: string | null }[];
+        preview_questions: { id: number; question_type: string | null; question_text: string; options: string | null }[];
+        duration_minutes: number;
+      }>(`/preview/task/${chapterId}`),
+    materialFile: (materialId: number) => requestBlob(`/preview/materials/${materialId}/file`),
     submit: (chapterId: number, weakPoints?: string[]) =>
       request<{ ok: boolean }>("/preview/submit", { method: "POST", body: { chapter_id: chapterId, weak_points: weakPoints } }),
+  },
+  review: {
+    task: (chapterId: number) =>
+      request<{
+        chapter_id: number;
+        chapter_title: string;
+        key_points: string[];
+        recall_card_rule: string;
+        basic_questions: { id: number; question_type: string | null; difficulty: string; question_text: string; options: string | null }[];
+        variant_questions: { id: number; question_type: string | null; difficulty: string; question_text: string; options: string | null }[];
+        comprehensive_question: { id: number; question_type: string | null; difficulty: string; question_text: string; options: string | null } | null;
+      }>(`/review/task/${chapterId}`),
+    submitRecall: (chapterId: number, recallPoints: string[]) =>
+      request<{ ok: boolean; message: string }>("/review/recall", {
+        method: "POST",
+        body: { chapter_id: chapterId, recall_points: recallPoints },
+      }),
   },
   qa: {
     ask: (question: string, courseId: number) =>
@@ -181,15 +210,31 @@ export const api = {
       requestBlob(`/qa/reference/${docId}/file`),
   },
   questions: {
-    list: (params?: { chapter_id?: number; difficulty?: string }) => {
+    list: (params?: { chapter_id?: number; difficulty?: string; question_types?: string; limit?: number }) => {
       const q = new URLSearchParams();
       if (params?.chapter_id) q.set("chapter_id", String(params.chapter_id));
       if (params?.difficulty) q.set("difficulty", params.difficulty);
-      return request<{ id: number; chapter_id: number; difficulty: string; question_text: string; options: string | null; explanation: string | null; ppt_ref: string | null }[]>(`/questions?${q}`);
+      if (params?.question_types) q.set("question_types", params.question_types);
+      if (params?.limit != null) q.set("limit", String(params.limit));
+      return request<{ id: number; chapter_id: number; difficulty: string; question_type: string | null; question_text: string; options: string | null; explanation: string | null; ppt_ref: string | null }[]>(
+        `/questions?${q}`
+      );
     },
-    submit: (questionId: number, userAnswer: string) =>
-      request<{ is_correct: boolean; correct_answer: string; explanation: string | null; ppt_ref: string | null }>("/questions/submit", { method: "POST", body: { question_id: questionId, user_answer: userAnswer } }),
+    submit: (questionId: number, userAnswer: string, scene: "preview" | "review" | "exercise" = "exercise") =>
+      request<{ answer_record_id: number; is_correct: boolean; correct_answer: string; question_type: string; explanation: string | null; ppt_ref: string | null }>(
+        "/questions/submit",
+        { method: "POST", body: { question_id: questionId, user_answer: userAnswer, scene } }
+      ),
     wrong: () => request<{ id: number; question_text: string; options: string | null; explanation: string | null }[]>("/questions/wrong"),
+    markWrongReason: (recordId: number, wrongReason: "concept" | "reading" | "calculation") =>
+      request<{ ok: boolean }>(`/questions/answer-records/${recordId}/wrong-reason`, {
+        method: "POST",
+        body: { wrong_reason: wrongReason },
+      }),
+    similar: (questionId: number, limit = 2) =>
+      request<{ id: number; chapter_id: number; difficulty: string; question_type: string | null; question_text: string; options: string | null; explanation: string | null }[]>(
+        `/questions/${questionId}/similar?limit=${limit}`
+      ),
   },
   teacher: {
     stats: (classId?: number) => {
@@ -207,12 +252,14 @@ export const api = {
         chapter_id: number;
         title: string;
         preview_enabled: boolean;
+        preview_video_url: string | null;
         difficulty_filter: string[];
         question_limit: number | null;
       }[]>("/teacher/config/chapters"),
     updateChapterConfig: (body: {
       chapter_id: number;
       preview_enabled: boolean;
+      preview_video_url?: string | null;
       difficulty_filter: string[] | null;
       question_limit: number | null;
     }) =>
@@ -305,6 +352,15 @@ export const api = {
         form.append("file", file);
         return requestForm<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }>(
           `/teacher/chapters/${chapterId}/documents/upload`,
+          form,
+          { method: "POST" }
+        );
+      },
+      uploadChapterVideo: (chapterId: number, file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return requestForm<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }>(
+          `/teacher/chapters/${chapterId}/videos/upload`,
           form,
           { method: "POST" }
         );
