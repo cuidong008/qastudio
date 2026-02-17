@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
 import Preview from "./Preview";
 import Review from "./Review";
@@ -94,9 +94,8 @@ export default function InClass() {
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
-  const [feedbackSendingId, setFeedbackSendingId] = useState<number | null>(null);
-  const [submittedQaIds, setSubmittedQaIds] = useState<Set<number>>(new Set());
   const [openingReferenceId, setOpeningReferenceId] = useState<number | null>(null);
+  const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
   const [renameSessionId, setRenameSessionId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [sessionSearch, setSessionSearch] = useState("");
@@ -105,6 +104,7 @@ export default function InClass() {
   const [sessionSeq, setSessionSeq] = useState(initialState.sessionSeq);
   const [sessions, setSessions] = useState<ChatSession[]>(initialState.sessions);
   const [activeSessionId, setActiveSessionId] = useState(initialState.activeSessionId);
+  const inputRef = useRef<HTMLInputElement | null>(null);
 
   useEffect(() => {
     api.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
@@ -267,14 +267,30 @@ export default function InClass() {
     }
   };
 
-  const handleSubmitAsFeedback = async (questionAskedId: number) => {
-    setFeedbackSendingId(questionAskedId);
+  const handleCopyMessage = async (message: ChatMessage) => {
+    const text = (message.content || "").trim();
+    if (!text) return;
     try {
-      await api.feedback.submitFromQa(questionAskedId);
-      setSubmittedQaIds((prev) => new Set([...prev, questionAskedId]));
-    } finally {
-      setFeedbackSendingId(null);
+      await navigator.clipboard.writeText(text);
+      setCopiedMessageId(message.id);
+      window.setTimeout(() => setCopiedMessageId((curr) => (curr === message.id ? null : curr)), 1200);
+    } catch {
+      alert("复制失败，请检查浏览器剪贴板权限");
     }
+  };
+
+  const handleEditQuestion = (messageId: number) => {
+    if (!activeSession) return;
+    const idx = activeSession.messages.findIndex((m) => m.id === messageId && m.role === "user");
+    if (idx < 0) return;
+    const target = activeSession.messages[idx];
+    setMode("qa");
+    setQuestion(target.content);
+    updateActiveSession((session) => ({
+      ...session,
+      messages: session.messages.slice(0, idx),
+    }));
+    window.setTimeout(() => inputRef.current?.focus(), 0);
   };
 
   const startRename = (session: ChatSession) => {
@@ -441,38 +457,32 @@ export default function InClass() {
                     className={`student-chat-message ${msg.role === "user" ? "from-user" : "from-assistant"}`}
                   >
                     <p>{msg.content}</p>
-                    {msg.role === "assistant" && (
-                      <div className="student-chat-message-meta">
-                        {msg.document_ref && (
-                          msg.reference_doc_id ? (
-                            <button
-                              type="button"
-                              className="student-chat-ref-btn"
-                              onClick={() => handleOpenReferenceFile(msg)}
-                            >
-                              {openingReferenceId === msg.id ? "参考文档打开中…" : `参考文档：${msg.document_ref}`}
-                            </button>
-                          ) : (
-                            <span>参考文档：{msg.document_ref}</span>
-                          )
-                        )}
-                        {msg.knowledge_point && <span>关联知识点：{msg.knowledge_point}</span>}
-                        {msg.question_asked_id && (
+                    <div className="student-chat-message-meta">
+                      {msg.role === "assistant" && msg.document_ref && (
+                        msg.reference_doc_id ? (
                           <button
                             type="button"
-                            className="btn-secondary"
-                            disabled={feedbackSendingId === msg.question_asked_id || submittedQaIds.has(msg.question_asked_id)}
-                            onClick={() => handleSubmitAsFeedback(msg.question_asked_id!)}
+                            className="student-chat-ref-btn"
+                            onClick={() => handleOpenReferenceFile(msg)}
                           >
-                            {submittedQaIds.has(msg.question_asked_id)
-                              ? "已提交反馈"
-                              : feedbackSendingId === msg.question_asked_id
-                                ? "提交中…"
-                                : "提交为学习反馈"}
+                            {openingReferenceId === msg.id ? "参考文档打开中…" : `参考文档：${msg.document_ref}`}
+                          </button>
+                        ) : (
+                          <span>参考文档：{msg.document_ref}</span>
+                        )
+                      )}
+                      {msg.role === "assistant" && msg.knowledge_point && <span>关联知识点：{msg.knowledge_point}</span>}
+                      <div style={{ display: "inline-flex", gap: 8 }}>
+                        <button type="button" className="btn-ghost" onClick={() => handleCopyMessage(msg)}>
+                          {copiedMessageId === msg.id ? "已复制" : "复制"}
+                        </button>
+                        {msg.role === "user" && (
+                          <button type="button" className="btn-ghost" onClick={() => handleEditQuestion(msg.id)}>
+                            编辑
                           </button>
                         )}
                       </div>
-                    )}
+                    </div>
                   </div>
                 ))
               )}
@@ -492,6 +502,7 @@ export default function InClass() {
           {mode === "qa" ? (
             <div className="student-chat-input-row">
               <input
+                ref={inputRef}
                 type="text"
                 placeholder="请输入你的问题"
                 value={question}
