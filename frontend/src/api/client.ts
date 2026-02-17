@@ -112,6 +112,26 @@ export async function requestForm<T>(
   return res.json();
 }
 
+export async function requestBlob(
+  path: string,
+  options: RequestInit = {}
+): Promise<Blob> {
+  const headers: HeadersInit = {
+    ...(options.headers as Record<string, string>),
+  };
+  const token = getToken();
+  if (token) (headers as Record<string, string>)["Authorization"] = `Bearer ${token}`;
+  const res = await fetch(`${API_BASE}${path}`, {
+    ...options,
+    headers,
+  });
+  if (!res.ok) {
+    const err = await res.json().catch(() => ({ detail: res.statusText }));
+    throw new Error(err.detail || String(err));
+  }
+  return res.blob();
+}
+
 export const api = {
   auth: {
     login: (username: string, password: string) =>
@@ -135,8 +155,12 @@ export const api = {
       request<{ ok: boolean }>("/preview/submit", { method: "POST", body: { chapter_id: chapterId, weak_points: weakPoints } }),
   },
   qa: {
-    ask: (question: string, params?: { chapterId?: number; courseId?: number }) =>
-      request<{ answer: string; ppt_ref: string | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, chapter_id: params?.chapterId, course_id: params?.courseId } }),
+    ask: (question: string, courseId: number) =>
+      request<{ answer: string; document_ref: string | null; reference_doc_id?: number | null; reference_page?: number | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, course_id: courseId } }),
+    reference: (docId: number) =>
+      request<{ id: number; title: string; source_type: string; page_ref: string | null; file_name: string | null }>(`/qa/reference/${docId}`),
+    referenceFile: (docId: number) =>
+      requestBlob(`/qa/reference/${docId}/file`),
   },
   questions: {
     list: (params?: { chapter_id?: number; difficulty?: string }) => {

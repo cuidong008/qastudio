@@ -9,7 +9,9 @@ type ChatMessage = {
   id: number;
   role: "user" | "assistant";
   content: string;
-  ppt_ref?: string | null;
+  document_ref?: string | null;
+  reference_doc_id?: number | null;
+  reference_page?: number | null;
   knowledge_point?: string | null;
   question_asked_id?: number | null;
 };
@@ -45,6 +47,7 @@ export default function InClass() {
   const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
   const [feedbackSendingId, setFeedbackSendingId] = useState<number | null>(null);
   const [submittedQaIds, setSubmittedQaIds] = useState<Set<number>>(new Set());
+  const [openingReferenceId, setOpeningReferenceId] = useState<number | null>(null);
   const [mode, setMode] = useState<WorkspaceMode>("qa");
   const [sessionSeq, setSessionSeq] = useState(2);
   const [sessions, setSessions] = useState<ChatSession[]>([makeSession(1)]);
@@ -77,6 +80,10 @@ export default function InClass() {
   const handleAsk = async () => {
     const q = question.trim();
     if (!q || !activeSession) return;
+    if (!activeSession.courseId) {
+      alert("请先选择课程后再提问");
+      return;
+    }
     const userMsg: ChatMessage = {
       id: Date.now(),
       role: "user",
@@ -90,12 +97,14 @@ export default function InClass() {
     setQuestion("");
     setLoading(true);
     try {
-      const res = await api.qa.ask(q, { courseId: activeSession.courseId ?? undefined });
+      const res = await api.qa.ask(q, activeSession.courseId);
       const assistantMsg: ChatMessage = {
         id: Date.now() + 1,
         role: "assistant",
         content: res.answer,
-        ppt_ref: res.ppt_ref,
+        document_ref: res.document_ref,
+        reference_doc_id: res.reference_doc_id ?? null,
+        reference_page: res.reference_page ?? null,
         knowledge_point: res.knowledge_point,
         question_asked_id: res.question_asked_id ?? null,
       };
@@ -105,6 +114,43 @@ export default function InClass() {
       }));
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleOpenReferenceFile = async (message: ChatMessage) => {
+    const docId = message.reference_doc_id ?? null;
+    if (!docId) return;
+    const popup = window.open("", "_blank");
+    if (popup) {
+      popup.document.title = "参考文档加载中";
+      popup.document.body.innerHTML = "<p style=\"font-family: sans-serif; padding: 16px;\">参考文档加载中…</p>";
+      try {
+        popup.opener = null;
+      } catch {
+        // 某些浏览器不允许写 opener，忽略即可
+      }
+    }
+    setOpeningReferenceId(message.id);
+    try {
+      const blob = await api.qa.referenceFile(docId);
+      const url = URL.createObjectURL(blob);
+      const targetUrl = message.reference_page && message.reference_page > 0
+        ? `${url}#page=${message.reference_page}`
+        : url;
+      if (popup) {
+        popup.location.href = targetUrl;
+      } else {
+        window.open(targetUrl, "_blank", "noopener,noreferrer");
+      }
+      window.setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch (e) {
+      if (popup && !popup.closed) {
+        popup.document.title = "参考文档加载失败";
+        popup.document.body.innerHTML = "<p style=\"font-family: sans-serif; padding: 16px;\">参考文档加载失败，请重试。</p>";
+      }
+      alert((e as Error)?.message || "参考文档加载失败，请重试");
+    } finally {
+      setOpeningReferenceId(null);
     }
   };
 
@@ -150,7 +196,7 @@ export default function InClass() {
                 updateActiveSession((session) => ({ ...session, courseId: nextId }));
               }}
             >
-              <option value="">全部课程</option>
+              <option value="">请选择课程</option>
               {courses.map((c) => (
                 <option key={c.id} value={c.id}>
                   {c.name}
@@ -177,7 +223,19 @@ export default function InClass() {
                     <p>{msg.content}</p>
                     {msg.role === "assistant" && (
                       <div className="student-chat-message-meta">
-                        {msg.ppt_ref && <span>参考 PPT：{msg.ppt_ref}</span>}
+                        {msg.document_ref && (
+                          msg.reference_doc_id ? (
+                            <button
+                              type="button"
+                              className="student-chat-ref-btn"
+                              onClick={() => handleOpenReferenceFile(msg)}
+                            >
+                              {openingReferenceId === msg.id ? "参考文档打开中…" : `参考文档：${msg.document_ref}`}
+                            </button>
+                          ) : (
+                            <span>参考文档：{msg.document_ref}</span>
+                          )
+                        )}
                         {msg.knowledge_point && <span>关联知识点：{msg.knowledge_point}</span>}
                         {msg.question_asked_id && (
                           <button
@@ -220,7 +278,7 @@ export default function InClass() {
                 onChange={(e) => setQuestion(e.target.value)}
                 onKeyDown={(e) => e.key === "Enter" && handleAsk()}
               />
-              <button type="button" className="btn-primary" onClick={handleAsk} disabled={loading || !question.trim()}>
+              <button type="button" className="btn-primary" onClick={handleAsk} disabled={loading || !question.trim() || !activeSession.courseId}>
                 发送
               </button>
             </div>

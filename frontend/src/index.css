@@ -336,6 +336,16 @@ button,
   font-size: 12px;
 }
 
+.student-chat-ref-btn {
+  border: none;
+  background: transparent;
+  padding: 0;
+  margin: 0;
+  color: var(--accent);
+  cursor: pointer;
+  font-size: 13px;
+}
+
 .student-chat-loading {
   color: var(--text-muted);
   font-size: 14px;
