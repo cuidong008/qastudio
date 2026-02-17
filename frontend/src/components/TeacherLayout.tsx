@@ -49,9 +49,6 @@ export default function TeacherLayout({
           <Link to="/teacher/classes" className="nav-link">
             我的班级
           </Link>
-          <Link to="/teacher/config" className="nav-link">
-            教学内容配置
-          </Link>
         </nav>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>

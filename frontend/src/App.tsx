@@ -8,7 +8,6 @@ import Exercises from "./pages/student/Exercises";
 import Feedback from "./pages/student/Feedback";
 import TeacherLayout from "./components/TeacherLayout";
 import TeacherDashboard from "./pages/teacher/TeacherDashboard";
-import TeacherConfig from "./pages/teacher/TeacherConfig";
 import TeacherCourses from "./pages/teacher/TeacherCourses";
 import TeacherClasses from "./pages/teacher/TeacherClasses";
 import TeacherChapterQuestions from "./pages/teacher/TeacherChapterQuestions";
@@ -51,7 +50,6 @@ function App() {
       <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />
       <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
       <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
-      <Route path="/teacher/config" element={<TeacherLayout requireAuth><TeacherConfig /></TeacherLayout>} />
       <Route path="/admin" element={<AdminLayout />}>
         <Route index element={<AdminHome />} />
         <Route path="users" element={<AdminUsers />} />
