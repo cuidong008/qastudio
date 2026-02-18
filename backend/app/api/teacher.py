@@ -29,11 +29,12 @@ from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
     StudentClassMembership,
     Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
-    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask, DocumentProcessTask,
+    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask, DocumentProcessTask, CourseReindexTask,
 )
 from ..api.auth import require_teacher
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
 from ..services.course_knowledge_service import clear_course_knowledge
+from ..services.course_reindex_task_service import run_course_reindex_task_thread
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
 logger = logging.getLogger(__name__)
@@ -247,6 +248,30 @@ class TeacherDocumentProcessTaskStatusOut(BaseModel):
     result_payload: dict | None
     error_message: str | None
     created_at: str | None
+    updated_at: str | None
+
+
+class TeacherCourseReindexTaskOut(BaseModel):
+    ok: bool = True
+    task_id: int
+    status: str
+
+
+class TeacherCourseReindexTaskStatusOut(BaseModel):
+    id: int
+    course_id: int
+    status: str
+    request_payload: dict
+    result_payload: dict | None
+    error_message: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
+class TeacherCourseReindexTaskSummaryOut(BaseModel):
+    task_id: int
+    course_id: int
+    status: str
     updated_at: str | None
 
 
@@ -1715,16 +1740,101 @@ async def delete_teacher_course(
     return {"ok": True}
 
 
-@router.post("/courses/{course_id}/reindex")
+@router.post("/courses/{course_id}/reindex", response_model=TeacherCourseReindexTaskOut)
 async def reindex_teacher_course(
     course_id: int,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
     await _require_owned_course(db, user.id, course_id)
-    from ..services.rag_index_service import build_index_for_course
-    count = await build_index_for_course(db, course_id)
-    return {"ok": True, "chunks_indexed": count}
+    r_running = await db.execute(
+        select(CourseReindexTask)
+        .where(CourseReindexTask.course_id == course_id, CourseReindexTask.status.in_(["pending", "running"]))
+        .order_by(CourseReindexTask.id.desc())
+    )
+    running = r_running.scalar_one_or_none()
+    if running:
+        return TeacherCourseReindexTaskOut(task_id=running.id, status=running.status)
+    task = CourseReindexTask(
+        course_id=course_id,
+        requested_by_id=user.id,
+        requested_by_role="teacher",
+        status="pending",
+        request_payload=json.dumps({"course_id": course_id}, ensure_ascii=False),
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    background_tasks.add_task(run_course_reindex_task_thread, task.id)
+    return TeacherCourseReindexTaskOut(task_id=task.id, status=task.status)
+
+
+@router.get("/courses/reindex/tasks/{task_id}", response_model=TeacherCourseReindexTaskStatusOut)
+async def get_teacher_course_reindex_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(CourseReindexTask, Course)
+        .join(Course, Course.id == CourseReindexTask.course_id)
+        .where(CourseReindexTask.id == task_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    task = row[0]
+    req_payload = {}
+    res_payload = None
+    try:
+        req_payload = json.loads(task.request_payload or "{}")
+    except Exception:
+        req_payload = {}
+    try:
+        res_payload = json.loads(task.result_payload) if task.result_payload else None
+    except Exception:
+        res_payload = None
+    return TeacherCourseReindexTaskStatusOut(
+        id=task.id,
+        course_id=task.course_id,
+        status=task.status,
+        request_payload=req_payload,
+        result_payload=res_payload,
+        error_message=task.error_message,
+        created_at=task.created_at.isoformat() if task.created_at else None,
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
+    )
+
+
+@router.get("/courses/reindex/active", response_model=list[TeacherCourseReindexTaskSummaryOut])
+async def list_teacher_course_reindex_active_tasks(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(CourseReindexTask, Course)
+        .join(Course, Course.id == CourseReindexTask.course_id)
+        .where(
+            Course.owner_teacher_id == user.id,
+            CourseReindexTask.status.in_(["pending", "running"]),
+        )
+        .order_by(CourseReindexTask.course_id, CourseReindexTask.id.desc())
+    )
+    latest_by_course: dict[int, CourseReindexTask] = {}
+    for row in r.all():
+        task = row[0]
+        if task.course_id not in latest_by_course:
+            latest_by_course[task.course_id] = task
+    return [
+        TeacherCourseReindexTaskSummaryOut(
+            task_id=t.id,
+            course_id=t.course_id,
+            status=t.status,
+            updated_at=t.updated_at.isoformat() if t.updated_at else None,
+        )
+        for t in latest_by_course.values()
+    ]
 
 
 @router.post("/courses/{course_id}/clear-knowledge")

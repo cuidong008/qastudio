@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
 
 type CourseItem = {
@@ -43,7 +43,7 @@ export default function TeacherCourses() {
   const [chapterEditForm, setChapterEditForm] = useState({ title: "", order_index: 0, syllabus_ref: "" });
   const [chapterKnowledgePoints, setChapterKnowledgePoints] = useState<KnowledgePointDraft[]>([]);
   const [chapterSaving, setChapterSaving] = useState(false);
-  const [reindexingId, setReindexingId] = useState<number | null>(null);
+  const [reindexTaskByCourse, setReindexTaskByCourse] = useState<Record<number, { taskId: number; status: string }>>({});
   const [clearingId, setClearingId] = useState<number | null>(null);
   const [questionGenModalChapter, setQuestionGenModalChapter] = useState<ChapterItem | null>(null);
   const [questionTaskByChapter, setQuestionTaskByChapter] = useState<Record<number, { taskId: number; status: string }>>({});
@@ -54,10 +54,89 @@ export default function TeacherCourses() {
     qa_max: 2,
     blank_max: 2,
   });
+  const pollingReindexTaskIdsRef = useRef<Set<number>>(new Set());
+  const notifiedReindexTaskIdsRef = useRef<Set<number>>(new Set());
+  const aliveRef = useRef(true);
+
+  useEffect(() => {
+    return () => {
+      aliveRef.current = false;
+    };
+  }, []);
+
+  const pollReindexTask = async (courseId: number, taskId: number) => {
+    if (taskId <= 0) return;
+    if (pollingReindexTaskIdsRef.current.has(taskId)) return;
+    pollingReindexTaskIdsRef.current.add(taskId);
+    const maxPoll = 180;
+    try {
+      for (let i = 0; i < maxPoll; i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!aliveRef.current) return;
+        try {
+          const task = await api.teacher.courses.getReindexTask(taskId);
+          setReindexTaskByCourse((prev) => ({ ...prev, [courseId]: { taskId, status: task.status } }));
+          if (task.status === "success") {
+            if (!notifiedReindexTaskIdsRef.current.has(taskId)) {
+              notifiedReindexTaskIdsRef.current.add(taskId);
+              alert(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`);
+            }
+            setReindexTaskByCourse((prev) => {
+              if (prev[courseId]?.taskId !== taskId) return prev;
+              const next = { ...prev };
+              delete next[courseId];
+              return next;
+            });
+            return;
+          }
+          if (task.status === "failed") {
+            if (!notifiedReindexTaskIdsRef.current.has(taskId)) {
+              notifiedReindexTaskIdsRef.current.add(taskId);
+              alert(task.error_message || "重建索引任务失败");
+            }
+            setReindexTaskByCourse((prev) => {
+              if (prev[courseId]?.taskId !== taskId) return prev;
+              const next = { ...prev };
+              delete next[courseId];
+              return next;
+            });
+            return;
+          }
+        } catch {
+          // ignore and keep polling
+        }
+      }
+      if (!notifiedReindexTaskIdsRef.current.has(taskId)) {
+        notifiedReindexTaskIdsRef.current.add(taskId);
+        alert("重建索引任务仍在处理中，请稍后再看。");
+      }
+    } finally {
+      pollingReindexTaskIdsRef.current.delete(taskId);
+    }
+  };
 
   const load = () => {
     setLoading(true);
-    api.teacher.courses.list().then(setList).catch(() => setList([])).finally(() => setLoading(false));
+    api.teacher.courses
+      .list()
+      .then(async (rows) => {
+        setList(rows);
+        try {
+          const activeTasks = await api.teacher.courses.listActiveReindexTasks();
+          const next: Record<number, { taskId: number; status: string }> = {};
+          activeTasks.forEach((t) => {
+            next[t.course_id] = { taskId: t.task_id, status: t.status };
+          });
+          setReindexTaskByCourse(next);
+          activeTasks.forEach((t) => {
+            void pollReindexTask(t.course_id, t.task_id);
+          });
+        } catch {
+          // ignore active task recovery failure
+        }
+      })
+      .catch(() => setList([]))
+      .finally(() => setLoading(false));
   };
   useEffect(() => {
     load();
@@ -226,12 +305,21 @@ export default function TeacherCourses() {
 
   const doReindex = (courseId: number, courseName: string) => {
     if (!confirm(`确定为「${courseName}」重建 RAG 向量索引？`)) return;
-    setReindexingId(courseId);
+    setReindexTaskByCourse((prev) => ({ ...prev, [courseId]: { taskId: -1, status: "pending" } }));
     api.teacher.courses
       .reindex(courseId)
-      .then((r) => alert(`索引完成，共 ${r.chunks_indexed} 个切片。`))
-      .catch((e) => alert(e?.message || "重建索引失败"))
-      .finally(() => setReindexingId(null));
+      .then((r) => {
+        setReindexTaskByCourse((prev) => ({ ...prev, [courseId]: { taskId: r.task_id, status: r.status } }));
+        void pollReindexTask(courseId, r.task_id);
+      })
+      .catch((e) => {
+        alert(e?.message || "重建索引失败");
+        setReindexTaskByCourse((prev) => {
+          const next = { ...prev };
+          delete next[courseId];
+          return next;
+        });
+      });
   };
 
   const doClearKnowledge = (courseId: number, courseName: string) => {
@@ -349,16 +437,16 @@ export default function TeacherCourses() {
                         className="btn-ghost"
                         style={{ marginRight: 8 }}
                         onClick={() => doReindex(c.id, c.name)}
-                        disabled={reindexingId !== null || clearingId !== null}
+                        disabled={!!reindexTaskByCourse[c.id] || clearingId !== null}
                       >
-                        {reindexingId === c.id ? "索引中…" : "重建索引"}
+                        {reindexTaskByCourse[c.id] ? "索引中…" : "重建索引"}
                       </button>
                       <button
                         type="button"
                         className="btn-ghost"
                         style={{ marginRight: 8, color: "var(--danger, #c00)" }}
                         onClick={() => doClearKnowledge(c.id, c.name)}
-                        disabled={reindexingId !== null || clearingId !== null}
+                        disabled={!!reindexTaskByCourse[c.id] || clearingId !== null}
                       >
                         {clearingId === c.id ? "清理中…" : "一键清理"}
                       </button>

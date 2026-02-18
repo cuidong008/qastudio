@@ -279,7 +279,25 @@ export const api = {
         request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>(`/teacher/courses/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/teacher/courses/${id}`, { method: "DELETE" }),
       reindex: (courseId: number) =>
-        request<{ ok: boolean; chunks_indexed: number }>(`/teacher/courses/${courseId}/reindex`, { method: "POST" }),
+        request<{ ok: boolean; task_id: number; status: string }>(`/teacher/courses/${courseId}/reindex`, { method: "POST" }),
+      getReindexTask: (taskId: number) =>
+        request<{
+          id: number;
+          course_id: number;
+          status: string;
+          request_payload: Record<string, unknown>;
+          result_payload: { chunks_indexed: number } | null;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/teacher/courses/reindex/tasks/${taskId}`),
+      listActiveReindexTasks: () =>
+        request<{
+          task_id: number;
+          course_id: number;
+          status: string;
+          updated_at: string | null;
+        }[]>("/teacher/courses/reindex/active"),
       clearKnowledge: (courseId: number) =>
         request<{ ok: boolean; stats: { knowledge_documents: number; knowledge_points: number; ppt_files: number; ppt_slides: number; deleted_files: number }; chunks_indexed: number }>(
           `/teacher/courses/${courseId}/clear-knowledge`,
@@ -502,7 +520,18 @@ export const api = {
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/admin/chapters/${chapterId}`, { method: "PUT", body }),
       deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/admin/chapters/${chapterId}`, { method: "DELETE" }),
       reindex: (courseId: number) =>
-        request<{ ok: boolean; chunks_indexed: number }>(`/admin/courses/${courseId}/reindex`, { method: "POST" }),
+        request<{ ok: boolean; task_id: number; status: string }>(`/admin/courses/${courseId}/reindex`, { method: "POST" }),
+      getReindexTask: (taskId: number) =>
+        request<{
+          id: number;
+          course_id: number;
+          status: string;
+          request_payload: Record<string, unknown>;
+          result_payload: { chunks_indexed: number } | null;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/admin/courses/reindex/tasks/${taskId}`),
       clearKnowledge: (courseId: number) =>
         request<{ ok: boolean; stats: { knowledge_documents: number; knowledge_points: number; ppt_files: number; ppt_slides: number; deleted_files: number }; chunks_indexed: number }>(
           `/admin/courses/${courseId}/clear-knowledge`,

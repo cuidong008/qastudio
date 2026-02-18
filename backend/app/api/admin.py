@@ -1,16 +1,18 @@
 """后管台 API：用户、班级、课程、开课管理（仅 admin）"""
+import json
 import logging
 
-from fastapi import APIRouter, Depends, HTTPException, Query
+from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..db.models import User, UserRole, Class, Course, Teaching, Chapter
+from ..db.models import User, UserRole, Class, Course, Teaching, Chapter, CourseReindexTask
 from ..api.auth import require_admin
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
 from ..services.course_knowledge_service import clear_course_knowledge
+from ..services.course_reindex_task_service import run_course_reindex_task_thread
 import bcrypt
 
 router = APIRouter(prefix="/admin", tags=["admin"])
@@ -591,6 +593,23 @@ class CourseUpdateIn(BaseModel):
     is_active: bool | None = None
 
 
+class CourseReindexTaskOut(BaseModel):
+    ok: bool = True
+    task_id: int
+    status: str
+
+
+class CourseReindexTaskStatusOut(BaseModel):
+    id: int
+    course_id: int
+    status: str
+    request_payload: dict
+    result_payload: dict | None
+    error_message: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
 @router.get("/courses", response_model=list[CourseOut])
 async def list_courses(
     db: AsyncSession = Depends(get_db),
@@ -670,9 +689,10 @@ async def delete_course(
     return {"ok": True}
 
 
-@router.post("/courses/{course_id}/reindex")
+@router.post("/courses/{course_id}/reindex", response_model=CourseReindexTaskOut)
 async def reindex_course(
     course_id: int,
+    background_tasks: BackgroundTasks,
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
@@ -680,9 +700,58 @@ async def reindex_course(
     r = await db.execute(select(Course).where(Course.id == course_id))
     if not r.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="课程不存在")
-    from ..services.rag_index_service import build_index_for_course
-    count = await build_index_for_course(db, course_id)
-    return {"ok": True, "chunks_indexed": count}
+    r_running = await db.execute(
+        select(CourseReindexTask)
+        .where(CourseReindexTask.course_id == course_id, CourseReindexTask.status.in_(["pending", "running"]))
+        .order_by(CourseReindexTask.id.desc())
+    )
+    running = r_running.scalar_one_or_none()
+    if running:
+        return CourseReindexTaskOut(task_id=running.id, status=running.status)
+    task = CourseReindexTask(
+        course_id=course_id,
+        requested_by_id=user.id,
+        requested_by_role="admin",
+        status="pending",
+        request_payload=json.dumps({"course_id": course_id}, ensure_ascii=False),
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    background_tasks.add_task(run_course_reindex_task_thread, task.id)
+    return CourseReindexTaskOut(task_id=task.id, status=task.status)
+
+
+@router.get("/courses/reindex/tasks/{task_id}", response_model=CourseReindexTaskStatusOut)
+async def get_course_reindex_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    r = await db.execute(select(CourseReindexTask).where(CourseReindexTask.id == task_id))
+    task = r.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    req_payload = {}
+    res_payload = None
+    try:
+        req_payload = json.loads(task.request_payload or "{}")
+    except Exception:
+        req_payload = {}
+    try:
+        res_payload = json.loads(task.result_payload) if task.result_payload else None
+    except Exception:
+        res_payload = None
+    return CourseReindexTaskStatusOut(
+        id=task.id,
+        course_id=task.course_id,
+        status=task.status,
+        request_payload=req_payload,
+        result_payload=res_payload,
+        error_message=task.error_message,
+        created_at=task.created_at.isoformat() if task.created_at else None,
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
+    )
 
 
 @router.post("/courses/{course_id}/clear-knowledge")

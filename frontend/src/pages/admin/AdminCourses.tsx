@@ -100,9 +100,35 @@ export default function AdminCourses() {
     setReindexingId(courseId);
     api.admin.courses
       .reindex(courseId)
-      .then((r) => alert(`索引完成，共 ${r.chunks_indexed} 个切片。`))
-      .catch((e) => alert(e?.message || "重建索引失败"))
-      .finally(() => setReindexingId(null));
+      .then((r) => pollReindexTask(r.task_id))
+      .catch((e) => {
+        alert(e?.message || "重建索引失败");
+        setReindexingId(null);
+      });
+  };
+
+  const pollReindexTask = async (taskId: number) => {
+    const maxPoll = 180;
+    for (let i = 0; i < maxPoll; i += 1) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const task = await api.admin.courses.getReindexTask(taskId);
+        if (task.status === "success") {
+          alert(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`);
+          setReindexingId(null);
+          return;
+        }
+        if (task.status === "failed") {
+          alert(task.error_message || "重建索引任务失败");
+          setReindexingId(null);
+          return;
+        }
+      } catch {
+        // ignore and keep polling
+      }
+    }
+    alert("重建索引任务仍在处理中，请稍后再看。");
+    setReindexingId(null);
   };
 
   const doClearKnowledge = (courseId: number, courseName: string) => {

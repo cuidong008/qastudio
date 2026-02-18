@@ -224,6 +224,43 @@ def _migrate_document_process_tasks(sync_conn):
         pass
 
 
+def _migrate_course_reindex_tasks(sync_conn):
+    """创建课程重建索引任务表（SQLite 兼容）"""
+    try:
+        sync_conn.execute(
+            text(
+                """
+                CREATE TABLE IF NOT EXISTS course_reindex_tasks (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    course_id INTEGER NOT NULL,
+                    requested_by_id INTEGER,
+                    requested_by_role VARCHAR(24),
+                    status VARCHAR(24) NOT NULL DEFAULT 'pending',
+                    request_payload TEXT NOT NULL DEFAULT '{}',
+                    result_payload TEXT,
+                    error_message TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
+                    updated_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                )
+                """
+            )
+        )
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_crt_course_id ON course_reindex_tasks (course_id)"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_crt_requested_by_id ON course_reindex_tasks (requested_by_id)"))
+    except Exception:
+        pass
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_crt_status ON course_reindex_tasks (status)"))
+    except Exception:
+        pass
+
+
 def _migrate_chapter_config_preview_video(sync_conn):
     """为 chapter_configs 添加 preview_video_url 列（SQLite）"""
     try:
@@ -338,6 +375,7 @@ async def init_db():
         await conn.run_sync(_migrate_questions_course_and_type)
         await conn.run_sync(_migrate_question_generation_tasks)
         await conn.run_sync(_migrate_document_process_tasks)
+        await conn.run_sync(_migrate_course_reindex_tasks)
         await conn.run_sync(_migrate_chapter_config_preview_video)
         await conn.run_sync(_migrate_answer_records_scene_and_wrong_reason)
         await conn.run_sync(_migrate_review_records)

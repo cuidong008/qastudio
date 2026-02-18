@@ -169,6 +169,20 @@ class DocumentProcessTask(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class CourseReindexTask(Base):
+    __tablename__ = "course_reindex_tasks"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    requested_by_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)
+    requested_by_role = Column(String(24), nullable=True)  # teacher | admin
+    status = Column(String(24), nullable=False, default="pending")  # pending | running | success | failed
+    request_payload = Column(Text, nullable=False, default="{}")
+    result_payload = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ---------- PPT 元数据（联动检索） ----------
 class PptFile(Base):
     __tablename__ = "ppt_files"
