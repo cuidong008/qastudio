@@ -1,4 +1,5 @@
 """单机向量库：Chroma 持久化"""
+import logging
 from pathlib import Path
 from typing import Any
 
@@ -7,6 +8,8 @@ from chromadb.config import Settings as ChromaSettings
 
 from .base import BaseVectorStore
 from ..config import RAGSettings
+
+logger = logging.getLogger(__name__)
 
 
 class ChromaVectorStore(BaseVectorStore):
@@ -86,6 +89,19 @@ class ChromaVectorStore(BaseVectorStore):
 
     def delete_by_course(self, course_id: int) -> None:
         self._coll.delete(where={"course_id": course_id})
+
+    def reset_collection(self) -> None:
+        """重建当前 collection（用于 embedding 维度切换后的兼容处理）。"""
+        logger.warning("[RAG-STORE] 重建 collection name=%s", self._collection_name)
+        try:
+            self._client.delete_collection(name=self._collection_name)
+        except Exception:
+            # collection 可能不存在，忽略即可
+            pass
+        self._coll = self._client.get_or_create_collection(
+            name=self._collection_name,
+            metadata={"description": "QAStudio course chunks"},
+        )
 
     def list_by_course(
         self,
