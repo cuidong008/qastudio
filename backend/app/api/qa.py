@@ -353,14 +353,18 @@ async def ask(
         resp = answer_question(body.question, None)
     question_asked_id: int | None = None
     if user:
+        # 教师端学情统计按 rag_hit=True 口径统计“命中课程知识”的提问。
+        # 这里属于非 RAG 引擎分支，但只要命中了文档/知识点并给出课程内回答，仍应记为命中。
+        fallback_rag_hit = bool(doc_tuples and resp.in_scope and ((resp.ppt_ref or "").strip() or (resp.knowledge_point or "").strip()))
+        record_chapter_id = primary_doc.chapter_id if primary_doc else (points[0].chapter_id if points else None)
         record = QuestionAsked(
             user_id=user.id,
             course_id=course_id,
-            chapter_id=primary_doc.chapter_id if primary_doc else None,
+            chapter_id=record_chapter_id,
             question_text=body.question,
             answer_text=resp.answer,
             ppt_ref=resp.ppt_ref,
-            rag_hit=False,
+            rag_hit=fallback_rag_hit,
         )
         db.add(record)
         await db.flush()

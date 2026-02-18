@@ -245,7 +245,6 @@ export const api = {
       const q = qs.toString() ? `?${qs.toString()}` : "";
       return request<{
         preview_completion_rate: number;
-        total_questions_asked: number;
         top_asked: { question: string; count: number }[];
         answer_accuracy_rate: number;
         weak_knowledge_points: string[];

@@ -4,7 +4,6 @@ import { api } from "../../api/client";
 export default function TeacherDashboard() {
   const [stats, setStats] = useState<{
     preview_completion_rate: number;
-    total_questions_asked: number;
     top_asked: { question: string; count: number }[];
     answer_accuracy_rate: number;
     weak_knowledge_points: string[];
@@ -134,14 +133,6 @@ export default function TeacherDashboard() {
         </div>
         <div className="card">
           <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 4 }}>
-            课堂/课后提问数
-          </div>
-          <div style={{ fontSize: 28, fontWeight: 700, color: "var(--text-primary)" }}>
-            {stats.total_questions_asked}
-          </div>
-        </div>
-        <div className="card">
-          <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 4 }}>
             习题正确率
           </div>
           <div style={{ fontSize: 28, fontWeight: 700, color: "var(--text-primary)" }}>
@@ -150,6 +141,20 @@ export default function TeacherDashboard() {
         </div>
       </div>
       <div className="card" style={{ marginBottom: 24 }}>
+        <h3 style={{ marginTop: 0, marginBottom: 16, fontSize: 17, fontWeight: 600 }}>
+          薄弱知识点（建议重点讲解）
+        </h3>
+        {stats.weak_knowledge_points.length ? (
+          <ul style={{ margin: 0, paddingLeft: 20 }}>
+            {stats.weak_knowledge_points.map((k, i) => (
+              <li key={i} style={{ marginBottom: 8 }}>{k}</li>
+            ))}
+          </ul>
+        ) : (
+          <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无统计</p>
+        )}
+      </div>
+      <div className="card" style={{ marginBottom: 28 }}>
         <h3 style={{ marginTop: 0, marginBottom: 16, fontSize: 17, fontWeight: 600 }}>
           高频提问
         </h3>
@@ -166,20 +171,6 @@ export default function TeacherDashboard() {
           </ul>
         ) : (
           <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无提问记录</p>
-        )}
-      </div>
-      <div className="card" style={{ marginBottom: 28 }}>
-        <h3 style={{ marginTop: 0, marginBottom: 16, fontSize: 17, fontWeight: 600 }}>
-          薄弱知识点（建议重点讲解）
-        </h3>
-        {stats.weak_knowledge_points.length ? (
-          <ul style={{ margin: 0, paddingLeft: 20 }}>
-            {stats.weak_knowledge_points.map((k, i) => (
-              <li key={i} style={{ marginBottom: 8 }}>{k}</li>
-            ))}
-          </ul>
-        ) : (
-          <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无统计</p>
         )}
       </div>
       <div>

@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, 
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, delete
+from sqlalchemy import select, func, delete, and_, or_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -59,7 +59,6 @@ class ChapterConfigOut(BaseModel):
 
 class StatsOverviewOut(BaseModel):
     preview_completion_rate: float
-    total_questions_asked: int
     top_asked: list[dict]
     answer_accuracy_rate: float
     weak_knowledge_points: list[str]
@@ -3350,21 +3349,30 @@ def _apply_teacher_qa_scope(
     scoped_chapter_ids: list[int] | None,
 ):
     """教师端 QA 口径：默认按课程统计；仅在显式选章节时按章节过滤。"""
+    qa_hit_predicate = or_(
+        QuestionAsked.rag_hit == True,
+        and_(
+            QuestionAsked.rag_hit == False,
+            QuestionAsked.ppt_ref.is_not(None),
+            func.trim(QuestionAsked.ppt_ref) != "",
+            QuestionAsked.ppt_ref != "当前问题在知识库中没有参考答案",
+        ),
+    )
     if scoped_chapter_ids is not None:
         if not scoped_chapter_ids:
             return stmt.where(QuestionAsked.id == -1)
         return stmt.where(
-            QuestionAsked.rag_hit == True,
+            qa_hit_predicate,
             QuestionAsked.chapter_id.in_(scoped_chapter_ids),
         )
     if scoped_course_ids is not None:
         if not scoped_course_ids:
             return stmt.where(QuestionAsked.id == -1)
         return stmt.where(
-            QuestionAsked.rag_hit == True,
+            qa_hit_predicate,
             QuestionAsked.course_id.in_(scoped_course_ids),
         )
-    return stmt.where(QuestionAsked.rag_hit == True)
+    return stmt.where(qa_hit_predicate)
 
 
 @router.get("/stats/overview", response_model=StatsOverviewOut)
@@ -3409,9 +3417,6 @@ async def stats_overview(
             scoped_chapter_ids = [row[0] for row in r_ch.all()]
         else:
             scoped_chapter_ids = []
-    # QA 统计仅在明确选了章节时才按章节过滤；否则按课程过滤，包含课程级提问（chapter_id 为空）。
-    qa_scoped_chapter_ids: list[int] | None = [chapter_obj.id] if chapter_obj is not None else None
-
     # 预习完成率（可选按班级）
     q_pr = select(func.count(PreviewRecord.id))
     q_pr_done = select(func.count(PreviewRecord.id)).where(PreviewRecord.completed == True)
@@ -3427,19 +3432,7 @@ async def stats_overview(
     pr_done = completed_preview.scalar() or 0
     preview_rate = (pr_done / pr_total * 100) if pr_total else 0.0
 
-    # 提问总数与高频问题
-    q_qa = select(func.count(QuestionAsked.id))
-    if user.role == UserRole.teacher.value:
-        q_qa = _apply_teacher_qa_scope(q_qa, scoped_course_ids, qa_scoped_chapter_ids)
-    else:
-        if scoped_course_ids is not None:
-            q_qa = q_qa.where(QuestionAsked.course_id.in_(scoped_course_ids))
-        if scoped_chapter_ids is not None:
-            q_qa = q_qa.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
-    if user_ids is not None:
-        q_qa = q_qa.where(QuestionAsked.user_id.in_(user_ids))
-    qa_total = await db.execute(q_qa)
-    total_asked = qa_total.scalar() or 0
+    # 高频问题
     top_q_stmt = (
         select(
             QuestionAsked.course_id,
@@ -3531,12 +3524,11 @@ async def stats_overview(
                 key=lambda x: (-x[1], x[0]),
             )
             weak_titles = [title for title, _ in ranked[:5]]
-    if not weak_titles and (ans_total or total_asked):
+    if not weak_titles and ans_total:
         weak_titles = []  # 无错题时留空，不再写死
 
     return StatsOverviewOut(
         preview_completion_rate=round(preview_rate, 1),
-        total_questions_asked=total_asked,
         top_asked=top_asked,
         answer_accuracy_rate=round(accuracy, 1),
         weak_knowledge_points=weak_titles,
@@ -3620,9 +3612,6 @@ async def export_csv(
             scoped_chapter_ids = [row[0] for row in r_ch.all()]
         else:
             scoped_chapter_ids = []
-    # QA 导出口径与看板一致：默认按课程统计；仅显式选章节时按章节过滤。
-    qa_scoped_chapter_ids: list[int] | None = [chapter_obj.id] if chapter_obj is not None else None
-
     if report == "preview":
         writer.writerow(["user_id", "chapter_id", "completed", "completed_at"])
         qry = select(PreviewRecord)
@@ -3651,7 +3640,8 @@ async def export_csv(
         writer.writerow(["user_id", "chapter_id", "question_text", "answer_text", "created_at"])
         qry = select(QuestionAsked)
         if user.role == UserRole.teacher.value:
-            qry = _apply_teacher_qa_scope(qry, scoped_course_ids, qa_scoped_chapter_ids)
+            # 提问记录导出固定按课程口径，不随章节筛选变化。
+            qry = _apply_teacher_qa_scope(qry, scoped_course_ids, None)
         else:
             if scoped_course_ids is not None:
                 qry = qry.where(QuestionAsked.course_id.in_(scoped_course_ids))
@@ -3672,7 +3662,6 @@ async def export_csv(
             user=user,
         )
         writer.writerow(["preview_completion_rate", st.preview_completion_rate])
-        writer.writerow(["total_questions_asked", st.total_questions_asked])
         writer.writerow(["answer_accuracy_rate", st.answer_accuracy_rate])
 
     output.seek(0)
