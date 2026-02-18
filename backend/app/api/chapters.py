@@ -99,9 +99,42 @@ async def list_courses(
 async def list_chapters(
     course_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
 ):
     qry = select(Chapter).order_by(Chapter.order_index, Chapter.id)
-    if course_id is not None:
+    if user and user.role == UserRole.student.value:
+        class_ids: set[int] = set()
+        if user.class_id is not None:
+            class_ids.add(user.class_id)
+        r_m = await db.execute(
+            select(StudentClassMembership.class_id).where(
+                StudentClassMembership.student_id == user.id
+            )
+        )
+        class_ids.update([row[0] for row in r_m.all()])
+        if not class_ids:
+            return []
+
+        r_t = await db.execute(
+            select(Teaching.course_id)
+            .join(Course, Course.id == Teaching.course_id)
+            .where(
+                Teaching.class_id.in_(list(class_ids)),
+                Teaching.is_active == True,
+                Course.is_active == True,
+            )
+            .distinct()
+        )
+        course_ids = [row[0] for row in r_t.all()]
+        if not course_ids:
+            return []
+        if course_id is not None:
+            if course_id not in course_ids:
+                return []
+            qry = qry.where(Chapter.course_id == course_id)
+        else:
+            qry = qry.where(Chapter.course_id.in_(course_ids))
+    elif course_id is not None:
         qry = qry.where(Chapter.course_id == course_id)
     result = await db.execute(qry)
     chapters = result.scalars().all()

@@ -20,6 +20,9 @@ const difficultyLabel: Record<string, string> = {
 };
 
 export default function Exercises({ courseId }: { courseId?: number | null }) {
+  const embeddedCourseId = courseId ?? null;
+  const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
+  const [selectedCourseId, setSelectedCourseId] = useState<number | null>(embeddedCourseId);
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
   const [chapterId, setChapterId] = useState<number | null>(null);
   const [difficulty, setDifficulty] = useState<string>("");
@@ -28,9 +31,32 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
   const [userAnswer, setUserAnswer] = useState("");
   const [result, setResult] = useState<{ is_correct: boolean; correct_answer: string; explanation: string | null; ppt_ref: string | null } | null>(null);
   const [tab, setTab] = useState<"practice" | "wrong">("practice");
+  const hasAvailableCourse = courses.length > 0;
 
   useEffect(() => {
-    api.chapters.list({ course_id: courseId ?? undefined }).then((list) => {
+    api.courses.list()
+      .then((list) => {
+        const next = list.map((c) => ({ id: c.id, name: c.name }));
+        setCourses(next);
+        setSelectedCourseId((prev) => {
+          if (embeddedCourseId != null) return next.some((c) => c.id === embeddedCourseId) ? embeddedCourseId : null;
+          return prev && next.some((c) => c.id === prev) ? prev : next[0]?.id ?? null;
+        });
+      })
+      .catch(() => {
+        setCourses([]);
+        setSelectedCourseId(null);
+      });
+  }, [embeddedCourseId]);
+
+  useEffect(() => {
+    if (selectedCourseId == null) {
+      setChapters([]);
+      setChapterId(null);
+      setDifficulty("");
+      return;
+    }
+    api.chapters.list({ course_id: selectedCourseId }).then((list) => {
       setChapters(list);
       if (!list.length) {
         setChapterId(null);
@@ -38,10 +64,13 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
       }
       setChapterId((prev) => (prev && list.some((c) => c.id === prev) ? prev : null));
     });
-  }, [courseId]);
+  }, [selectedCourseId]);
 
   useEffect(() => {
-    if (tab === "wrong") {
+    if (selectedCourseId == null) {
+      setQuestions([]);
+      setCurrent(null);
+    } else if (tab === "wrong") {
       api.questions
         .wrong()
         .then((list) => {
@@ -49,17 +78,20 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
           setCurrent(list[0] ?? null);
         })
         .catch(() => setQuestions([]));
-    } else {
+    } else if (chapterId != null) {
       api.questions
         .list({ chapter_id: chapterId ?? undefined, difficulty: difficulty || undefined })
         .then((list) => {
           setQuestions(list);
           setCurrent(list[0] ?? null);
         });
+    } else {
+      setQuestions([]);
+      setCurrent(null);
     }
     setResult(null);
     setUserAnswer("");
-  }, [tab, chapterId, difficulty]);
+  }, [tab, chapterId, difficulty, selectedCourseId]);
 
   const submitAnswer = async () => {
     if (!current || !userAnswer.trim()) return;
@@ -105,27 +137,59 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
         <button type="button" className={tab === "practice" ? "btn-primary" : "btn-secondary"} onClick={() => setTab("practice")}>
           按章节/难度练习
         </button>
-        <button type="button" className={tab === "wrong" ? "btn-primary" : "btn-secondary"} onClick={() => setTab("wrong")}>
+        <button type="button" className={tab === "wrong" ? "btn-primary" : "btn-secondary"} onClick={() => setTab("wrong")} disabled={!hasAvailableCourse}>
           错题本
         </button>
       </div>
       {tab === "practice" && (
         <div style={{ display: "flex", gap: 12, marginBottom: 20, flexWrap: "wrap" }}>
-          <select value={chapterId ?? ""} onChange={(e) => setChapterId(e.target.value ? Number(e.target.value) : null)} style={{ padding: "10px 14px", minWidth: 160 }}>
-            <option value="">全部章节</option>
+          {embeddedCourseId == null && (
+            <select
+              value={selectedCourseId ?? ""}
+              onChange={(e) => setSelectedCourseId(e.target.value ? Number(e.target.value) : null)}
+              disabled={!courses.length}
+              style={{ padding: "10px 14px", minWidth: 180 }}
+            >
+              <option value="">{courses.length ? "请选择课程" : "暂无可选课程"}</option>
+              {courses.map((c) => (
+                <option key={c.id} value={c.id}>
+                  {c.name}
+                </option>
+              ))}
+            </select>
+          )}
+          <select
+            value={chapterId ?? ""}
+            onChange={(e) => setChapterId(e.target.value ? Number(e.target.value) : null)}
+            disabled={selectedCourseId == null}
+            style={{ padding: "10px 14px", minWidth: 160 }}
+          >
+            {selectedCourseId == null && <option value="">请先选择课程</option>}
+            <option value="">请选择章节</option>
             {chapters.map((c) => (
               <option key={c.id} value={c.id}>
                 {c.title}
               </option>
             ))}
           </select>
-          <select value={difficulty} onChange={(e) => setDifficulty(e.target.value)} style={{ padding: "10px 14px", minWidth: 120 }}>
+          <select
+            value={difficulty}
+            onChange={(e) => setDifficulty(e.target.value)}
+            disabled={selectedCourseId == null}
+            style={{ padding: "10px 14px", minWidth: 120 }}
+          >
             <option value="">全部难度</option>
             <option value="basic">基础</option>
             <option value="applied">应用</option>
             <option value="extended">拓展</option>
           </select>
         </div>
+      )}
+      {tab === "practice" && selectedCourseId == null && (
+        <p style={{ color: "var(--text-muted)" }}>你当前没有可用课程，请先加入班级或联系教师分配开课。</p>
+      )}
+      {tab === "wrong" && selectedCourseId == null && (
+        <p style={{ color: "var(--text-muted)" }}>你当前没有可用课程，暂不显示习题。</p>
       )}
       {current ? (
         <div className="card">
@@ -185,7 +249,7 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
             </div>
           )}
         </div>
-      ) : (
+      ) : tab === "practice" && (selectedCourseId == null || chapterId == null) ? null : (
         <p style={{ color: "var(--text-muted)" }}>暂无题目，请选择其他章节或难度。</p>
       )}
     </div>

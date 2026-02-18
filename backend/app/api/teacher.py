@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, 
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, or_
+from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -2780,6 +2780,28 @@ async def _teacher_course_ids(db: AsyncSession, teacher_id: int) -> set[int]:
     return owner_ids | teaching_ids
 
 
+def _apply_teacher_qa_scope(
+    stmt,
+    scoped_course_ids: set[int] | None,
+    scoped_chapter_ids: list[int] | None,
+):
+    if scoped_chapter_ids is not None:
+        if not scoped_chapter_ids:
+            return stmt.where(QuestionAsked.id == -1)
+        return stmt.where(
+            QuestionAsked.rag_hit == True,
+            QuestionAsked.chapter_id.in_(scoped_chapter_ids),
+        )
+    if scoped_course_ids is not None:
+        if not scoped_course_ids:
+            return stmt.where(QuestionAsked.id == -1)
+        return stmt.where(
+            QuestionAsked.rag_hit == True,
+            QuestionAsked.course_id.in_(scoped_course_ids),
+        )
+    return stmt.where(QuestionAsked.rag_hit == True)
+
+
 @router.get("/stats/overview", response_model=StatsOverviewOut)
 async def stats_overview(
     class_id: int | None = Query(None),
@@ -2841,19 +2863,7 @@ async def stats_overview(
     # 提问总数与高频问题
     q_qa = select(func.count(QuestionAsked.id))
     if user.role == UserRole.teacher.value:
-        if scoped_course_ids is not None and not scoped_course_ids:
-            q_qa = q_qa.where(QuestionAsked.id == -1)
-        else:
-            course_scope = QuestionAsked.course_id.in_(scoped_course_ids) if scoped_course_ids is not None else (QuestionAsked.id > 0)
-            if scoped_chapter_ids is not None:
-                if scoped_chapter_ids:
-                    course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(scoped_chapter_ids))
-                else:
-                    course_scope = QuestionAsked.id == -1
-            q_qa = q_qa.where(
-                QuestionAsked.rag_hit == True,
-                course_scope,
-            )
+        q_qa = _apply_teacher_qa_scope(q_qa, scoped_course_ids, scoped_chapter_ids)
     else:
         if scoped_course_ids is not None:
             q_qa = q_qa.where(QuestionAsked.course_id.in_(scoped_course_ids))
@@ -2872,19 +2882,7 @@ async def stats_overview(
         .group_by(QuestionAsked.course_id, QuestionAsked.question_text)
     )
     if user.role == UserRole.teacher.value:
-        if scoped_course_ids is not None and not scoped_course_ids:
-            top_q_stmt = top_q_stmt.where(QuestionAsked.id == -1)
-        else:
-            course_scope = QuestionAsked.course_id.in_(scoped_course_ids) if scoped_course_ids is not None else (QuestionAsked.id > 0)
-            if scoped_chapter_ids is not None:
-                if scoped_chapter_ids:
-                    course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(scoped_chapter_ids))
-                else:
-                    course_scope = QuestionAsked.id == -1
-            top_q_stmt = top_q_stmt.where(
-                QuestionAsked.rag_hit == True,
-                course_scope,
-            )
+        top_q_stmt = _apply_teacher_qa_scope(top_q_stmt, scoped_course_ids, scoped_chapter_ids)
     else:
         if scoped_course_ids is not None:
             top_q_stmt = top_q_stmt.where(QuestionAsked.course_id.in_(scoped_course_ids))
@@ -2953,7 +2951,12 @@ async def stats_overview(
                         kp_id = int(x)
                         kp_wrong_counts[kp_id] = kp_wrong_counts.get(kp_id, 0) + q_wrong
         if kp_wrong_counts:
-            r_kp = await db.execute(select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_wrong_counts.keys())))
+            kp_stmt = select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_wrong_counts.keys()))
+            if scoped_chapter_ids is not None:
+                kp_stmt = kp_stmt.where(KnowledgePoint.chapter_id.in_(scoped_chapter_ids))
+            elif scoped_course_ids is not None:
+                kp_stmt = kp_stmt.join(Chapter, Chapter.id == KnowledgePoint.chapter_id).where(Chapter.course_id.in_(scoped_course_ids))
+            r_kp = await db.execute(kp_stmt)
             kp_title_map = {int(row[0]): row[1] for row in r_kp.all() if row[1]}
             ranked = sorted(
                 [(kp_title_map[kid], cnt) for kid, cnt in kp_wrong_counts.items() if kid in kp_title_map],
@@ -3078,16 +3081,7 @@ async def export_csv(
         writer.writerow(["user_id", "chapter_id", "question_text", "answer_text", "created_at"])
         qry = select(QuestionAsked)
         if user.role == UserRole.teacher.value:
-            if scoped_course_ids is not None and not scoped_course_ids:
-                qry = qry.where(QuestionAsked.id == -1)
-            else:
-                course_scope = QuestionAsked.course_id.in_(scoped_course_ids) if scoped_course_ids is not None else (QuestionAsked.id > 0)
-                if scoped_chapter_ids is not None:
-                    if scoped_chapter_ids:
-                        course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(scoped_chapter_ids))
-                    else:
-                        course_scope = QuestionAsked.id == -1
-                qry = qry.where(QuestionAsked.rag_hit == True, course_scope)
+            qry = _apply_teacher_qa_scope(qry, scoped_course_ids, scoped_chapter_ids)
         else:
             if scoped_course_ids is not None:
                 qry = qry.where(QuestionAsked.course_id.in_(scoped_course_ids))

@@ -9,17 +9,43 @@ export default function TeacherDashboard() {
     answer_accuracy_rate: number;
     weak_knowledge_points: string[];
   } | null>(null);
+  const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
+  const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
+  const [courseId, setCourseId] = useState<number | undefined>(undefined);
+  const [chapterId, setChapterId] = useState<number | undefined>(undefined);
   const [loading, setLoading] = useState(true);
 
   useEffect(() => {
-    api.teacher.stats().then((data) => {
+    api.teacher.courses.list()
+      .then((list) => setCourses(list.map((c) => ({ id: c.id, name: c.name }))))
+      .catch(() => setCourses([]));
+  }, []);
+
+  useEffect(() => {
+    if (courseId == null) {
+      setChapters([]);
+      setChapterId(undefined);
+      return;
+    }
+    api.teacher.courses.chapters(courseId)
+      .then((list) => setChapters(list.map((ch) => ({ id: ch.id, title: ch.title }))))
+      .catch(() => setChapters([]));
+    setChapterId(undefined);
+  }, [courseId]);
+
+  useEffect(() => {
+    setLoading(true);
+    api.teacher.stats({ courseId, chapterId }).then((data) => {
       setStats(data);
       setLoading(false);
     }).catch(() => setLoading(false));
-  }, []);
+  }, [courseId, chapterId]);
 
   const handleExport = (report: string) => {
-    const url = (import.meta.env.VITE_API_BASE || "http://localhost:8000/api") + "/teacher/export/csv?report=" + report;
+    const params = new URLSearchParams({ report });
+    if (courseId != null) params.set("course_id", String(courseId));
+    if (chapterId != null) params.set("chapter_id", String(chapterId));
+    const url = (import.meta.env.VITE_API_BASE || "http://localhost:8000/api") + "/teacher/export/csv?" + params.toString();
     const token = localStorage.getItem("token");
     fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
       .then((r) => r.blob())
@@ -61,6 +87,35 @@ export default function TeacherDashboard() {
       <p style={{ color: "var(--text-muted)", marginBottom: 28, fontSize: 15 }}>
         班级整体学习画像与教学决策参考
       </p>
+      <div className="card" style={{ marginBottom: 20 }}>
+        <div style={{ display: "flex", gap: 12, flexWrap: "wrap", alignItems: "center" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: "var(--text-muted)" }}>课程</span>
+            <select
+              value={courseId ?? ""}
+              onChange={(e) => setCourseId(e.target.value ? Number(e.target.value) : undefined)}
+            >
+              <option value="">全部课程</option>
+              {courses.map((c) => (
+                <option key={c.id} value={c.id}>{c.name}</option>
+              ))}
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
+            <span style={{ color: "var(--text-muted)" }}>章节</span>
+            <select
+              value={chapterId ?? ""}
+              onChange={(e) => setChapterId(e.target.value ? Number(e.target.value) : undefined)}
+              disabled={courseId == null}
+            >
+              <option value="">全部章节</option>
+              {chapters.map((ch) => (
+                <option key={ch.id} value={ch.id}>{ch.title}</option>
+              ))}
+            </select>
+          </label>
+        </div>
+      </div>
       <div
         style={{
           display: "grid",
