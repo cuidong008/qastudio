@@ -292,6 +292,23 @@ export const api = {
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/courses/${courseId}/chapters`, { method: "POST", body }),
       updateChapter: (chapterId: number, body: { title?: string; order_index?: number; syllabus_ref?: string }) =>
         request<{ id: number; course_id: number | null; title: string; order_index: number; syllabus_ref: string | null }>(`/teacher/chapters/${chapterId}`, { method: "PUT", body }),
+      chapterKnowledgePoints: (chapterId: number) =>
+        request<{ id: number; chapter_id: number; title: string; content: string | null; ppt_slide_ref: string | null; order_index: number }[]>(
+          `/teacher/chapters/${chapterId}/knowledge-points`
+        ),
+      generateChapterKnowledgePoints: (chapterId: number, count: number) =>
+        request<{ title: string; content: string | null; ppt_slide_ref: string | null; order_index?: number | null }[]>(
+          `/teacher/chapters/${chapterId}/knowledge-points/generate`,
+          { method: "POST", body: { count } }
+        ),
+      saveChapterKnowledgePoints: (
+        chapterId: number,
+        body: { knowledge_points: { title: string; content?: string | null; ppt_slide_ref?: string | null; order_index?: number | null }[] }
+      ) =>
+        request<{ id: number; chapter_id: number; title: string; content: string | null; ppt_slide_ref: string | null; order_index: number }[]>(
+          `/teacher/chapters/${chapterId}/knowledge-points`,
+          { method: "PUT", body }
+        ),
       deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/teacher/chapters/${chapterId}`, { method: "DELETE" }),
       generateChapterQuestions: (
         chapterId: number,

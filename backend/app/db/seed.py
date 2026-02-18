@@ -21,7 +21,7 @@ from .session import (
     _migrate_course_question_synonyms,
 )
 from .models import (
-    Base, Chapter, Class, Course, Teaching, KnowledgePoint, KnowledgeDocument,
+    Base, Chapter, Class, Course, Teaching, KnowledgeDocument,
     Question, User, UserRole, ChapterConfig,
 )
 import bcrypt
@@ -59,19 +59,6 @@ async def seed(session: AsyncSession):
     session.add_all([ch1, ch2])
     await session.flush()
 
-    # 知识点
-    session.add_all([
-        KnowledgePoint(chapter_id=1, title="计算机网络的定义", order_index=1, ppt_slide_ref="第1章 第3页",
-                      content="计算机网络是将分散的、具有独立功能的计算机系统，通过通信设备与线路连接起来，实现资源共享和信息传递的系统。"),
-        KnowledgePoint(chapter_id=1, title="网络拓扑与电商平台架构", order_index=2, ppt_slide_ref="第1章 第8页",
-                      content="电商平台常采用分布式架构，涉及多机房、负载均衡与CDN，对应星型、树型等拓扑。"),
-        KnowledgePoint(chapter_id=2, title="网络协议概念", order_index=1, ppt_slide_ref="第2章 第2页",
-                      content="协议是通信双方约定的规则，可类比电商中的交易规则与合同。"),
-        KnowledgePoint(chapter_id=2, title="TCP/IP 与电商通信", order_index=2, ppt_slide_ref="第2章 第10页",
-                      content="HTTP/HTTPS 建立在 TCP 之上，保障电商下单、支付等请求的可靠传输。"),
-    ])
-    await session.flush()
-
     # 知识库文档（教材+PPT+电商案例，供问答检索）
     session.add_all([
         KnowledgeDocument(chapter_id=1, source_type="textbook", title="计算机网络概述-教材摘要",
@@ -87,16 +74,13 @@ async def seed(session: AsyncSession):
     session.add_all([
         Question(chapter_id=1, difficulty="basic", question_text="计算机网络的主要功能不包括（ ）。",
                  options='["A. 数据共享","B. 提高单机算力","C. 分布式处理","D. 资源共享"]',
-                 correct_answer="B", explanation="提高单机算力是本地计算机范畴。", ppt_ref="第1章 第5页",
-                 knowledge_point_ids="1"),
+                 correct_answer="B", explanation="提高单机算力是本地计算机范畴。", ppt_ref="第1章 第5页"),
         Question(chapter_id=1, difficulty="applied", question_text="电商平台中，用户下单请求通常经过哪些网络层次？",
                  options='["A. 仅应用层","B. 应用层、传输层、网络层等","C. 仅物理层","D. 仅网络层"]',
-                 correct_answer="B", explanation="端到端通信经过协议栈各层。", ppt_ref="第1章 第12页",
-                 knowledge_point_ids="2"),
+                 correct_answer="B", explanation="端到端通信经过协议栈各层。", ppt_ref="第1章 第12页"),
         Question(chapter_id=2, difficulty="basic", question_text="下列属于应用层协议的是（ ）。",
                  options='["A. IP","B. TCP","C. HTTP","D. Ethernet"]',
-                 correct_answer="C", explanation="HTTP 是应用层协议。", ppt_ref="第2章 第4页",
-                 knowledge_point_ids="3"),
+                 correct_answer="C", explanation="HTTP 是应用层协议。", ppt_ref="第2章 第4页"),
     ])
     # 教师章节配置默认
     session.add_all([

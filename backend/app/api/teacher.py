@@ -19,7 +19,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, 
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func
+from sqlalchemy import select, func, delete
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -180,6 +180,30 @@ class TeacherChapterUpdateIn(BaseModel):
     title: str | None = None
     order_index: int | None = None
     syllabus_ref: str | None = None
+
+
+class TeacherKnowledgePointOut(BaseModel):
+    id: int
+    chapter_id: int
+    title: str
+    content: str | None
+    ppt_slide_ref: str | None
+    order_index: int
+
+
+class TeacherKnowledgePointIn(BaseModel):
+    title: str
+    content: str | None = None
+    ppt_slide_ref: str | None = None
+    order_index: int | None = None
+
+
+class TeacherKnowledgePointSaveIn(BaseModel):
+    knowledge_points: list[TeacherKnowledgePointIn]
+
+
+class TeacherGenerateKnowledgePointsIn(BaseModel):
+    count: int = Field(default=5, ge=1, le=20)
 
 
 class TeacherGenerateQuestionsIn(BaseModel):
@@ -671,6 +695,132 @@ def _build_generate_questions_prompt(
 章节内容：
 {context}
 """
+
+
+def _extract_knowledge_points_payload(raw: str) -> list[dict]:
+    text = (raw or "").strip()
+    if not text:
+        return []
+    candidates = [text]
+    for pat in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
+        for m in re.finditer(pat, text):
+            candidates.append(m.group(0))
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+        except Exception:
+            continue
+        if isinstance(obj, dict) and isinstance(obj.get("knowledge_points"), list):
+            return [x for x in obj["knowledge_points"] if isinstance(x, dict)]
+        if isinstance(obj, list):
+            return [x for x in obj if isinstance(x, dict)]
+    return []
+
+
+def _build_generate_knowledge_points_prompt(
+    chapter_title: str,
+    syllabus_ref: str | None,
+    context: str,
+    count: int,
+) -> str:
+    return f"""你是一名课程教研助理。请根据给定章节内容，提炼适合课堂教学的知识点。
+
+章节标题：{chapter_title}
+教学大纲引用：{(syllabus_ref or "无").strip()}
+目标数量：{count}
+
+要求：
+1) 输出 {count} 条知识点，尽量覆盖概念、原理、应用场景。
+2) title 控制在 8~24 字，避免重复、避免空泛。
+3) content 用 1~2 句话解释，便于教师讲解。
+4) ppt_slide_ref 可为空字符串。
+5) 仅输出 JSON，不要输出 markdown 或解释。
+
+输出格式（严格）：
+{{
+  "knowledge_points": [
+    {{
+      "title": "知识点标题",
+      "content": "知识点解释",
+      "ppt_slide_ref": ""
+    }}
+  ]
+}}
+
+章节材料：
+{context}
+"""
+
+
+async def _generate_knowledge_points_for_chapter(
+    db: AsyncSession,
+    chapter: Chapter,
+    count: int,
+) -> list[TeacherKnowledgePointIn]:
+    r_docs = await db.execute(
+        select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
+        .where(KnowledgeDocument.chapter_id == chapter.id)
+        .order_by(KnowledgeDocument.id.desc())
+        .limit(30)
+    )
+    doc_rows = r_docs.all()
+    context_parts: list[str] = []
+    for title, content, page_ref in doc_rows:
+        c = (content or "").strip()
+        if not c:
+            continue
+        header = f"文档：{(title or '').strip()}".strip()
+        if page_ref:
+            header += f"（{page_ref}）"
+        context_parts.append(f"{header}\n{c}")
+    if not context_parts:
+        context_parts.append(f"章节标题：{chapter.title}\n教学大纲：{chapter.syllabus_ref or '无'}")
+    context = "\n\n---\n\n".join(context_parts).strip()
+    if len(context) > 18000:
+        context = context[:18000]
+
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    prompt = _build_generate_knowledge_points_prompt(
+        chapter_title=chapter.title,
+        syllabus_ref=chapter.syllabus_ref,
+        context=context,
+        count=count,
+    )
+    raw = llm.generate(
+        prompt,
+        max_tokens=max(1000, int(settings.llm_max_tokens or 512)),
+        temperature=0.2,
+    )
+    items = _extract_knowledge_points_payload(raw)
+    if not items:
+        raise RuntimeError("模型返回结果无法解析，请重试")
+
+    out: list[TeacherKnowledgePointIn] = []
+    seen: set[str] = set()
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        key = _normalize_text_key(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            TeacherKnowledgePointIn(
+                title=title[:128],
+                content=(str(item.get("content") or "").strip() or None),
+                ppt_slide_ref=(str(item.get("ppt_slide_ref") or "").strip() or None),
+            )
+        )
+        if len(out) >= count:
+            break
+    if not out:
+        raise RuntimeError("未生成有效知识点，请重试")
+    return out
 
 
 def _pdf_extract_text(content: bytes) -> tuple[str, int]:
@@ -1408,6 +1558,101 @@ async def update_teacher_chapter(
     await db.commit()
     await db.refresh(ch)
     return TeacherChapterOut(id=ch.id, course_id=ch.course_id, title=ch.title, order_index=ch.order_index, syllabus_ref=ch.syllabus_ref)
+
+
+@router.get("/chapters/{chapter_id}/knowledge-points", response_model=list[TeacherKnowledgePointOut])
+async def list_teacher_chapter_knowledge_points(
+    chapter_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, _ = await _require_owned_chapter(db, user.id, chapter_id)
+    r = await db.execute(
+        select(KnowledgePoint)
+        .where(KnowledgePoint.chapter_id == chapter.id)
+        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+    )
+    rows = r.scalars().all()
+    return [
+        TeacherKnowledgePointOut(
+            id=kp.id,
+            chapter_id=kp.chapter_id,
+            title=kp.title,
+            content=kp.content,
+            ppt_slide_ref=kp.ppt_slide_ref,
+            order_index=kp.order_index,
+        )
+        for kp in rows
+    ]
+
+
+@router.post("/chapters/{chapter_id}/knowledge-points/generate", response_model=list[TeacherKnowledgePointIn])
+async def generate_teacher_chapter_knowledge_points(
+    chapter_id: int,
+    body: TeacherGenerateKnowledgePointsIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, _ = await _require_owned_chapter(db, user.id, chapter_id)
+    try:
+        return await _generate_knowledge_points_for_chapter(db, chapter, body.count)
+    except RuntimeError as e:
+        raise HTTPException(status_code=400, detail=str(e))
+    except Exception as e:
+        logger.exception("generate_knowledge_points_failed chapter_id=%s err=%s", chapter_id, str(e))
+        raise HTTPException(status_code=500, detail="生成知识点失败，请稍后重试")
+
+
+@router.put("/chapters/{chapter_id}/knowledge-points", response_model=list[TeacherKnowledgePointOut])
+async def save_teacher_chapter_knowledge_points(
+    chapter_id: int,
+    body: TeacherKnowledgePointSaveIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, _ = await _require_owned_chapter(db, user.id, chapter_id)
+    cleaned: list[TeacherKnowledgePointIn] = []
+    for idx, kp in enumerate(body.knowledge_points):
+        title = (kp.title or "").strip()
+        if not title:
+            continue
+        cleaned.append(
+            TeacherKnowledgePointIn(
+                title=title[:128],
+                content=(kp.content or "").strip() or None,
+                ppt_slide_ref=(kp.ppt_slide_ref or "").strip() or None,
+                order_index=kp.order_index if kp.order_index is not None else (idx + 1),
+            )
+        )
+    await db.execute(delete(KnowledgePoint).where(KnowledgePoint.chapter_id == chapter.id))
+    for idx, kp in enumerate(cleaned):
+        db.add(
+            KnowledgePoint(
+                chapter_id=chapter.id,
+                title=kp.title,
+                content=kp.content,
+                ppt_slide_ref=kp.ppt_slide_ref,
+                order_index=kp.order_index if kp.order_index is not None else (idx + 1),
+            )
+        )
+    await db.commit()
+    r = await db.execute(
+        select(KnowledgePoint)
+        .where(KnowledgePoint.chapter_id == chapter.id)
+        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+    )
+    rows = r.scalars().all()
+    return [
+        TeacherKnowledgePointOut(
+            id=kp.id,
+            chapter_id=kp.chapter_id,
+            title=kp.title,
+            content=kp.content,
+            ppt_slide_ref=kp.ppt_slide_ref,
+            order_index=kp.order_index,
+        )
+        for kp in rows
+    ]
 
 
 @router.delete("/chapters/{chapter_id}")
@@ -2785,6 +3030,7 @@ def _apply_teacher_qa_scope(
     scoped_course_ids: set[int] | None,
     scoped_chapter_ids: list[int] | None,
 ):
+    """教师端 QA 口径：默认按课程统计；仅在显式选章节时按章节过滤。"""
     if scoped_chapter_ids is not None:
         if not scoped_chapter_ids:
             return stmt.where(QuestionAsked.id == -1)
@@ -2844,6 +3090,8 @@ async def stats_overview(
             scoped_chapter_ids = [row[0] for row in r_ch.all()]
         else:
             scoped_chapter_ids = []
+    # QA 统计仅在明确选了章节时才按章节过滤；否则按课程过滤，包含课程级提问（chapter_id 为空）。
+    qa_scoped_chapter_ids: list[int] | None = [chapter_obj.id] if chapter_obj is not None else None
 
     # 预习完成率（可选按班级）
     q_pr = select(func.count(PreviewRecord.id))
@@ -2863,7 +3111,7 @@ async def stats_overview(
     # 提问总数与高频问题
     q_qa = select(func.count(QuestionAsked.id))
     if user.role == UserRole.teacher.value:
-        q_qa = _apply_teacher_qa_scope(q_qa, scoped_course_ids, scoped_chapter_ids)
+        q_qa = _apply_teacher_qa_scope(q_qa, scoped_course_ids, qa_scoped_chapter_ids)
     else:
         if scoped_course_ids is not None:
             q_qa = q_qa.where(QuestionAsked.course_id.in_(scoped_course_ids))
@@ -2882,7 +3130,8 @@ async def stats_overview(
         .group_by(QuestionAsked.course_id, QuestionAsked.question_text)
     )
     if user.role == UserRole.teacher.value:
-        top_q_stmt = _apply_teacher_qa_scope(top_q_stmt, scoped_course_ids, scoped_chapter_ids)
+        # 高频提问固定按课程口径，不随章节筛选变化。
+        top_q_stmt = _apply_teacher_qa_scope(top_q_stmt, scoped_course_ids, None)
     else:
         if scoped_course_ids is not None:
             top_q_stmt = top_q_stmt.where(QuestionAsked.course_id.in_(scoped_course_ids))
@@ -3052,6 +3301,8 @@ async def export_csv(
             scoped_chapter_ids = [row[0] for row in r_ch.all()]
         else:
             scoped_chapter_ids = []
+    # QA 导出口径与看板一致：默认按课程统计；仅显式选章节时按章节过滤。
+    qa_scoped_chapter_ids: list[int] | None = [chapter_obj.id] if chapter_obj is not None else None
 
     if report == "preview":
         writer.writerow(["user_id", "chapter_id", "completed", "completed_at"])
@@ -3081,7 +3332,7 @@ async def export_csv(
         writer.writerow(["user_id", "chapter_id", "question_text", "answer_text", "created_at"])
         qry = select(QuestionAsked)
         if user.role == UserRole.teacher.value:
-            qry = _apply_teacher_qa_scope(qry, scoped_course_ids, scoped_chapter_ids)
+            qry = _apply_teacher_qa_scope(qry, scoped_course_ids, qa_scoped_chapter_ids)
         else:
             if scoped_course_ids is not None:
                 qry = qry.where(QuestionAsked.course_id.in_(scoped_course_ids))

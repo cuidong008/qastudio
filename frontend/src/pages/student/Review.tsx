@@ -2,6 +2,12 @@ import { useState, useEffect } from "react";
 import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 
+const difficultyLabel: Record<string, string> = {
+  basic: "基础",
+  applied: "应用",
+  extended: "拓展",
+};
+
 export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWorkspace?: boolean; onGoQa?: () => void; courseId?: number | null }) {
   const embeddedCourseId = courseId ?? null;
   const [chapters, setChapters] = useState<{ id: number; title: string }[]>([]);
@@ -212,7 +218,7 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
             return (
               <div key={q.id} style={{ marginBottom: 16, padding: 12, border: "1px solid var(--border)", borderRadius: 8 }}>
                 <p style={{ margin: "0 0 10px", fontWeight: 500 }}>
-                  {idx + 1}. [{q.difficulty}] {q.question_text}
+                  {idx + 1}. [{difficultyLabel[q.difficulty] || q.difficulty}] {q.question_text}
                 </p>
                 {qOptions.length > 0 ? (
                   <div style={{ display: "grid", gap: 8, marginBottom: 10 }}>

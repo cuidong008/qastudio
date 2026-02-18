@@ -63,10 +63,8 @@ async def get_preview_task(chapter_id: int, db: AsyncSession = Depends(get_db)):
         select(KnowledgePoint).where(KnowledgePoint.chapter_id == chapter_id).order_by(KnowledgePoint.order_index)
     )
     points = pts_result.scalars().all()
-    key_points = [p.title for p in points] if points else ["核心概念概览", "关键协议作用", "电商场景关联"]
-    learning_goals = key_points[:3]
-    while len(learning_goals) < 3:
-        learning_goals.append(f"掌握本章关键能力点 {len(learning_goals) + 1}")
+    key_points = [p.title for p in points if (p.title or "").strip()]
+    learning_goals = key_points if key_points else ["核心概念概览", "关键协议作用", "电商场景关联"]
 
     pdf_count_result = await db.execute(
         select(func.count(KnowledgeDocument.id)).where(
