@@ -36,6 +36,11 @@ export default function TeacherChapterMaterials() {
   const [selectedDocId, setSelectedDocId] = useState<number | null>(null);
   const [docDetail, setDocDetail] = useState<ChapterDocDetail | null>(null);
   const [docDetailLoading, setDocDetailLoading] = useState(false);
+  const [docActionId, setDocActionId] = useState<number | null>(null);
+  const [errorLogModal, setErrorLogModal] = useState<string | null>(null);
+  const [docTaskByDoc, setDocTaskByDoc] = useState<Record<number, { taskId: number; status: string }>>({});
+  const [docTaskErrorByDoc, setDocTaskErrorByDoc] = useState<Record<number, string>>({});
+  const [statusPollingDocIds, setStatusPollingDocIds] = useState<Record<number, boolean>>({});
 
   const title = useMemo(() => `${courseName} / ${chapterTitle} · 章节资料`, [chapterTitle, courseName]);
 
@@ -46,19 +51,40 @@ export default function TeacherChapterMaterials() {
     return `${(bytes / 1024 / 1024).toFixed(1)} MB`;
   };
 
-  const loadChapterDocuments = (targetChapterId: number) => {
+  const loadChapterDocuments = async (targetChapterId: number) => {
     setDocsLoading(true);
-    api.teacher.courses
-      .chapterDocuments(targetChapterId)
-      .then((rows) => setChapterDocs(rows))
-      .catch(() => setChapterDocs([]))
-      .finally(() => setDocsLoading(false));
+    try {
+      const rows = await api.teacher.courses.chapterDocuments(targetChapterId);
+      setChapterDocs(rows);
+    } catch {
+      setChapterDocs([]);
+    } finally {
+      setDocsLoading(false);
+    }
   };
 
   useEffect(() => {
     if (!chapterId) return;
     loadChapterDocuments(chapterId);
   }, [chapterId]);
+
+  useEffect(() => {
+    if (!chapterId) return;
+    const hasProcessing = chapterDocs.some((d) => d.parse_status === "processing");
+    if (!hasProcessing) return;
+    const timer = window.setInterval(async () => {
+      await loadChapterDocuments(chapterId);
+      if (selectedDocId) {
+        try {
+          const d = await api.teacher.courses.documentDetail(selectedDocId);
+          setDocDetail(d);
+        } catch {
+          // ignore transient errors
+        }
+      }
+    }, 2500);
+    return () => window.clearInterval(timer);
+  }, [chapterId, chapterDocs, selectedDocId]);
 
   const uploadDocumentToChapter = () => {
     if (!chapterId || !docUploadFile) {
@@ -101,7 +127,12 @@ export default function TeacherChapterMaterials() {
     setDocDetailLoading(true);
     api.teacher.courses
       .documentDetail(docId)
-      .then(setDocDetail)
+      .then((d) => {
+        setDocDetail(d);
+        if (d.parse_status === "processing") {
+          void pollDocumentStatus(docId);
+        }
+      })
       .catch(() => setDocDetail(null))
       .finally(() => setDocDetailLoading(false));
   };
@@ -121,6 +152,109 @@ export default function TeacherChapterMaterials() {
     }
   };
 
+  const deleteDocument = async (docId: number) => {
+    if (!confirm("确定删除该资料吗？删除后将从章节中移除。")) return;
+    setDocActionId(docId);
+    try {
+      await api.teacher.courses.deleteDocument(docId);
+      if (selectedDocId === docId) {
+        setSelectedDocId(null);
+        setDocDetail(null);
+      }
+      loadChapterDocuments(chapterId);
+    } catch (e: any) {
+      alert(e?.message || "删除失败");
+    } finally {
+      setDocActionId(null);
+    }
+  };
+
+  const reprocessDocument = async (docId: number) => {
+    if (!confirm("将重新识别讲义、重新切片并重建索引，是否继续？")) return;
+    if (docTaskByDoc[docId]?.status === "pending" || docTaskByDoc[docId]?.status === "running") {
+      alert("该文档已有处理任务在执行中");
+      return;
+    }
+    try {
+      const r = await api.teacher.courses.reprocessDocument(docId);
+      setDocTaskByDoc((prev) => ({ ...prev, [docId]: { taskId: r.task_id, status: r.status } }));
+      setDocTaskErrorByDoc((prev) => {
+        const next = { ...prev };
+        delete next[docId];
+        return next;
+      });
+      alert("任务已开始，系统将在后台处理。");
+      void pollDocumentTask(docId, r.task_id);
+      void pollDocumentStatus(docId);
+      if (selectedDocId === docId) {
+        setDocDetail((prev) => (prev ? { ...prev, parse_status: "processing", parse_error: null } : prev));
+      }
+    } catch (e: any) {
+      alert(e?.message || "重新处理失败");
+    }
+  };
+
+  const pollDocumentStatus = async (docId: number) => {
+    if (statusPollingDocIds[docId]) return;
+    setStatusPollingDocIds((prev) => ({ ...prev, [docId]: true }));
+    const maxPoll = 180;
+    try {
+      for (let i = 0; i < maxPoll; i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        let detail: ChapterDocDetail | null = null;
+        try {
+          detail = await api.teacher.courses.documentDetail(docId);
+        } catch {
+          break;
+        }
+        if (selectedDocId === docId) {
+          setDocDetail(detail);
+        }
+        await loadChapterDocuments(chapterId);
+        if (detail.parse_status !== "processing") {
+          return;
+        }
+      }
+    } finally {
+      setStatusPollingDocIds((prev) => {
+        const next = { ...prev };
+        delete next[docId];
+        return next;
+      });
+    }
+  };
+
+  const pollDocumentTask = async (docId: number, taskId: number) => {
+    const maxPoll = 180;
+    for (let i = 0; i < maxPoll; i += 1) {
+      await new Promise((r) => setTimeout(r, 2000));
+      try {
+        const task = await api.teacher.courses.getDocumentProcessTask(taskId);
+        setDocTaskByDoc((prev) => ({ ...prev, [docId]: { taskId, status: task.status } }));
+        if (task.status === "success") {
+          await loadChapterDocuments(chapterId);
+          if (selectedDocId === docId) {
+            await api.teacher.courses.documentDetail(docId).then(setDocDetail).catch(() => undefined);
+          }
+          alert("已完成重新识别、切片与重建索引。");
+          return;
+        }
+        if (task.status === "failed") {
+          const msg = task.error_message || "任务处理失败";
+          setDocTaskErrorByDoc((prev) => ({ ...prev, [docId]: msg }));
+          await loadChapterDocuments(chapterId);
+          if (selectedDocId === docId) {
+            await api.teacher.courses.documentDetail(docId).then(setDocDetail).catch(() => undefined);
+          }
+          alert("处理失败，可点击“查看失败日志”。");
+          return;
+        }
+      } catch {
+        // ignore
+      }
+    }
+  };
+
   if (!chapterId) {
     return (
       <div>
@@ -137,7 +271,7 @@ export default function TeacherChapterMaterials() {
         <h1 style={{ margin: 0, fontSize: 24, fontWeight: 600 }}>{title}</h1>
         <button type="button" className="btn-ghost" onClick={() => navigate("/teacher/courses")}>返回课程页</button>
       </div>
-      <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>上传 PDF 讲义与教学视频，并查看文档解析情况。</p>
+      <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>资料上传只负责上传；讲义的重新识别/切片/重建索引在下方独立按钮执行。</p>
       <div className="card" style={{ width: "100%", minHeight: "calc(100vh - 170px)", display: "grid", gridTemplateColumns: "360px 1fr", gap: 12 }}>
         <div style={{ borderRight: "1px solid var(--border)", paddingRight: 12, display: "flex", flexDirection: "column", minHeight: 0 }}>
           <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
@@ -188,19 +322,70 @@ export default function TeacherChapterMaterials() {
           {!docDetailLoading && docDetail && (
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10, minHeight: 0, flex: 1 }}>
               <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10, overflowY: "auto" }}>
+                {(() => {
+                  const selectedDoc = chapterDocs.find((d) => d.id === docDetail.id);
+                  const effectiveStatus = selectedDoc?.parse_status || docDetail.parse_status;
+                  const effectiveError = selectedDoc?.parse_error || docTaskErrorByDoc[docDetail.id] || docDetail.parse_error;
+                  return (
+                    <>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <strong>{docDetail.file_name || docDetail.title}</strong>
-                  <button type="button" className="btn-ghost" onClick={() => openDocFile(docDetail.id)}>
-                    {docDetail.source_type === "preview_video" ? "播放视频" : "查看PDF"}
-                  </button>
+                  <div style={{ display: "inline-flex", gap: 8 }}>
+                    <button type="button" className="btn-ghost" onClick={() => openDocFile(docDetail.id)} disabled={docActionId === docDetail.id}>
+                      {docDetail.source_type === "preview_video" ? "播放视频" : "查看PDF"}
+                    </button>
+                    {docDetail.source_type !== "preview_video" && (
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        onClick={() => reprocessDocument(docDetail.id)}
+                        disabled={
+                          docUploading ||
+                          statusPollingDocIds[docDetail.id] ||
+                          effectiveStatus === "processing" ||
+                          docTaskByDoc[docDetail.id]?.status === "pending" ||
+                          docTaskByDoc[docDetail.id]?.status === "running"
+                        }
+                      >
+                        {statusPollingDocIds[docDetail.id] ||
+                        effectiveStatus === "processing" ||
+                        docTaskByDoc[docDetail.id]?.status === "pending" ||
+                        docTaskByDoc[docDetail.id]?.status === "running"
+                          ? "处理中…"
+                          : "重新识别+切片+重建索引"}
+                      </button>
+                    )}
+                    {effectiveError && (
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        onClick={() => setErrorLogModal(effectiveError || "无失败日志")}
+                        disabled={docActionId === docDetail.id || docUploading}
+                      >
+                        查看失败日志
+                      </button>
+                    )}
+                    <button
+                      type="button"
+                      className="btn-ghost"
+                      style={{ color: "var(--danger, #c00)" }}
+                      onClick={() => deleteDocument(docDetail.id)}
+                      disabled={docActionId === docDetail.id || docUploading}
+                    >
+                      {docActionId === docDetail.id ? "处理中…" : "删除资料"}
+                    </button>
+                  </div>
                 </div>
                 <div style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 8 }}>
-                  状态：{docDetail.parse_status || "unknown"} · 页数：{docDetail.page_ref || "—"} · 切片：{docDetail.chunk_count ?? "—"}
+                  状态：{effectiveStatus || "unknown"} · 页数：{docDetail.page_ref || "—"} · 切片：{docDetail.chunk_count ?? "—"}
                 </div>
-                {docDetail.parse_error && <p style={{ color: "var(--danger, #c00)" }}>{docDetail.parse_error}</p>}
+                {effectiveError && <p style={{ color: "var(--danger, #c00)" }}>{effectiveError}</p>}
                 <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontSize: 13 }}>
                   {docDetail.source_type === "preview_video" ? "视频文件无需文本解析，可直接播放/下载。" : docDetail.content_preview || "暂无解析文本"}
                 </pre>
+                    </>
+                  );
+                })()}
               </div>
               <div style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10, overflowY: "auto" }}>
                 <div style={{ fontWeight: 600, marginBottom: 8 }}>切片结果</div>
@@ -217,6 +402,23 @@ export default function TeacherChapterMaterials() {
           )}
         </div>
       </div>
+
+      {errorLogModal && (
+        <div
+          style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 130 }}
+          onClick={() => setErrorLogModal(null)}
+        >
+          <div className="card" style={{ width: "min(820px, 92vw)", maxHeight: "78vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 10 }}>
+              <h3 style={{ margin: 0 }}>失败日志</h3>
+              <button type="button" className="btn-ghost" onClick={() => setErrorLogModal(null)}>
+                关闭
+              </button>
+            </div>
+            <pre style={{ whiteSpace: "pre-wrap", margin: 0, fontSize: 13 }}>{errorLogModal}</pre>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

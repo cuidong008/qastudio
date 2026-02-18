@@ -154,6 +154,21 @@ class QuestionGenerationTask(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
 
+class DocumentProcessTask(Base):
+    __tablename__ = "document_process_tasks"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False, index=True)
+    doc_id = Column(Integer, ForeignKey("knowledge_documents.id"), nullable=False, index=True)
+    teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    status = Column(String(24), nullable=False, default="pending")  # pending | running | success | failed
+    request_payload = Column(Text, nullable=False, default="{}")
+    result_payload = Column(Text, nullable=True)
+    error_message = Column(Text, nullable=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 # ---------- PPT 元数据（联动检索） ----------
 class PptFile(Base):
     __tablename__ = "ppt_files"

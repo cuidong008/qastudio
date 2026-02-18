@@ -14,6 +14,7 @@ from .session import (
     _migrate_questions_asked_course_and_rag,
     _migrate_questions_course_and_type,
     _migrate_question_generation_tasks,
+    _migrate_document_process_tasks,
     _migrate_chapter_config_preview_video,
     _migrate_answer_records_scene_and_wrong_reason,
     _migrate_review_records,
@@ -127,6 +128,7 @@ async def run_seed():
         await conn.run_sync(_migrate_questions_asked_course_and_rag)
         await conn.run_sync(_migrate_questions_course_and_type)
         await conn.run_sync(_migrate_question_generation_tasks)
+        await conn.run_sync(_migrate_document_process_tasks)
         await conn.run_sync(_migrate_chapter_config_preview_video)
         await conn.run_sync(_migrate_answer_records_scene_and_wrong_reason)
         await conn.run_sync(_migrate_review_records)

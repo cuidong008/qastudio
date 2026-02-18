@@ -1,4 +1,5 @@
 """教师端：教学内容配置、课程/班级管理、学情数据监控与导出"""
+import asyncio
 import base64
 import csv
 import difflib
@@ -28,7 +29,7 @@ from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
     StudentClassMembership,
     Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
-    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask,
+    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask, DocumentProcessTask,
 )
 from ..api.auth import require_teacher
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
@@ -36,6 +37,7 @@ from ..services.course_knowledge_service import clear_course_knowledge
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
 logger = logging.getLogger(__name__)
+DOC_PROCESS_TASK_STALE_MINUTES = 30
 
 
 class ConfigChapterIn(BaseModel):
@@ -206,6 +208,25 @@ class TeacherGenerateTaskStatusOut(BaseModel):
     updated_at: str | None
 
 
+class TeacherDocumentProcessTaskOut(BaseModel):
+    ok: bool = True
+    task_id: int
+    status: str
+
+
+class TeacherDocumentProcessTaskStatusOut(BaseModel):
+    id: int
+    course_id: int
+    chapter_id: int
+    doc_id: int
+    status: str
+    request_payload: dict
+    result_payload: dict | None
+    error_message: str | None
+    created_at: str | None
+    updated_at: str | None
+
+
 class TeacherQuestionOut(BaseModel):
     id: int
     course_id: int | None
@@ -328,6 +349,59 @@ async def _require_owned_document(db: AsyncSession, teacher_id: int, doc_id: int
     if not row:
         raise HTTPException(status_code=404, detail="文档不存在或无权限")
     return row[0], row[1], row[2]
+
+
+def _is_document_task_stale(task: DocumentProcessTask) -> bool:
+    ref = task.updated_at or task.created_at
+    if not ref:
+        return False
+    return (datetime.utcnow() - ref) > timedelta(minutes=DOC_PROCESS_TASK_STALE_MINUTES)
+
+
+async def _reconcile_document_process_tasks(
+    db: AsyncSession,
+    teacher_id: int,
+    *,
+    chapter_id: int | None = None,
+    doc_id: int | None = None,
+) -> set[int]:
+    q = select(DocumentProcessTask).where(
+        DocumentProcessTask.teacher_id == teacher_id,
+        DocumentProcessTask.status.in_(["pending", "running"]),
+    )
+    if chapter_id is not None:
+        q = q.where(DocumentProcessTask.chapter_id == chapter_id)
+    if doc_id is not None:
+        q = q.where(DocumentProcessTask.doc_id == doc_id)
+    q = q.order_by(DocumentProcessTask.id.desc())
+    r = await db.execute(q)
+    tasks = r.scalars().all()
+    active_doc_ids: set[int] = set()
+    has_changes = False
+    for task in tasks:
+        if _is_document_task_stale(task):
+            msg = f"任务超时或服务重启中断（超过 {DOC_PROCESS_TASK_STALE_MINUTES} 分钟未更新）"
+            logger.warning(
+                "doc_task_stale_mark_failed task_id=%s doc_id=%s status=%s updated_at=%s",
+                task.id,
+                task.doc_id,
+                task.status,
+                task.updated_at.isoformat() if task.updated_at else None,
+            )
+            task.status = "failed"
+            task.error_message = msg
+            rd = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == task.doc_id))
+            d = rd.scalar_one_or_none()
+            if d is not None and d.parse_status == "processing":
+                d.parse_status = "failed"
+                if not (d.parse_error or "").strip():
+                    d.parse_error = msg[:500]
+            has_changes = True
+            continue
+        active_doc_ids.add(int(task.doc_id))
+    if has_changes:
+        await db.commit()
+    return active_doc_ids
 
 
 def _safe_pdf_filename(name: str) -> str:
@@ -460,6 +534,88 @@ def _normalize_multi_answer(value: object) -> str:
     parts = re.split(r"[,，、\s]+", s)
     letters = sorted({p for p in parts if p in {"A", "B", "C", "D"}})
     return ",".join(letters)
+
+
+def _compact_match_text(text: str) -> str:
+    t = (text or "").strip().lower()
+    t = re.sub(r"\s+", "", t)
+    t = re.sub(r"[，,。.!！?？:：;；、/\\\"'“”‘’`~·()\[\]{}<>《》【】\-_=+|]+", "", t)
+    return t
+
+
+def _tokenize_match_text(text: str) -> set[str]:
+    s = _compact_match_text(text)
+    if not s:
+        return set()
+    tokens: set[str] = set()
+    for m in re.finditer(r"[a-z0-9]{2,}", s):
+        tokens.add(m.group(0))
+    cjk_segs = re.findall(r"[\u4e00-\u9fff]+", s)
+    for seg in cjk_segs:
+        n = len(seg)
+        if n == 1:
+            tokens.add(seg)
+            continue
+        for l in (2, 3):
+            if n < l:
+                continue
+            for i in range(0, n - l + 1):
+                tokens.add(seg[i:i + l])
+    return tokens
+
+
+def _build_chapter_kp_matchers(kp_rows: list[tuple[int, str, str | None]]) -> list[dict]:
+    out: list[dict] = []
+    for kp_id, title, content in kp_rows:
+        title_text = (title or "").strip()
+        if not title_text:
+            continue
+        content_text = (content or "").strip()
+        compact_title = _compact_match_text(title_text)
+        combined = f"{title_text}\n{content_text[:200]}".strip()
+        out.append(
+            {
+                "id": int(kp_id),
+                "title": title_text,
+                "title_compact": compact_title,
+                "tokens": _tokenize_match_text(combined),
+            }
+        )
+    return out
+
+
+def _match_question_kp_ids(
+    question_text: str,
+    explanation: str | None,
+    chapter_kp_matchers: list[dict],
+    limit: int = 3,
+) -> list[int]:
+    if not chapter_kp_matchers:
+        return []
+    q_text = (question_text or "").strip()
+    if not q_text:
+        return []
+    q_compact = _compact_match_text(q_text)
+    e_compact = _compact_match_text(explanation or "")
+    q_tokens = _tokenize_match_text(q_text + "\n" + (explanation or ""))
+    scored: list[tuple[int, int]] = []
+    for item in chapter_kp_matchers:
+        score = 0
+        title_compact = item["title_compact"]
+        if title_compact and len(title_compact) >= 2:
+            if title_compact in q_compact:
+                score += 8
+            if e_compact and title_compact in e_compact:
+                score += 5
+            if q_compact and q_compact in title_compact:
+                score += 2
+        overlap = len(q_tokens.intersection(item["tokens"]))
+        if overlap > 0:
+            score += overlap
+        if score > 0:
+            scored.append((int(item["id"]), int(score)))
+    scored.sort(key=lambda x: (-x[1], x[0]))
+    return [kp_id for kp_id, _ in scored[:limit]]
 
 
 def _build_generate_questions_prompt(
@@ -903,6 +1059,160 @@ def _pdf_extract_text_with_external_vlm(
     return output, page_count
 
 
+async def _parse_pdf_document_and_reindex(
+    *,
+    db: AsyncSession,
+    doc: KnowledgeDocument,
+    chapter: Chapter,
+    course: Course,
+    file_binary: bytes,
+    file_name: str,
+) -> None:
+    """解析 PDF 文档并触发课程索引重建；异常由调用方统一处理并回写状态。"""
+    engine = (settings.pdf_parse_engine or "mineru_then_pypdf").strip().lower()
+    prefer_chinese = bool(re.search(r"[\u4e00-\u9fff]", file_name or "")) or (settings.mineru_lang or "").startswith("ch")
+    default_pdf_parser = ""
+    try:
+        from ..rag.config_store import get_default_pdf_parser
+        default_pdf_parser = get_default_pdf_parser()
+    except Exception:
+        default_pdf_parser = ""
+    logger.info(
+        "doc_parse_start chapter_id=%s course_id=%s doc_id=%s file=%s size=%s engine=%s default_pdf_parser=%s",
+        chapter.id,
+        course.id,
+        doc.id,
+        file_name,
+        len(file_binary),
+        engine,
+        bool(default_pdf_parser),
+    )
+    extracted_text = ""
+    total_pages: int | None = None
+    mineru_errors: list[str] = []
+    if default_pdf_parser:
+        try:
+            extracted_text, total_pages = _pdf_extract_text_with_external_vlm(
+                file_binary,
+                file_name,
+                default_pdf_parser,
+                prefer_chinese=prefer_chinese,
+            )
+            logger.info(
+                "doc_parse_external_vlm_ok file=%s text_len=%s pages=%s",
+                file_name,
+                len((extracted_text or "").strip()),
+                total_pages,
+            )
+        except Exception as e:
+            logger.warning("doc_parse_external_vlm_failed file=%s err=%s", file_name, str(e))
+            raise HTTPException(status_code=400, detail=f"外部 PDF 解析失败: {str(e)}")
+    if engine == "mineru":
+        if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+            try:
+                extracted_text, total_pages = _pdf_extract_text_with_mineru(file_binary, file_name, method=settings.mineru_method or "auto")
+            except Exception as e:
+                logger.warning("doc_parse_mineru_auto_error file=%s err=%s", file_name, str(e))
+                mineru_errors.append(str(e))
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                try:
+                    extracted_text, total_pages = _pdf_extract_text_with_mineru(file_binary, file_name, method="ocr")
+                except Exception as e:
+                    logger.warning("doc_parse_mineru_ocr_error file=%s err=%s", file_name, str(e))
+                    mineru_errors.append(str(e))
+    elif engine == "pypdf":
+        if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+            logger.info("doc_parse_use_pypdf file=%s", file_name)
+            try:
+                extracted_text, total_pages = _pdf_extract_text(file_binary)
+            except Exception as e:
+                mineru_errors.append(str(e))
+                extracted_text, total_pages = "", None
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                try:
+                    logger.info("doc_parse_try_tesseract_after_pypdf file=%s", file_name)
+                    extracted_text, total_pages = _pdf_extract_text_with_tesseract(file_binary, prefer_chinese=prefer_chinese)
+                except Exception as e:
+                    logger.warning("doc_parse_tesseract_after_pypdf_failed file=%s err=%s", file_name, str(e))
+                    mineru_errors.append(str(e))
+    else:
+        if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+            try:
+                extracted_text, total_pages = _pdf_extract_text_with_mineru(file_binary, file_name, method=settings.mineru_method or "auto")
+                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                    logger.info("doc_parse_mineru_auto_low_quality file=%s retry=ocr", file_name)
+                    extracted_text, total_pages = _pdf_extract_text_with_mineru(file_binary, file_name, method="ocr")
+            except Exception as e:
+                logger.warning("doc_parse_mineru_fallback_to_pypdf file=%s err=%s", file_name, str(e))
+                mineru_errors.append(str(e))
+                try:
+                    extracted_text, total_pages = _pdf_extract_text(file_binary)
+                except Exception as e2:
+                    mineru_errors.append(str(e2))
+                    extracted_text, total_pages = "", None
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                try:
+                    fallback_text, fallback_pages = _pdf_extract_text(file_binary)
+                    if len(fallback_text.strip()) > len(extracted_text.strip()):
+                        logger.info(
+                            "doc_parse_use_pypdf_better_text file=%s mineru_len=%s pypdf_len=%s",
+                            file_name,
+                            len(extracted_text.strip()),
+                            len(fallback_text.strip()),
+                        )
+                        extracted_text, total_pages = fallback_text, fallback_pages
+                except Exception:
+                    pass
+            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+                try:
+                    logger.info("doc_parse_try_tesseract_after_mineru_pypdf file=%s", file_name)
+                    extracted_text, total_pages = _pdf_extract_text_with_tesseract(file_binary, prefer_chinese=prefer_chinese)
+                except Exception as e:
+                    logger.warning("doc_parse_tesseract_after_mineru_pypdf_failed file=%s err=%s", file_name, str(e))
+                    mineru_errors.append(str(e))
+    logger.info(
+        "doc_parse_result file=%s text_len=%s pages=%s usable=%s",
+        file_name,
+        len((extracted_text or "").strip()),
+        total_pages,
+        _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese),
+    )
+    if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
+        hints = []
+        all_err = "\n".join(mineru_errors)
+        if "doclayout_yolo" in all_err:
+            hints.append("请在 backend 虚拟环境执行: pip install doclayout-yolo")
+        if "No module named 'torch'" in all_err or 'No module named "torch"' in all_err:
+            hints.append("请在 backend 虚拟环境执行: pip install torch")
+        if "tesseract 未安装中文语言包" in all_err or "几乎不含中文" in all_err:
+            hints.append("请安装中文 OCR 语言包: brew install tesseract-lang（并确认 tesseract --list-langs 有 chi_sim）")
+        hint_text = f"；建议: {'；'.join(hints)}" if hints else ""
+        extra = f"；最后错误: {mineru_errors[-1][:220]}{hint_text}" if mineru_errors else ""
+        logger.error("doc_parse_failed_no_text file=%s extra=%s", file_name, extra)
+        raise HTTPException(status_code=400, detail=f"未提取到可用文本，请检查 PDF 或 OCR 配置{extra}")
+
+    doc.content = extracted_text
+    doc.page_ref = f"{total_pages}页" if total_pages else None
+    doc.parse_error = None
+    doc.parse_status = "done"
+
+    from ..rag import ChunkDocument
+    from ..rag.chunking import chunk_documents
+    preview_chunks = chunk_documents(
+        [ChunkDocument(text=(doc.content or "").strip(), course_id=course.id, chapter_id=chapter.id, title=doc.title, source_id=f"doc_{doc.id}")]
+    )
+    doc.chunk_count = len(preview_chunks)
+
+    from ..services.rag_index_service import build_index_for_course
+    try:
+        await build_index_for_course(db, course.id)
+    except Exception as idx_err:
+        logger.exception("doc_reindex_failed file=%s course_id=%s doc_id=%s", file_name, course.id, doc.id)
+        msg = str(idx_err)
+        tip = f"索引失败: {msg[:240]}"
+        doc.parse_error = f"{doc.parse_error}；{tip}" if doc.parse_error else tip
+
+
 @router.get("/courses", response_model=list[TeacherCourseOut])
 async def list_teacher_courses(
     db: AsyncSession = Depends(get_db),
@@ -1140,12 +1450,13 @@ async def _generate_questions_for_chapter(
     )
     doc_rows = r_docs.all()
     r_kps = await db.execute(
-        select(KnowledgePoint.title, KnowledgePoint.content)
+        select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.content)
         .where(KnowledgePoint.chapter_id == chapter.id)
         .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
         .limit(100)
     )
     kp_rows = r_kps.all()
+    chapter_kp_matchers = _build_chapter_kp_matchers(kp_rows)
     context_parts: list[str] = []
     for title, content, page_ref in doc_rows:
         c = (content or "").strip()
@@ -1155,7 +1466,7 @@ async def _generate_questions_for_chapter(
         if page_ref:
             header += f"（{page_ref}）"
         context_parts.append(f"{header}\n{c}")
-    for title, content in kp_rows:
+    for _, title, content in kp_rows:
         t = (title or "").strip()
         c = (content or "").strip()
         if not (t or c):
@@ -1228,6 +1539,8 @@ async def _generate_questions_for_chapter(
             return False
 
         explanation = str(item.get("explanation") or "").strip() or None
+        matched_kp_ids = _match_question_kp_ids(q_text, explanation, chapter_kp_matchers, limit=3)
+        knowledge_point_ids = ",".join(str(x) for x in matched_kp_ids) if matched_kp_ids else None
         difficulty = _normalize_difficulty(item.get("difficulty"))
         if enforce_diff_limit and created_by_diff[difficulty] >= diff_limits[difficulty]:
             return False
@@ -1273,6 +1586,7 @@ async def _generate_questions_for_chapter(
                 options=options_text,
                 correct_answer=correct_answer,
                 explanation=explanation,
+                knowledge_point_ids=knowledge_point_ids,
                 is_active=True,
                 is_approved=True,
             )
@@ -1394,6 +1708,102 @@ async def get_generate_teacher_chapter_questions_task(
     )
 
 
+async def _run_document_process_task(task_id: int):
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
+        task = r.scalar_one_or_none()
+        if not task:
+            logger.warning("doc_task_missing task_id=%s", task_id)
+            return
+        logger.info(
+            "doc_task_start task_id=%s doc_id=%s chapter_id=%s course_id=%s teacher_id=%s",
+            task.id,
+            task.doc_id,
+            task.chapter_id,
+            task.course_id,
+            task.teacher_id,
+        )
+        task.status = "running"
+        task.error_message = None
+        await db.commit()
+
+        doc: KnowledgeDocument | None = None
+        try:
+            r_doc = await db.execute(
+                select(KnowledgeDocument, Chapter, Course)
+                .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
+                .join(Course, Course.id == Chapter.course_id)
+                .where(
+                    KnowledgeDocument.id == task.doc_id,
+                    Chapter.id == task.chapter_id,
+                    Course.id == task.course_id,
+                    Course.owner_teacher_id == task.teacher_id,
+                )
+            )
+            row = r_doc.first()
+            if not row:
+                raise RuntimeError("文档不存在或无权限")
+            doc, chapter, course = row[0], row[1], row[2]
+            logger.info("doc_task_loaded task_id=%s doc_id=%s file=%s", task.id, doc.id, doc.file_name)
+            if doc.source_type != "pdf_upload":
+                raise RuntimeError("仅 PDF 讲义支持重新识别与切片")
+            if not doc.file_path:
+                raise RuntimeError("文档原文件不存在，无法重新识别")
+            abs_path = Path(settings.upload_dir) / doc.file_path
+            if not abs_path.exists():
+                raise RuntimeError("文档文件不存在，无法重新识别")
+            binary = abs_path.read_bytes()
+            if not binary:
+                raise RuntimeError("文档文件为空，无法重新识别")
+            doc.parse_status = "processing"
+            doc.parse_error = None
+            doc.chunk_count = None
+            await db.commit()
+            logger.info("doc_task_parse_begin task_id=%s doc_id=%s path=%s", task.id, doc.id, str(abs_path))
+
+            await _parse_pdf_document_and_reindex(
+                db=db,
+                doc=doc,
+                chapter=chapter,
+                course=course,
+                file_binary=binary,
+                file_name=doc.file_name or doc.title or abs_path.name,
+            )
+            task.status = "success"
+            task.result_payload = json.dumps(
+                {
+                    "doc_id": doc.id,
+                    "parse_status": doc.parse_status,
+                    "chunk_count": doc.chunk_count,
+                },
+                ensure_ascii=False,
+            )
+            task.error_message = None
+            logger.info("doc_task_success task_id=%s doc_id=%s chunk_count=%s", task.id, doc.id, doc.chunk_count)
+        except Exception as e:
+            if isinstance(e, HTTPException):
+                err_msg = e.detail if isinstance(e.detail, str) else str(e.detail)
+            else:
+                err_msg = str(e)
+            task.status = "failed"
+            task.error_message = err_msg[:4000]
+            logger.exception("doc_task_failed task_id=%s doc_id=%s err=%s", task.id, task.doc_id, err_msg[:500])
+            if doc is not None:
+                doc.parse_status = "failed"
+                doc.parse_error = err_msg[:500]
+        await db.commit()
+
+
+def _run_document_process_task_thread(task_id: int):
+    """在线程中运行文档处理任务，避免阻塞主事件循环。"""
+    try:
+        logger.info("doc_task_thread_start task_id=%s", task_id)
+        asyncio.run(_run_document_process_task(task_id))
+        logger.info("doc_task_thread_end task_id=%s", task_id)
+    except Exception:
+        logger.exception("doc_task_thread_crash task_id=%s", task_id)
+
+
 @router.get("/chapters/{chapter_id}/questions", response_model=list[TeacherQuestionOut])
 async def list_teacher_chapter_questions(
     chapter_id: int,
@@ -1511,12 +1921,23 @@ async def list_teacher_chapter_documents(
     user: User = Depends(require_teacher),
 ):
     await _require_owned_chapter(db, user.id, chapter_id)
+    active_task_doc_ids = await _reconcile_document_process_tasks(db, user.id, chapter_id=chapter_id)
     r = await db.execute(
         select(KnowledgeDocument)
         .where(KnowledgeDocument.chapter_id == chapter_id)
         .order_by(KnowledgeDocument.id.desc())
     )
     rows = r.scalars().all()
+    orphan_fixed = False
+    for d in rows:
+        if d.parse_status == "processing" and d.id not in active_task_doc_ids:
+            d.parse_status = "failed"
+            if not (d.parse_error or "").strip():
+                d.parse_error = "未检测到运行中的处理任务，已自动回收为失败状态，请重新发起处理。"
+            orphan_fixed = True
+            logger.warning("doc_processing_orphan_fix doc_id=%s chapter_id=%s", d.id, chapter_id)
+    if orphan_fixed:
+        await db.commit()
     return [
         TeacherKnowledgeDocumentOut(
             id=d.id,
@@ -1526,8 +1947,8 @@ async def list_teacher_chapter_documents(
             page_ref=d.page_ref,
             file_name=d.file_name,
             file_size=d.file_size,
-            parse_status=d.parse_status,
-            parse_error=d.parse_error,
+            parse_status="processing" if d.id in active_task_doc_ids else d.parse_status,
+            parse_error=None if d.id in active_task_doc_ids else d.parse_error,
             chunk_count=d.chunk_count,
             created_at=d.created_at.isoformat() if d.created_at else None,
         )
@@ -1542,7 +1963,7 @@ async def upload_teacher_chapter_document(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
-    chapter, course = await _require_owned_chapter(db, user.id, chapter_id)
+    chapter, _ = await _require_owned_chapter(db, user.id, chapter_id)
     if not file.filename or not file.filename.lower().endswith(".pdf"):
         raise HTTPException(status_code=400, detail="请上传 PDF 文件")
     binary = await file.read()
@@ -1566,166 +1987,11 @@ async def upload_teacher_chapter_document(
         file_name=file.filename,
         file_path=rel_path,
         file_size=len(binary),
-        parse_status="processing",
+        parse_status="uploaded",
+        parse_error=None,
+        chunk_count=None,
     )
     db.add(doc)
-    await db.flush()
-
-    try:
-        engine = (settings.pdf_parse_engine or "mineru_then_pypdf").strip().lower()
-        prefer_chinese = bool(re.search(r"[\u4e00-\u9fff]", file.filename or "")) or (settings.mineru_lang or "").startswith("ch")
-        default_pdf_parser = ""
-        try:
-            from ..rag.config_store import get_default_pdf_parser
-            default_pdf_parser = get_default_pdf_parser()
-        except Exception:
-            default_pdf_parser = ""
-        logger.info(
-            "doc_parse_start chapter_id=%s course_id=%s file=%s size=%s engine=%s default_pdf_parser=%s",
-            chapter.id,
-            course.id,
-            file.filename,
-            len(binary),
-            engine,
-            bool(default_pdf_parser),
-        )
-        extracted_text = ""
-        total_pages: int | None = None
-        mineru_errors: list[str] = []
-        if default_pdf_parser:
-            try:
-                extracted_text, total_pages = _pdf_extract_text_with_external_vlm(
-                    binary,
-                    file.filename,
-                    default_pdf_parser,
-                    prefer_chinese=prefer_chinese,
-                )
-                logger.info(
-                    "doc_parse_external_vlm_ok file=%s text_len=%s pages=%s",
-                    file.filename,
-                    len((extracted_text or "").strip()),
-                    total_pages,
-                )
-            except Exception as e:
-                logger.warning("doc_parse_external_vlm_failed file=%s err=%s", file.filename, str(e))
-                # 已显式配置外部 PDF 解析器时，按配置严格执行，不再回退本地 MinerU/PyPDF
-                raise HTTPException(status_code=400, detail=f"外部 PDF 解析失败: {str(e)}")
-        if engine == "mineru":
-            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                try:
-                    extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method=settings.mineru_method or "auto")
-                except Exception as e:
-                    logger.warning("doc_parse_mineru_auto_error file=%s err=%s", file.filename, str(e))
-                    mineru_errors.append(str(e))
-                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                    try:
-                        extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method="ocr")
-                    except Exception as e:
-                        logger.warning("doc_parse_mineru_ocr_error file=%s err=%s", file.filename, str(e))
-                        mineru_errors.append(str(e))
-        elif engine == "pypdf":
-            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                logger.info("doc_parse_use_pypdf file=%s", file.filename)
-                try:
-                    extracted_text, total_pages = _pdf_extract_text(binary)
-                except Exception as e:
-                    mineru_errors.append(str(e))
-                    extracted_text, total_pages = "", None
-                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                    try:
-                        logger.info("doc_parse_try_tesseract_after_pypdf file=%s", file.filename)
-                        extracted_text, total_pages = _pdf_extract_text_with_tesseract(binary, prefer_chinese=prefer_chinese)
-                    except Exception as e:
-                        logger.warning("doc_parse_tesseract_after_pypdf_failed file=%s err=%s", file.filename, str(e))
-                        mineru_errors.append(str(e))
-        else:
-            if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                # 默认优先 MinerU（支持扫描版与中文 OCR），失败后降级 pypdf
-                try:
-                    extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method=settings.mineru_method or "auto")
-                    if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                        logger.info("doc_parse_mineru_auto_low_quality file=%s retry=ocr", file.filename)
-                        extracted_text, total_pages = _pdf_extract_text_with_mineru(binary, file.filename, method="ocr")
-                except Exception as e:
-                    logger.warning("doc_parse_mineru_fallback_to_pypdf file=%s err=%s", file.filename, str(e))
-                    mineru_errors.append(str(e))
-                    try:
-                        extracted_text, total_pages = _pdf_extract_text(binary)
-                    except Exception as e2:
-                        mineru_errors.append(str(e2))
-                        extracted_text, total_pages = "", None
-                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                    try:
-                        fallback_text, fallback_pages = _pdf_extract_text(binary)
-                        if len(fallback_text.strip()) > len(extracted_text.strip()):
-                            logger.info(
-                                "doc_parse_use_pypdf_better_text file=%s mineru_len=%s pypdf_len=%s",
-                                file.filename,
-                                len(extracted_text.strip()),
-                                len(fallback_text.strip()),
-                            )
-                            extracted_text, total_pages = fallback_text, fallback_pages
-                    except Exception:
-                        pass
-                if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-                    try:
-                        logger.info("doc_parse_try_tesseract_after_mineru_pypdf file=%s", file.filename)
-                        extracted_text, total_pages = _pdf_extract_text_with_tesseract(binary, prefer_chinese=prefer_chinese)
-                    except Exception as e:
-                        logger.warning("doc_parse_tesseract_after_mineru_pypdf_failed file=%s err=%s", file.filename, str(e))
-                        mineru_errors.append(str(e))
-        logger.info(
-            "doc_parse_result file=%s text_len=%s pages=%s usable=%s",
-            file.filename,
-            len((extracted_text or "").strip()),
-            total_pages,
-            _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese),
-        )
-        if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
-            hints = []
-            all_err = "\n".join(mineru_errors)
-            if "doclayout_yolo" in all_err:
-                hints.append("请在 backend 虚拟环境执行: pip install doclayout-yolo")
-            if "No module named 'torch'" in all_err or 'No module named "torch"' in all_err:
-                hints.append("请在 backend 虚拟环境执行: pip install torch")
-            if "tesseract 未安装中文语言包" in all_err or "几乎不含中文" in all_err:
-                hints.append("请安装中文 OCR 语言包: brew install tesseract-lang（并确认 tesseract --list-langs 有 chi_sim）")
-            hint_text = f"；建议: {'；'.join(hints)}" if hints else ""
-            extra = f"；最后错误: {mineru_errors[-1][:220]}{hint_text}" if mineru_errors else ""
-            logger.error("doc_parse_failed_no_text file=%s extra=%s", file.filename, extra)
-            raise HTTPException(status_code=400, detail=f"未提取到可用文本，请检查 PDF 或 OCR 配置{extra}")
-        doc.content = extracted_text
-        doc.page_ref = f"{total_pages}页" if total_pages else None
-        doc.parse_error = None
-        doc.parse_status = "done"
-
-        from ..rag import ChunkDocument
-        from ..rag.chunking import chunk_documents
-        preview_chunks = chunk_documents(
-            [ChunkDocument(text=(doc.content or "").strip(), course_id=course.id, chapter_id=chapter.id, title=doc.title, source_id=f"doc_{doc.id}")]
-        )
-        doc.chunk_count = len(preview_chunks)
-
-        from ..services.rag_index_service import build_index_for_course
-        try:
-            await build_index_for_course(db, course.id)
-        except Exception as idx_err:
-            # 文档解析成功时不阻断上传；索引异常作为提示返回，便于后续手动重建索引
-            logger.exception("doc_reindex_failed file=%s course_id=%s", file.filename, course.id)
-            msg = str(idx_err)
-            tip = f"索引失败: {msg[:240]}"
-            doc.parse_error = f"{doc.parse_error}；{tip}" if doc.parse_error else tip
-    except HTTPException as e:
-        doc.parse_status = "failed"
-        doc.parse_error = e.detail if isinstance(e.detail, str) else str(e.detail)
-        await db.commit()
-        raise
-    except Exception as e:
-        logger.exception("doc_parse_unexpected_error file=%s", file.filename)
-        doc.parse_status = "failed"
-        doc.parse_error = str(e)
-        await db.commit()
-        raise HTTPException(status_code=400, detail=f"文档处理失败: {str(e)}")
 
     await db.commit()
     await db.refresh(doc)
@@ -1807,6 +2073,16 @@ async def get_teacher_document_detail(
     user: User = Depends(require_teacher),
 ):
     doc, chapter, course = await _require_owned_document(db, user.id, doc_id)
+    active_task_doc_ids = await _reconcile_document_process_tasks(db, user.id, doc_id=doc.id)
+    if doc.parse_status == "processing" and doc.id not in active_task_doc_ids:
+        doc.parse_status = "failed"
+        if not (doc.parse_error or "").strip():
+            doc.parse_error = "未检测到运行中的处理任务，已自动回收为失败状态，请重新发起处理。"
+        await db.commit()
+        logger.warning("doc_processing_orphan_fix_detail doc_id=%s", doc.id)
+    active_task = doc.id in active_task_doc_ids
+    effective_status = "processing" if active_task else doc.parse_status
+    effective_error = None if active_task else doc.parse_error
     chunks_out: list[TeacherDocumentChunkOut] = []
     if doc.content and doc.parse_status == "done":
         from ..rag import ChunkDocument
@@ -1826,12 +2102,126 @@ async def get_teacher_document_detail(
         page_ref=doc.page_ref,
         file_name=doc.file_name,
         file_size=doc.file_size,
-        parse_status=doc.parse_status,
-        parse_error=doc.parse_error,
+        parse_status=effective_status,
+        parse_error=effective_error,
         chunk_count=doc.chunk_count,
         created_at=doc.created_at.isoformat() if doc.created_at else None,
         content_preview=preview,
         chunks=chunks_out,
+    )
+
+
+@router.delete("/documents/{doc_id}")
+async def delete_teacher_document(
+    doc_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    doc, _, course = await _require_owned_document(db, user.id, doc_id)
+    abs_path: Path | None = None
+    if doc.file_path:
+        abs_path = Path(settings.upload_dir) / doc.file_path
+    await db.delete(doc)
+    await db.flush()
+    try:
+        from ..services.rag_index_service import build_index_for_course
+        await build_index_for_course(db, course.id)
+    except Exception:
+        logger.exception("delete_doc_reindex_failed doc_id=%s course_id=%s", doc_id, course.id)
+    await db.commit()
+    if abs_path and abs_path.exists():
+        try:
+            abs_path.unlink()
+        except Exception:
+            logger.warning("delete_doc_file_unlink_failed doc_id=%s path=%s", doc_id, str(abs_path))
+    return {"ok": True}
+
+
+@router.post("/documents/{doc_id}/reprocess", response_model=TeacherDocumentProcessTaskOut)
+async def reprocess_teacher_document(
+    doc_id: int,
+    background_tasks: BackgroundTasks,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    doc, chapter, course = await _require_owned_document(db, user.id, doc_id)
+    if doc.source_type != "pdf_upload":
+        raise HTTPException(status_code=400, detail="仅 PDF 讲义支持重新识别与切片")
+    if not doc.file_path:
+        raise HTTPException(status_code=400, detail="文档原文件不存在，无法重新识别")
+    abs_path = Path(settings.upload_dir) / doc.file_path
+    if not abs_path.exists():
+        raise HTTPException(status_code=400, detail="文档文件不存在，无法重新识别")
+
+    await _reconcile_document_process_tasks(db, user.id, doc_id=doc.id)
+    r_running = await db.execute(
+        select(DocumentProcessTask)
+        .where(
+            DocumentProcessTask.doc_id == doc.id,
+            DocumentProcessTask.teacher_id == user.id,
+            DocumentProcessTask.status.in_(["pending", "running"]),
+        )
+        .order_by(DocumentProcessTask.id.desc())
+    )
+    running = r_running.scalar_one_or_none()
+    if running:
+        logger.info("doc_task_reuse_running task_id=%s doc_id=%s", running.id, doc.id)
+        if doc.parse_status != "processing":
+            doc.parse_status = "processing"
+            doc.parse_error = None
+            await db.commit()
+        return TeacherDocumentProcessTaskOut(task_id=running.id, status=running.status)
+
+    doc.parse_status = "processing"
+    doc.parse_error = None
+    doc.chunk_count = None
+    task = DocumentProcessTask(
+        course_id=course.id,
+        chapter_id=chapter.id,
+        doc_id=doc.id,
+        teacher_id=user.id,
+        status="pending",
+        request_payload=json.dumps({"doc_id": doc.id}, ensure_ascii=False),
+    )
+    db.add(task)
+    await db.commit()
+    await db.refresh(task)
+    logger.info("doc_task_created task_id=%s doc_id=%s chapter_id=%s", task.id, doc.id, chapter.id)
+    background_tasks.add_task(_run_document_process_task_thread, task.id)
+    return TeacherDocumentProcessTaskOut(task_id=task.id, status=task.status)
+
+
+@router.get("/documents/tasks/{task_id}", response_model=TeacherDocumentProcessTaskStatusOut)
+async def get_reprocess_teacher_document_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id, DocumentProcessTask.teacher_id == user.id))
+    task = r.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    req_payload = {}
+    res_payload = None
+    try:
+        req_payload = json.loads(task.request_payload or "{}")
+    except Exception:
+        req_payload = {}
+    try:
+        res_payload = json.loads(task.result_payload) if task.result_payload else None
+    except Exception:
+        res_payload = None
+    return TeacherDocumentProcessTaskStatusOut(
+        id=task.id,
+        course_id=task.course_id,
+        chapter_id=task.chapter_id,
+        doc_id=task.doc_id,
+        status=task.status,
+        request_payload=req_payload,
+        result_payload=res_payload,
+        error_message=task.error_message,
+        created_at=task.created_at.isoformat() if task.created_at else None,
+        updated_at=task.updated_at.isoformat() if task.updated_at else None,
     )
 
 
@@ -2393,6 +2783,8 @@ async def _teacher_course_ids(db: AsyncSession, teacher_id: int) -> set[int]:
 @router.get("/stats/overview", response_model=StatsOverviewOut)
 async def stats_overview(
     class_id: int | None = Query(None),
+    course_id: int | None = Query(None),
+    chapter_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
@@ -2400,14 +2792,43 @@ async def stats_overview(
         await _require_owned_class(db, user.id, class_id)
     user_ids = await _user_ids_by_class(db, class_id)
     teacher_course_ids = await _teacher_course_ids(db, user.id) if user.role == UserRole.teacher.value else set()
-    chapter_ids_in_teacher_courses: list[int] = []
-    if user.role == UserRole.teacher.value and teacher_course_ids:
-        r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(teacher_course_ids)))
-        chapter_ids_in_teacher_courses = [row[0] for row in r_ch.all()]
+    if user.role == UserRole.teacher.value and course_id is not None and course_id not in teacher_course_ids:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+
+    scoped_course_ids: set[int] | None = None
+    if course_id is not None:
+        scoped_course_ids = {course_id}
+    elif user.role == UserRole.teacher.value:
+        scoped_course_ids = teacher_course_ids
+
+    chapter_obj = None
+    if chapter_id is not None:
+        r_chapter = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+        chapter_obj = r_chapter.scalar_one_or_none()
+        if chapter_obj is None:
+            raise HTTPException(status_code=404, detail="章节不存在")
+        if scoped_course_ids is not None and chapter_obj.course_id not in scoped_course_ids:
+            raise HTTPException(status_code=404, detail="章节不存在或无权限")
+        # 指定章节时，课程范围收敛到章节所属课程，避免扩大到其他课程。
+        if course_id is None and chapter_obj.course_id is not None:
+            scoped_course_ids = {chapter_obj.course_id}
+
+    scoped_chapter_ids: list[int] | None = None
+    if chapter_obj is not None:
+        scoped_chapter_ids = [chapter_obj.id]
+    elif scoped_course_ids is not None:
+        if scoped_course_ids:
+            r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(scoped_course_ids)))
+            scoped_chapter_ids = [row[0] for row in r_ch.all()]
+        else:
+            scoped_chapter_ids = []
 
     # 预习完成率（可选按班级）
     q_pr = select(func.count(PreviewRecord.id))
     q_pr_done = select(func.count(PreviewRecord.id)).where(PreviewRecord.completed == True)
+    if scoped_chapter_ids is not None:
+        q_pr = q_pr.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
+        q_pr_done = q_pr_done.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         q_pr = q_pr.where(PreviewRecord.user_id.in_(user_ids))
         q_pr_done = q_pr_done.where(PreviewRecord.user_id.in_(user_ids))
@@ -2420,16 +2841,24 @@ async def stats_overview(
     # 提问总数与高频问题
     q_qa = select(func.count(QuestionAsked.id))
     if user.role == UserRole.teacher.value:
-        if not teacher_course_ids:
+        if scoped_course_ids is not None and not scoped_course_ids:
             q_qa = q_qa.where(QuestionAsked.id == -1)
         else:
-            course_scope = QuestionAsked.course_id.in_(teacher_course_ids)
-            if chapter_ids_in_teacher_courses:
-                course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(chapter_ids_in_teacher_courses))
+            course_scope = QuestionAsked.course_id.in_(scoped_course_ids) if scoped_course_ids is not None else (QuestionAsked.id > 0)
+            if scoped_chapter_ids is not None:
+                if scoped_chapter_ids:
+                    course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+                else:
+                    course_scope = QuestionAsked.id == -1
             q_qa = q_qa.where(
                 QuestionAsked.rag_hit == True,
                 course_scope,
             )
+    else:
+        if scoped_course_ids is not None:
+            q_qa = q_qa.where(QuestionAsked.course_id.in_(scoped_course_ids))
+        if scoped_chapter_ids is not None:
+            q_qa = q_qa.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         q_qa = q_qa.where(QuestionAsked.user_id.in_(user_ids))
     qa_total = await db.execute(q_qa)
@@ -2443,26 +2872,44 @@ async def stats_overview(
         .group_by(QuestionAsked.course_id, QuestionAsked.question_text)
     )
     if user.role == UserRole.teacher.value:
-        if not teacher_course_ids:
+        if scoped_course_ids is not None and not scoped_course_ids:
             top_q_stmt = top_q_stmt.where(QuestionAsked.id == -1)
         else:
-            course_scope = QuestionAsked.course_id.in_(teacher_course_ids)
-            if chapter_ids_in_teacher_courses:
-                course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(chapter_ids_in_teacher_courses))
+            course_scope = QuestionAsked.course_id.in_(scoped_course_ids) if scoped_course_ids is not None else (QuestionAsked.id > 0)
+            if scoped_chapter_ids is not None:
+                if scoped_chapter_ids:
+                    course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+                else:
+                    course_scope = QuestionAsked.id == -1
             top_q_stmt = top_q_stmt.where(
                 QuestionAsked.rag_hit == True,
                 course_scope,
             )
+    else:
+        if scoped_course_ids is not None:
+            top_q_stmt = top_q_stmt.where(QuestionAsked.course_id.in_(scoped_course_ids))
+        if scoped_chapter_ids is not None:
+            top_q_stmt = top_q_stmt.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         top_q_stmt = top_q_stmt.where(QuestionAsked.user_id.in_(user_ids))
     top_q_stmt = top_q_stmt.order_by(func.count(QuestionAsked.id).desc()).limit(200)
     top_q = await db.execute(top_q_stmt)
-    course_synonym_maps = await _load_course_synonym_maps(db, teacher_course_ids) if teacher_course_ids else {}
+    synonym_course_ids = scoped_course_ids if (scoped_course_ids is not None) else teacher_course_ids
+    course_synonym_maps = await _load_course_synonym_maps(db, synonym_course_ids) if synonym_course_ids else {}
     top_asked = _merge_similar_questions([(r[1], r[2], r[0]) for r in top_q.all()], course_synonym_maps, limit=5)
 
     # 作答正确率
     q_ans = select(func.count(AnswerRecord.id))
     q_ans_ok = select(func.count(AnswerRecord.id)).where(AnswerRecord.is_correct == True)
+    if scoped_course_ids is not None or scoped_chapter_ids is not None:
+        q_ans = q_ans.join(Question, Question.id == AnswerRecord.question_id)
+        q_ans_ok = q_ans_ok.join(Question, Question.id == AnswerRecord.question_id)
+        if scoped_course_ids is not None:
+            q_ans = q_ans.where(Question.course_id.in_(scoped_course_ids))
+            q_ans_ok = q_ans_ok.where(Question.course_id.in_(scoped_course_ids))
+        if scoped_chapter_ids is not None:
+            q_ans = q_ans.where(Question.chapter_id.in_(scoped_chapter_ids))
+            q_ans_ok = q_ans_ok.where(Question.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         q_ans = q_ans.where(AnswerRecord.user_id.in_(user_ids))
         q_ans_ok = q_ans_ok.where(AnswerRecord.user_id.in_(user_ids))
@@ -2472,30 +2919,47 @@ async def stats_overview(
     ans_ok = correct_answers.scalar() or 0
     accuracy = (ans_ok / ans_total * 100) if ans_total else 0.0
 
-    # 薄弱知识点：从错题对应的题目考点（knowledge_point_ids）解析出知识点标题
+    # 薄弱知识点（Top 5）：按错题次数累计到知识点，再取频次最高的 5 个标题
     wrong_q_ids = (
-        select(AnswerRecord.question_id)
+        select(AnswerRecord.question_id, func.count(AnswerRecord.id).label("wrong_count"))
         .where(AnswerRecord.is_correct == False)
     )
+    if scoped_course_ids is not None or scoped_chapter_ids is not None:
+        wrong_q_ids = wrong_q_ids.join(Question, Question.id == AnswerRecord.question_id)
+        if scoped_course_ids is not None:
+            wrong_q_ids = wrong_q_ids.where(Question.course_id.in_(scoped_course_ids))
+        if scoped_chapter_ids is not None:
+            wrong_q_ids = wrong_q_ids.where(Question.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         wrong_q_ids = wrong_q_ids.where(AnswerRecord.user_id.in_(user_ids))
-    wrong_q_ids = wrong_q_ids.distinct()
+    wrong_q_ids = wrong_q_ids.group_by(AnswerRecord.question_id)
     r_wrong = await db.execute(wrong_q_ids)
-    wqids = [row[0] for row in r_wrong.all()]
+    wrong_rows = [(int(row[0]), int(row[1] or 0)) for row in r_wrong.all() if row[0] is not None]
     weak_titles: list[str] = []
-    if wqids:
+    if wrong_rows:
+        wqids = [qid for qid, _ in wrong_rows]
+        wrong_count_by_qid = {qid: cnt for qid, cnt in wrong_rows}
         r_questions = await db.execute(select(Question).where(Question.id.in_(wqids)))
         questions = r_questions.scalars().all()
-        kp_ids = set()
+        kp_wrong_counts: dict[int, int] = {}
         for q in questions:
+            q_wrong = int(wrong_count_by_qid.get(int(q.id), 0))
+            if q_wrong <= 0:
+                continue
             if q.knowledge_point_ids:
                 for x in str(q.knowledge_point_ids).split(","):
                     x = x.strip()
                     if x.isdigit():
-                        kp_ids.add(int(x))
-        if kp_ids:
-            r_kp = await db.execute(select(KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_ids)))
-            weak_titles = [row[0] for row in r_kp.all()]
+                        kp_id = int(x)
+                        kp_wrong_counts[kp_id] = kp_wrong_counts.get(kp_id, 0) + q_wrong
+        if kp_wrong_counts:
+            r_kp = await db.execute(select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_wrong_counts.keys())))
+            kp_title_map = {int(row[0]): row[1] for row in r_kp.all() if row[1]}
+            ranked = sorted(
+                [(kp_title_map[kid], cnt) for kid, cnt in kp_wrong_counts.items() if kid in kp_title_map],
+                key=lambda x: (-x[1], x[0]),
+            )
+            weak_titles = [title for title, _ in ranked[:5]]
     if not weak_titles and (ans_total or total_asked):
         weak_titles = []  # 无错题时留空，不再写死
 
@@ -2543,37 +3007,106 @@ async def approve_content(
 @router.get("/export/csv")
 async def export_csv(
     report: str = Query("overview", description="overview | preview | answers | qa"),
+    class_id: int | None = Query(None),
+    course_id: int | None = Query(None),
+    chapter_id: int | None = Query(None),
     user: User = Depends(require_teacher),
     db: AsyncSession = Depends(get_db),
 ):
     """导出学情数据为 CSV"""
     output = io.StringIO()
     writer = csv.writer(output)
+    if class_id is not None and user.role == UserRole.teacher.value:
+        await _require_owned_class(db, user.id, class_id)
+    user_ids = await _user_ids_by_class(db, class_id)
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if user.role == UserRole.teacher.value else set()
+    if user.role == UserRole.teacher.value and course_id is not None and course_id not in teacher_course_ids:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+
+    scoped_course_ids: set[int] | None = None
+    if course_id is not None:
+        scoped_course_ids = {course_id}
+    elif user.role == UserRole.teacher.value:
+        scoped_course_ids = teacher_course_ids
+
+    chapter_obj = None
+    if chapter_id is not None:
+        r_chapter = await db.execute(select(Chapter).where(Chapter.id == chapter_id))
+        chapter_obj = r_chapter.scalar_one_or_none()
+        if chapter_obj is None:
+            raise HTTPException(status_code=404, detail="章节不存在")
+        if scoped_course_ids is not None and chapter_obj.course_id not in scoped_course_ids:
+            raise HTTPException(status_code=404, detail="章节不存在或无权限")
+        if course_id is None and chapter_obj.course_id is not None:
+            scoped_course_ids = {chapter_obj.course_id}
+
+    scoped_chapter_ids: list[int] | None = None
+    if chapter_obj is not None:
+        scoped_chapter_ids = [chapter_obj.id]
+    elif scoped_course_ids is not None:
+        if scoped_course_ids:
+            r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(scoped_course_ids)))
+            scoped_chapter_ids = [row[0] for row in r_ch.all()]
+        else:
+            scoped_chapter_ids = []
 
     if report == "preview":
         writer.writerow(["user_id", "chapter_id", "completed", "completed_at"])
-        result = await db.execute(
-            select(PreviewRecord).order_by(PreviewRecord.created_at.desc()).limit(500)
-        )
+        qry = select(PreviewRecord)
+        if scoped_chapter_ids is not None:
+            qry = qry.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
+        if user_ids is not None:
+            qry = qry.where(PreviewRecord.user_id.in_(user_ids))
+        result = await db.execute(qry.order_by(PreviewRecord.created_at.desc()).limit(500))
         for r in result.scalars().all():
             writer.writerow([r.user_id, r.chapter_id, r.completed, r.completed_at])
     elif report == "answers":
         writer.writerow(["user_id", "question_id", "user_answer", "is_correct", "created_at"])
-        result = await db.execute(
-            select(AnswerRecord).order_by(AnswerRecord.created_at.desc()).limit(500)
-        )
+        qry = select(AnswerRecord)
+        if scoped_course_ids is not None or scoped_chapter_ids is not None:
+            qry = qry.join(Question, Question.id == AnswerRecord.question_id)
+            if scoped_course_ids is not None:
+                qry = qry.where(Question.course_id.in_(scoped_course_ids))
+            if scoped_chapter_ids is not None:
+                qry = qry.where(Question.chapter_id.in_(scoped_chapter_ids))
+        if user_ids is not None:
+            qry = qry.where(AnswerRecord.user_id.in_(user_ids))
+        result = await db.execute(qry.order_by(AnswerRecord.created_at.desc()).limit(500))
         for r in result.scalars().all():
             writer.writerow([r.user_id, r.question_id, r.user_answer, r.is_correct, r.created_at])
     elif report == "qa":
         writer.writerow(["user_id", "chapter_id", "question_text", "answer_text", "created_at"])
-        result = await db.execute(
-            select(QuestionAsked).order_by(QuestionAsked.created_at.desc()).limit(500)
-        )
+        qry = select(QuestionAsked)
+        if user.role == UserRole.teacher.value:
+            if scoped_course_ids is not None and not scoped_course_ids:
+                qry = qry.where(QuestionAsked.id == -1)
+            else:
+                course_scope = QuestionAsked.course_id.in_(scoped_course_ids) if scoped_course_ids is not None else (QuestionAsked.id > 0)
+                if scoped_chapter_ids is not None:
+                    if scoped_chapter_ids:
+                        course_scope = or_(course_scope, QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+                    else:
+                        course_scope = QuestionAsked.id == -1
+                qry = qry.where(QuestionAsked.rag_hit == True, course_scope)
+        else:
+            if scoped_course_ids is not None:
+                qry = qry.where(QuestionAsked.course_id.in_(scoped_course_ids))
+            if scoped_chapter_ids is not None:
+                qry = qry.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+        if user_ids is not None:
+            qry = qry.where(QuestionAsked.user_id.in_(user_ids))
+        result = await db.execute(qry.order_by(QuestionAsked.created_at.desc()).limit(500))
         for r in result.scalars().all():
             writer.writerow([r.user_id, r.chapter_id, r.question_text, r.answer_text, r.created_at])
     else:
         writer.writerow(["metric", "value"])
-        st = await stats_overview(db=db, user=user)
+        st = await stats_overview(
+            class_id=class_id,
+            course_id=course_id,
+            chapter_id=chapter_id,
+            db=db,
+            user=user,
+        )
         writer.writerow(["preview_completion_rate", st.preview_completion_rate])
         writer.writerow(["total_questions_asked", st.total_questions_asked])
         writer.writerow(["answer_accuracy_rate", st.answer_accuracy_rate])

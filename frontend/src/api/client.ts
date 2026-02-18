@@ -237,8 +237,12 @@ export const api = {
       ),
   },
   teacher: {
-    stats: (classId?: number) => {
-      const q = classId != null ? `?class_id=${classId}` : "";
+    stats: (params?: { classId?: number; courseId?: number; chapterId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.classId != null) qs.set("class_id", String(params.classId));
+      if (params?.courseId != null) qs.set("course_id", String(params.courseId));
+      if (params?.chapterId != null) qs.set("chapter_id", String(params.chapterId));
+      const q = qs.toString() ? `?${qs.toString()}` : "";
       return request<{
         preview_completion_rate: number;
         total_questions_asked: number;
@@ -369,6 +373,25 @@ export const api = {
         request<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null; content_preview: string; chunks: { index: number; text: string }[] }>(
           `/teacher/documents/${docId}`
         ),
+      deleteDocument: (docId: number) => request<{ ok: boolean }>(`/teacher/documents/${docId}`, { method: "DELETE" }),
+      reprocessDocument: (docId: number) =>
+        request<{ ok: boolean; task_id: number; status: string }>(
+          `/teacher/documents/${docId}/reprocess`,
+          { method: "POST" }
+        ),
+      getDocumentProcessTask: (taskId: number) =>
+        request<{
+          id: number;
+          course_id: number;
+          chapter_id: number;
+          doc_id: number;
+          status: string;
+          request_payload: Record<string, unknown>;
+          result_payload: { doc_id: number; parse_status: string; chunk_count: number | null } | null;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/teacher/documents/tasks/${taskId}`),
       documentFileUrl: (docId: number) => `${API_BASE}/teacher/documents/${docId}/file`,
     },
     classes: {
