@@ -247,15 +247,6 @@ export default function TeacherCourses() {
       .finally(() => setDocsLoading(false));
   };
 
-  const openDocsModal = (ch: ChapterItem) => {
-    setDocsModalChapter(ch);
-    setDocUploadFile(null);
-    setVideoUploadFile(null);
-    setSelectedDocId(null);
-    setDocDetail(null);
-    loadChapterDocuments(ch.id);
-  };
-
   const uploadDocumentToChapter = () => {
     if (!docsModalChapter || !docUploadFile) {
       alert("请选择 PDF 文件");
@@ -448,7 +439,7 @@ export default function TeacherCourses() {
                       <td colSpan={5} style={{ padding: "12px 24px", background: "var(--bg-muted)", borderBottom: "1px solid var(--border)" }}>
                         <div style={{ marginBottom: 6, fontWeight: 600 }}>章节列表</div>
                         <p style={{ marginTop: 0, marginBottom: 12, color: "var(--text-muted)", fontSize: 13 }}>
-                          先点每个章节右侧“资料（讲义/视频）”进入上传弹窗，再分别上传 PDF 讲义和教学视频。
+                          点每个章节右侧“资料（讲义/视频）”进入独立资料页面，再分别上传 PDF 讲义和教学视频。
                         </p>
                         <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
                           <input
@@ -480,7 +471,15 @@ export default function TeacherCourses() {
                             <li key={ch.id} style={{ marginBottom: 4, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
                               <span>{ch.title}（排序 {ch.order_index}）</span>
                               <span style={{ display: "inline-flex", gap: 6 }}>
-                                <button type="button" className="btn-ghost" style={{ fontSize: 13 }} onClick={() => openDocsModal(ch)}>
+                                <button
+                                  type="button"
+                                  className="btn-ghost"
+                                  style={{ fontSize: 13 }}
+                                  onClick={() => {
+                                    const target = `/teacher/chapter-materials?chapterId=${ch.id}&chapterTitle=${encodeURIComponent(ch.title)}&courseName=${encodeURIComponent(c.name)}`;
+                                    window.open(target, "_blank", "noopener,noreferrer");
+                                  }}
+                                >
                                   资料（讲义/视频）
                                 </button>
                                 <button type="button" className="btn-ghost" style={{ fontSize: 13 }} onClick={() => openEditChapter(ch)}>

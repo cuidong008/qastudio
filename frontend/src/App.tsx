@@ -9,6 +9,7 @@ import Feedback from "./pages/student/Feedback";
 import TeacherLayout from "./components/TeacherLayout";
 import TeacherDashboard from "./pages/teacher/TeacherDashboard";
 import TeacherCourses from "./pages/teacher/TeacherCourses";
+import TeacherChapterMaterials from "./pages/teacher/TeacherChapterMaterials";
 import TeacherClasses from "./pages/teacher/TeacherClasses";
 import TeacherChapterQuestions from "./pages/teacher/TeacherChapterQuestions";
 import AdminLayout from "./components/AdminLayout";
@@ -48,6 +49,7 @@ function App() {
       <Route path="/student/feedback" element={<Layout role="student" requireAuth><Feedback /></Layout>} />
       <Route path="/teacher" element={<TeacherLayout requireAuth><TeacherDashboard /></TeacherLayout>} />
       <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />
+      <Route path="/teacher/chapter-materials" element={<TeacherLayout requireAuth fluid><TeacherChapterMaterials /></TeacherLayout>} />
       <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
       <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
       <Route path="/admin" element={<AdminLayout />}>

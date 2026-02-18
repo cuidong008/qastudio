@@ -5,9 +5,11 @@ import { useAuth } from "../api/auth";
 export default function TeacherLayout({
   children,
   requireAuth,
+  fluid,
 }: {
   children: ReactNode;
   requireAuth?: boolean;
+  fluid?: boolean;
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -71,7 +73,7 @@ export default function TeacherLayout({
         style={{
           flex: 1,
           padding: 24,
-          maxWidth: 1000,
+          maxWidth: fluid ? "none" : 1000,
           margin: "0 auto",
           width: "100%",
         }}
