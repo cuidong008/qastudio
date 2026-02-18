@@ -263,6 +263,8 @@ class TeacherQuestionOut(BaseModel):
     options: str | None
     correct_answer: str
     explanation: str | None
+    knowledge_point_ids: str | None
+    knowledge_points: list[str] = []
     created_at: str | None
 
 
@@ -642,6 +644,41 @@ def _match_question_kp_ids(
     return [kp_id for kp_id, _ in scored[:limit]]
 
 
+async def _backfill_question_kp_ids_for_chapter(
+    db: AsyncSession,
+    chapter_id: int,
+    overwrite: bool = False,
+) -> int:
+    """按当前章节知识点重新匹配并回填题目的 knowledge_point_ids。"""
+    r_kps = await db.execute(
+        select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.content)
+        .where(KnowledgePoint.chapter_id == chapter_id)
+        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+    )
+    kp_rows = r_kps.all()
+    chapter_kp_matchers = _build_chapter_kp_matchers(kp_rows)
+    if not chapter_kp_matchers:
+        return 0
+
+    q_stmt = select(Question).where(Question.chapter_id == chapter_id)
+    if not overwrite:
+        q_stmt = q_stmt.where((Question.knowledge_point_ids == None) | (func.trim(Question.knowledge_point_ids) == ""))
+    r_q = await db.execute(q_stmt.order_by(Question.id))
+    questions = r_q.scalars().all()
+
+    updated = 0
+    for q in questions:
+        matched_kp_ids = _match_question_kp_ids(q.question_text or "", q.explanation, chapter_kp_matchers, limit=3)
+        knowledge_point_ids = ",".join(str(x) for x in matched_kp_ids) if matched_kp_ids else None
+        current_val = (q.knowledge_point_ids or "").strip() if q.knowledge_point_ids else ""
+        next_val = knowledge_point_ids or ""
+        if current_val == next_val:
+            continue
+        q.knowledge_point_ids = knowledge_point_ids
+        updated += 1
+    return updated
+
+
 def _build_generate_questions_prompt(
     chapter_title: str,
     context: str,
@@ -752,6 +789,40 @@ def _build_generate_knowledge_points_prompt(
 """
 
 
+def _build_generate_knowledge_points_auto_prompt(
+    chapter_title: str,
+    syllabus_ref: str | None,
+    context: str,
+    max_count: int = 10,
+) -> str:
+    return f"""你是一名课程教研助理。请根据给定章节内容，提炼适合课堂教学的知识点。
+
+章节标题：{chapter_title}
+教学大纲引用：{(syllabus_ref or "无").strip()}
+
+要求：
+1) 由你自行判断本章合适的知识点数量，建议 4~{max_count} 条，不得超过 {max_count} 条。
+2) 尽量覆盖概念、原理、应用场景，避免重复与空泛。
+3) title 控制在 8~24 字，content 用 1~2 句话解释，便于教师讲解。
+4) ppt_slide_ref 可为空字符串。
+5) 仅输出 JSON，不要输出 markdown 或解释。
+
+输出格式（严格）：
+{{
+  "knowledge_points": [
+    {{
+      "title": "知识点标题",
+      "content": "知识点解释",
+      "ppt_slide_ref": ""
+    }}
+  ]
+}}
+
+章节材料：
+{context}
+"""
+
+
 async def _generate_knowledge_points_for_chapter(
     db: AsyncSession,
     chapter: Chapter,
@@ -821,6 +892,190 @@ async def _generate_knowledge_points_for_chapter(
     if not out:
         raise RuntimeError("未生成有效知识点，请重试")
     return out
+
+
+async def _generate_knowledge_points_for_chapter_auto(
+    db: AsyncSession,
+    chapter: Chapter,
+    max_count: int = 10,
+) -> list[TeacherKnowledgePointIn]:
+    r_docs = await db.execute(
+        select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
+        .where(KnowledgeDocument.chapter_id == chapter.id)
+        .order_by(KnowledgeDocument.id.desc())
+        .limit(30)
+    )
+    doc_rows = r_docs.all()
+    context_parts: list[str] = []
+    for title, content, page_ref in doc_rows:
+        c = (content or "").strip()
+        if not c:
+            continue
+        header = f"文档：{(title or '').strip()}".strip()
+        if page_ref:
+            header += f"（{page_ref}）"
+        context_parts.append(f"{header}\n{c}")
+    if not context_parts:
+        context_parts.append(f"章节标题：{chapter.title}\n教学大纲：{chapter.syllabus_ref or '无'}")
+    context = "\n\n---\n\n".join(context_parts).strip()
+    if len(context) > 18000:
+        context = context[:18000]
+
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    prompt = _build_generate_knowledge_points_auto_prompt(
+        chapter_title=chapter.title,
+        syllabus_ref=chapter.syllabus_ref,
+        context=context,
+        max_count=max_count,
+    )
+    raw = llm.generate(
+        prompt,
+        max_tokens=max(1000, int(settings.llm_max_tokens or 512)),
+        temperature=0.2,
+    )
+    items = _extract_knowledge_points_payload(raw)
+    if not items:
+        raise RuntimeError("模型返回结果无法解析，请重试")
+
+    out: list[TeacherKnowledgePointIn] = []
+    seen: set[str] = set()
+    for item in items:
+        title = str(item.get("title") or "").strip()
+        if not title:
+            continue
+        key = _normalize_text_key(title)
+        if not key or key in seen:
+            continue
+        seen.add(key)
+        out.append(
+            TeacherKnowledgePointIn(
+                title=title[:128],
+                content=(str(item.get("content") or "").strip() or None),
+                ppt_slide_ref=(str(item.get("ppt_slide_ref") or "").strip() or None),
+            )
+        )
+        if len(out) >= max_count:
+            break
+    if not out:
+        raise RuntimeError("未生成有效知识点，请重试")
+    return out
+
+
+async def _auto_generate_and_save_kps_for_chapter(
+    db: AsyncSession,
+    chapter: Chapter,
+    max_count: int = 10,
+) -> list[tuple[int, str, str | None]]:
+    generated = await _generate_knowledge_points_for_chapter_auto(db, chapter, max_count=max_count)
+    await db.execute(delete(KnowledgePoint).where(KnowledgePoint.chapter_id == chapter.id))
+    for idx, kp in enumerate(generated):
+        db.add(
+            KnowledgePoint(
+                chapter_id=chapter.id,
+                title=kp.title,
+                content=kp.content,
+                ppt_slide_ref=kp.ppt_slide_ref,
+                order_index=idx + 1,
+            )
+        )
+    await db.flush()
+    r_kps = await db.execute(
+        select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.content)
+        .where(KnowledgePoint.chapter_id == chapter.id)
+        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+    )
+    return [(int(row[0]), str(row[1] or ""), row[2]) for row in r_kps.all() if row[0] and row[1]]
+
+
+def _trim_text_for_answer(value: str | None, limit: int = 32) -> str:
+    txt = re.sub(r"\s+", " ", (value or "").strip())
+    if not txt:
+        return ""
+    return txt[:limit] if len(txt) > limit else txt
+
+
+def _question_has_any_kp_id(question: Question, kp_ids: set[int]) -> bool:
+    if not kp_ids:
+        return False
+    q_kp_ids = set(_parse_numeric_id_csv(question.knowledge_point_ids))
+    return bool(q_kp_ids.intersection(kp_ids))
+
+
+async def _cleanup_orphan_knowledge_points_for_chapter(db: AsyncSession, chapter_id: int) -> int:
+    r_kp = await db.execute(select(KnowledgePoint.id).where(KnowledgePoint.chapter_id == chapter_id))
+    kp_ids = [int(row[0]) for row in r_kp.all() if row[0] is not None]
+    if not kp_ids:
+        return 0
+
+    r_q = await db.execute(select(Question.knowledge_point_ids).where(Question.chapter_id == chapter_id, Question.is_active == True))
+    referenced: set[int] = set()
+    for row in r_q.all():
+        referenced.update(_parse_numeric_id_csv(row[0]))
+
+    orphan_ids = [kid for kid in kp_ids if kid not in referenced]
+    if not orphan_ids:
+        return 0
+    await db.execute(delete(KnowledgePoint).where(KnowledgePoint.id.in_(orphan_ids)))
+    return len(orphan_ids)
+
+
+async def _ensure_each_kp_has_question(
+    db: AsyncSession,
+    chapter: Chapter,
+    course: Course,
+    kp_rows: list[tuple[int, str, str | None]],
+    existing_keys: set[str],
+    created_by_type: dict[str, int],
+    created_by_diff: dict[str, int],
+) -> int:
+    if not kp_rows:
+        return 0
+
+    r_q = await db.execute(
+        select(Question.id, Question.knowledge_point_ids)
+        .where(Question.chapter_id == chapter.id, Question.is_active == True)
+    )
+    covered_ids: set[int] = set()
+    for _, kp_csv in r_q.all():
+        covered_ids.update(_parse_numeric_id_csv(kp_csv))
+
+    added = 0
+    for kp_id, kp_title, kp_content in kp_rows:
+        if int(kp_id) in covered_ids:
+            continue
+        base_q = f"【知识点专项】请简要说明“{kp_title}”的核心概念与应用。"
+        q_text = base_q
+        suffix = 2
+        while _normalize_text_key(q_text) in existing_keys:
+            q_text = f"{base_q}（补充题{suffix}）"
+            suffix += 1
+        answer = _trim_text_for_answer(kp_content, 32) or _trim_text_for_answer(kp_title, 32) or "见课堂讲解"
+        explanation = f"本题用于覆盖知识点：{kp_title}。"
+        db.add(
+            Question(
+                course_id=course.id,
+                chapter_id=chapter.id,
+                difficulty="basic",
+                question_type="qa",
+                question_text=q_text,
+                options=None,
+                correct_answer=answer,
+                explanation=explanation,
+                knowledge_point_ids=str(int(kp_id)),
+                is_active=True,
+                is_approved=True,
+            )
+        )
+        existing_keys.add(_normalize_text_key(q_text))
+        covered_ids.add(int(kp_id))
+        created_by_type["qa"] = int(created_by_type.get("qa", 0)) + 1
+        created_by_diff["basic"] = int(created_by_diff.get("basic", 0)) + 1
+        added += 1
+    return added
 
 
 def _pdf_extract_text(content: bytes) -> tuple[str, int]:
@@ -1611,6 +1866,12 @@ async def save_teacher_chapter_knowledge_points(
     user: User = Depends(require_teacher),
 ):
     chapter, _ = await _require_owned_chapter(db, user.id, chapter_id)
+    r_old_kp = await db.execute(
+        select(KnowledgePoint.id, KnowledgePoint.title)
+        .where(KnowledgePoint.chapter_id == chapter.id)
+        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+    )
+    old_kps = [(int(row[0]), str(row[1] or "").strip()) for row in r_old_kp.all() if row[0]]
     cleaned: list[TeacherKnowledgePointIn] = []
     for idx, kp in enumerate(body.knowledge_points):
         title = (kp.title or "").strip()
@@ -1624,6 +1885,18 @@ async def save_teacher_chapter_knowledge_points(
                 order_index=kp.order_index if kp.order_index is not None else (idx + 1),
             )
         )
+    new_title_keys = {_normalize_text_key(item.title) for item in cleaned if (item.title or "").strip()}
+    removed_kp_ids = [
+        kid for kid, title in old_kps
+        if title and _normalize_text_key(title) not in new_title_keys
+    ]
+    if removed_kp_ids:
+        r_q = await db.execute(select(Question).where(Question.chapter_id == chapter.id))
+        questions = r_q.scalars().all()
+        removed_set = set(int(x) for x in removed_kp_ids)
+        for q in questions:
+            if _question_has_any_kp_id(q, removed_set):
+                await db.delete(q)
     await db.execute(delete(KnowledgePoint).where(KnowledgePoint.chapter_id == chapter.id))
     for idx, kp in enumerate(cleaned):
         db.add(
@@ -1635,6 +1908,9 @@ async def save_teacher_chapter_knowledge_points(
                 order_index=kp.order_index if kp.order_index is not None else (idx + 1),
             )
         )
+    await db.flush()
+    await _backfill_question_kp_ids_for_chapter(db, chapter.id, overwrite=True)
+    await _cleanup_orphan_knowledge_points_for_chapter(db, chapter.id)
     await db.commit()
     r = await db.execute(
         select(KnowledgePoint)
@@ -1694,13 +1970,8 @@ async def _generate_questions_for_chapter(
         .limit(30)
     )
     doc_rows = r_docs.all()
-    r_kps = await db.execute(
-        select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.content)
-        .where(KnowledgePoint.chapter_id == chapter.id)
-        .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
-        .limit(100)
-    )
-    kp_rows = r_kps.all()
+    # 生成习题时自动生成知识点（数量由模型决定，最多 10 条），确保题目可稳定关联知识点。
+    kp_rows = await _auto_generate_and_save_kps_for_chapter(db, chapter, max_count=10)
     chapter_kp_matchers = _build_chapter_kp_matchers(kp_rows)
     context_parts: list[str] = []
     for title, content, page_ref in doc_rows:
@@ -1852,6 +2123,17 @@ async def _generate_questions_for_chapter(
             _try_add_item(item, enforce_diff_limit=False)
             if sum(created_by_type.values()) >= total_expected:
                 break
+    await db.flush()
+    # 强制覆盖：每个知识点至少保留 1 道题；缺失时自动补充知识点专项题。
+    await _ensure_each_kp_has_question(
+        db=db,
+        chapter=chapter,
+        course=course,
+        kp_rows=kp_rows,
+        existing_keys=existing_keys,
+        created_by_type=created_by_type,
+        created_by_diff=created_by_diff,
+    )
     await db.commit()
     return created_by_type, skipped
 
@@ -2049,9 +2331,21 @@ def _run_document_process_task_thread(task_id: int):
         logger.exception("doc_task_thread_crash task_id=%s", task_id)
 
 
+def _parse_numeric_id_csv(value: str | None) -> list[int]:
+    if not value:
+        return []
+    out: list[int] = []
+    for part in str(value).split(","):
+        p = part.strip()
+        if p.isdigit():
+            out.append(int(p))
+    return out
+
+
 @router.get("/chapters/{chapter_id}/questions", response_model=list[TeacherQuestionOut])
 async def list_teacher_chapter_questions(
     chapter_id: int,
+    knowledge_point_id: int | None = Query(None),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
@@ -2064,6 +2358,24 @@ async def list_teacher_chapter_questions(
         .order_by(Question.id.desc())
     )
     rows = r.all()
+    if knowledge_point_id is not None:
+        rows = [
+            row
+            for row in rows
+            if knowledge_point_id in _parse_numeric_id_csv(row[0].knowledge_point_ids)
+        ]
+
+    kp_ids: set[int] = set()
+    q_kp_map: dict[int, list[int]] = {}
+    for q, _, _ in rows:
+        ids = _parse_numeric_id_csv(q.knowledge_point_ids)
+        q_kp_map[int(q.id)] = ids
+        kp_ids.update(ids)
+    kp_title_map: dict[int, str] = {}
+    if kp_ids:
+        r_kp = await db.execute(select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_ids)))
+        kp_title_map = {int(row[0]): str(row[1]) for row in r_kp.all() if row[0] and row[1]}
+
     return [
         TeacherQuestionOut(
             id=q.id,
@@ -2077,6 +2389,8 @@ async def list_teacher_chapter_questions(
             options=q.options,
             correct_answer=q.correct_answer,
             explanation=q.explanation,
+            knowledge_point_ids=q.knowledge_point_ids,
+            knowledge_points=[kp_title_map[kid] for kid in q_kp_map.get(int(q.id), []) if kid in kp_title_map],
             created_at=q.created_at.isoformat() if q.created_at else None,
         )
         for q, ch, c in rows
@@ -2134,6 +2448,8 @@ async def update_teacher_question(
         options=q.options,
         correct_answer=q.correct_answer,
         explanation=q.explanation,
+        knowledge_point_ids=q.knowledge_point_ids,
+        knowledge_points=[],
         created_at=q.created_at.isoformat() if q.created_at else None,
     )
 
@@ -2154,7 +2470,10 @@ async def delete_teacher_question(
     if not row:
         raise HTTPException(status_code=404, detail="题目不存在或无权限")
     q = row[0]
+    chapter_id = int(q.chapter_id)
     await db.delete(q)
+    await db.flush()
+    await _cleanup_orphan_knowledge_points_for_chapter(db, chapter_id)
     await db.commit()
     return {"ok": True}
 

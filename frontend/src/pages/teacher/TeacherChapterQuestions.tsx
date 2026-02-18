@@ -14,6 +14,8 @@ type TeacherQuestionItem = {
   options: string | null;
   correct_answer: string;
   explanation: string | null;
+  knowledge_point_ids: string | null;
+  knowledge_points: string[];
   created_at: string | null;
 };
 
@@ -48,6 +50,8 @@ export default function TeacherChapterQuestions() {
   const [list, setList] = useState<TeacherQuestionItem[]>([]);
   const [filterDifficulty, setFilterDifficulty] = useState("");
   const [filterType, setFilterType] = useState("");
+  const [filterKnowledgePointId, setFilterKnowledgePointId] = useState<number | "">("");
+  const [knowledgePoints, setKnowledgePoints] = useState<{ id: number; title: string }[]>([]);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [batchDeleting, setBatchDeleting] = useState(false);
   const [editing, setEditing] = useState<TeacherQuestionItem | null>(null);
@@ -80,7 +84,9 @@ export default function TeacherChapterQuestions() {
     if (!chapterId) return;
     setLoading(true);
     api.teacher.courses
-      .chapterQuestions(chapterId)
+      .chapterQuestions(chapterId, {
+        knowledgePointId: filterKnowledgePointId === "" ? undefined : filterKnowledgePointId,
+      })
       .then((rows) => {
         setList(rows);
         setSelectedIds([]);
@@ -90,8 +96,16 @@ export default function TeacherChapterQuestions() {
   };
 
   useEffect(() => {
-    load();
+    if (!chapterId) return;
+    api.teacher.courses
+      .chapterKnowledgePoints(chapterId)
+      .then((rows) => setKnowledgePoints(rows.map((kp) => ({ id: kp.id, title: kp.title }))))
+      .catch(() => setKnowledgePoints([]));
   }, [chapterId]);
+
+  useEffect(() => {
+    load();
+  }, [chapterId, filterKnowledgePointId]);
 
   const openEdit = (q: TeacherQuestionItem) => {
     setEditing(q);
@@ -226,6 +240,18 @@ export default function TeacherChapterQuestions() {
             <option value="qa">问答题</option>
             <option value="blank">填空题</option>
           </select>
+          <select
+            value={filterKnowledgePointId === "" ? "" : String(filterKnowledgePointId)}
+            onChange={(e) => setFilterKnowledgePointId(e.target.value ? Number(e.target.value) : "")}
+            style={{ minWidth: 200 }}
+          >
+            <option value="">全部知识点</option>
+            {knowledgePoints.map((kp) => (
+              <option key={kp.id} value={kp.id}>
+                {kp.title}
+              </option>
+            ))}
+          </select>
           <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
             <input type="checkbox" checked={allFilteredSelected} onChange={(e) => toggleSelectAllFiltered(e.target.checked)} />
             全选当前筛选结果
@@ -249,6 +275,11 @@ export default function TeacherChapterQuestions() {
                     #{idx + 1} · {questionTypeLabel[q.question_type] || q.question_type} · {q.difficulty}
                   </div>
                   <div style={{ marginBottom: 10, lineHeight: 1.7 }}>{q.question_text}</div>
+                  {q.knowledge_points.length > 0 && (
+                    <div style={{ marginBottom: 8, color: "var(--text-muted)", fontSize: 13 }}>
+                      知识点：{q.knowledge_points.join(" / ")}
+                    </div>
+                  )}
                   {q.options && <pre style={{ margin: "0 0 8px 0", whiteSpace: "pre-wrap", fontSize: 13 }}>{q.options}</pre>}
                   <div style={{ marginBottom: 6 }}>
                     <strong>答案：</strong>

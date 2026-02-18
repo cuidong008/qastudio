@@ -42,8 +42,6 @@ export default function TeacherCourses() {
   const [editingChapterId, setEditingChapterId] = useState<number | null>(null);
   const [chapterEditForm, setChapterEditForm] = useState({ title: "", order_index: 0, syllabus_ref: "" });
   const [chapterKnowledgePoints, setChapterKnowledgePoints] = useState<KnowledgePointDraft[]>([]);
-  const [kpGenerateCount, setKpGenerateCount] = useState(5);
-  const [kpGenerating, setKpGenerating] = useState(false);
   const [chapterSaving, setChapterSaving] = useState(false);
   const [reindexingId, setReindexingId] = useState<number | null>(null);
   const [clearingId, setClearingId] = useState<number | null>(null);
@@ -170,7 +168,6 @@ export default function TeacherCourses() {
       syllabus_ref: ch.syllabus_ref || "",
     });
     setChapterEditModal(true);
-    setKpGenerateCount(5);
     setChapterKnowledgePoints([]);
     api.teacher.courses
       .chapterKnowledgePoints(ch.id)
@@ -219,31 +216,8 @@ export default function TeacherCourses() {
       .finally(() => setChapterSaving(false));
   };
 
-  const generateKnowledgePoints = () => {
-    if (editingChapterId == null || kpGenerating) return;
-    setKpGenerating(true);
-    api.teacher.courses
-      .generateChapterKnowledgePoints(editingChapterId, Math.max(1, Math.min(20, kpGenerateCount || 5)))
-      .then((rows) =>
-        setChapterKnowledgePoints(
-          rows.map((kp, idx) => ({
-            title: (kp.title || "").trim(),
-            content: (kp.content || "").trim(),
-            ppt_slide_ref: (kp.ppt_slide_ref || "").trim(),
-            order_index: idx + 1,
-          }))
-        )
-      )
-      .catch((e) => alert(e?.message || "生成知识点失败"))
-      .finally(() => setKpGenerating(false));
-  };
-
   const updateKnowledgePoint = (idx: number, patch: Partial<KnowledgePointDraft>) => {
     setChapterKnowledgePoints((prev) => prev.map((item, i) => (i === idx ? { ...item, ...patch } : item)));
-  };
-
-  const addKnowledgePoint = () => {
-    setChapterKnowledgePoints((prev) => [...prev, { title: "", content: "", ppt_slide_ref: "", order_index: prev.length + 1 }]);
   };
 
   const removeKnowledgePoint = (idx: number) => {
@@ -480,7 +454,7 @@ export default function TeacherCourses() {
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 100 }}
           onClick={() => !saving && setModal(null)}
         >
-          <div className="card" style={{ minWidth: 360 }} onClick={(e) => e.stopPropagation()}>
+          <div className="card" style={{ minWidth: 720, width: "min(960px, 94vw)" }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginBottom: 16 }}>{modal === "create" ? "新建课程" : "编辑课程"}</h3>
             {error && <p style={{ color: "var(--danger, #c00)", marginBottom: 12, fontSize: 14 }}>{error}</p>}
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
@@ -550,56 +524,31 @@ export default function TeacherCourses() {
               </label>
               <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
                 <div style={{ fontWeight: 600, marginBottom: 8 }}>知识点</div>
-                <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10, flexWrap: "wrap" }}>
-                  <span style={{ fontSize: 13, color: "var(--text-muted)" }}>数量</span>
-                  <input
-                    type="number"
-                    min={1}
-                    max={20}
-                    value={kpGenerateCount}
-                    onChange={(e) => setKpGenerateCount(Math.max(1, Math.min(20, parseInt(e.target.value, 10) || 1)))}
-                    style={{ width: 80 }}
-                  />
-                  <button type="button" className="btn-secondary" onClick={generateKnowledgePoints} disabled={kpGenerating || chapterSaving}>
-                    {kpGenerating ? "生成中…" : "生成知识点"}
-                  </button>
-                  <button type="button" className="btn-ghost" onClick={addKnowledgePoint} disabled={chapterSaving}>
-                    新增一条
-                  </button>
-                </div>
                 <div style={{ maxHeight: 320, overflowY: "auto", paddingRight: 4 }}>
                   {chapterKnowledgePoints.map((kp, idx) => (
                     <div key={idx} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8 }}>
-                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
-                        <strong style={{ fontSize: 13 }}>知识点 {idx + 1}</strong>
-                        <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)", fontSize: 12 }} onClick={() => removeKnowledgePoint(idx)} disabled={chapterSaving}>
-                          删除
+                      <div style={{ marginBottom: 8, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
+                        <div style={{ fontSize: 13, fontWeight: 600 }}>知识点 {idx + 1}：{kp.title}</div>
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ color: "var(--danger, #c00)", fontSize: 12 }}
+                          onClick={() => removeKnowledgePoint(idx)}
+                          disabled={chapterSaving}
+                        >
+                          删除知识点
                         </button>
                       </div>
-                      <input
-                        type="text"
-                        placeholder="知识点标题"
-                        value={kp.title}
-                        onChange={(e) => updateKnowledgePoint(idx, { title: e.target.value })}
-                        style={{ width: "100%", marginBottom: 6 }}
-                      />
                       <textarea
-                        placeholder="知识点说明（可选）"
+                        placeholder="知识点解释（可选）"
                         rows={2}
                         value={kp.content}
                         onChange={(e) => updateKnowledgePoint(idx, { content: e.target.value })}
-                        style={{ width: "100%", marginBottom: 6 }}
-                      />
-                      <input
-                        type="text"
-                        placeholder="PPT 页码引用（可选）"
-                        value={kp.ppt_slide_ref}
-                        onChange={(e) => updateKnowledgePoint(idx, { ppt_slide_ref: e.target.value })}
                         style={{ width: "100%" }}
                       />
                     </div>
                   ))}
-                  {chapterKnowledgePoints.length === 0 && <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无知识点，可点击“生成知识点”或手动新增。</p>}
+                  {chapterKnowledgePoints.length === 0 && <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无知识点。生成习题时会自动生成（每章最多 10 条）。</p>}
                 </div>
               </div>
             </div>
@@ -623,6 +572,9 @@ export default function TeacherCourses() {
           <div className="card" style={{ minWidth: 420, width: "min(560px, 92vw)" }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginBottom: 8 }}>生成习题</h3>
             <p style={{ marginTop: 0, marginBottom: 14, color: "var(--text-muted)", fontSize: 14 }}>{questionGenModalChapter.title}</p>
+            <p style={{ marginTop: 0, marginBottom: 14, color: "var(--text-muted)", fontSize: 13 }}>
+              开始生成后会先自动生成该章节知识点（由模型决定数量，每章最多 10 条），再按知识点生成习题。
+            </p>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <label>
                 <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>单选题最大数量</span>

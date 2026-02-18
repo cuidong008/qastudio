@@ -330,8 +330,11 @@ export const api = {
           created_at: string | null;
           updated_at: string | null;
         }>(`/teacher/questions/tasks/${taskId}`),
-      chapterQuestions: (chapterId: number) =>
-        request<{
+      chapterQuestions: (chapterId: number, params?: { knowledgePointId?: number }) => {
+        const qs = new URLSearchParams();
+        if (params?.knowledgePointId != null) qs.set("knowledge_point_id", String(params.knowledgePointId));
+        const q = qs.toString() ? `?${qs.toString()}` : "";
+        return request<{
           id: number;
           course_id: number | null;
           course_name: string | null;
@@ -343,8 +346,11 @@ export const api = {
           options: string | null;
           correct_answer: string;
           explanation: string | null;
+          knowledge_point_ids: string | null;
+          knowledge_points: string[];
           created_at: string | null;
-        }[]>(`/teacher/chapters/${chapterId}/questions`),
+        }[]>(`/teacher/chapters/${chapterId}/questions${q}`);
+      },
       updateQuestion: (
         questionId: number,
         body: { difficulty?: string; question_text?: string; options?: string[] | null; correct_answer?: string; explanation?: string | null }
@@ -361,6 +367,8 @@ export const api = {
           options: string | null;
           correct_answer: string;
           explanation: string | null;
+          knowledge_point_ids: string | null;
+          knowledge_points: string[];
           created_at: string | null;
         }>(`/teacher/questions/${questionId}`, { method: "PUT", body }),
       deleteQuestion: (questionId: number) => request<{ ok: boolean }>(`/teacher/questions/${questionId}`, { method: "DELETE" }),
