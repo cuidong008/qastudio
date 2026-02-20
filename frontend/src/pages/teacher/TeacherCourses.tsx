@@ -34,7 +34,14 @@ type CachedQuestionTask = {
   updatedAt: number;
 };
 
+type CachedReindexTask = {
+  taskId: number;
+  courseId: number;
+  updatedAt: number;
+};
+
 const QUESTION_TASK_CACHE_KEY = "teacher:question-task-cache";
+const REINDEX_TASK_CACHE_KEY = "teacher:reindex-task-cache";
 
 const readCachedQuestionTasks = (): CachedQuestionTask[] => {
   try {
@@ -75,6 +82,44 @@ const removeCachedQuestionTask = (taskId: number) => {
   writeCachedQuestionTasks(curr.filter((x) => x.taskId !== taskId));
 };
 
+const readCachedReindexTasks = (): CachedReindexTask[] => {
+  try {
+    const raw = localStorage.getItem(REINDEX_TASK_CACHE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((x) => ({
+        taskId: Number(x?.taskId || 0),
+        courseId: Number(x?.courseId || 0),
+        updatedAt: Number(x?.updatedAt || 0),
+      }))
+      .filter((x) => x.taskId > 0 && x.courseId > 0)
+      .slice(-30);
+  } catch {
+    return [];
+  }
+};
+
+const writeCachedReindexTasks = (items: CachedReindexTask[]) => {
+  try {
+    localStorage.setItem(REINDEX_TASK_CACHE_KEY, JSON.stringify(items.slice(-30)));
+  } catch {
+    // ignore cache write failure
+  }
+};
+
+const upsertCachedReindexTask = (item: CachedReindexTask) => {
+  const curr = readCachedReindexTasks();
+  const next = [...curr.filter((x) => x.taskId !== item.taskId), item];
+  writeCachedReindexTasks(next);
+};
+
+const removeCachedReindexTask = (taskId: number) => {
+  const curr = readCachedReindexTasks();
+  writeCachedReindexTasks(curr.filter((x) => x.taskId !== taskId));
+};
+
 export default function TeacherCourses() {
   const [list, setList] = useState<CourseItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -108,6 +153,7 @@ export default function TeacherCourses() {
   const pollingQuestionTaskIdsRef = useRef<Set<number>>(new Set());
   const notifiedQuestionTaskIdsRef = useRef<Set<number>>(new Set());
   const questionTaskByChapterRef = useRef<Record<number, { taskId: number; status: string }>>({});
+  const reindexTaskByCourseRef = useRef<Record<number, { taskId: number; status: string }>>({});
   const aliveRef = useRef(true);
 
   useEffect(() => {
@@ -119,6 +165,10 @@ export default function TeacherCourses() {
   useEffect(() => {
     questionTaskByChapterRef.current = questionTaskByChapter;
   }, [questionTaskByChapter]);
+
+  useEffect(() => {
+    reindexTaskByCourseRef.current = reindexTaskByCourse;
+  }, [reindexTaskByCourse]);
 
   const pollReindexTask = async (courseId: number, taskId: number) => {
     if (taskId <= 0) return;
@@ -137,6 +187,7 @@ export default function TeacherCourses() {
               notifiedReindexTaskIdsRef.current.add(taskId);
               toast(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`, "success");
             }
+            removeCachedReindexTask(taskId);
             setReindexTaskByCourse((prev) => {
               if (prev[courseId]?.taskId !== taskId) return prev;
               const next = { ...prev };
@@ -150,6 +201,7 @@ export default function TeacherCourses() {
               notifiedReindexTaskIdsRef.current.add(taskId);
               toast(task.error_message || "重建索引任务失败", "error");
             }
+            removeCachedReindexTask(taskId);
             setReindexTaskByCourse((prev) => {
               if (prev[courseId]?.taskId !== taskId) return prev;
               const next = { ...prev };
@@ -169,6 +221,104 @@ export default function TeacherCourses() {
     } finally {
       pollingReindexTaskIdsRef.current.delete(taskId);
     }
+  };
+
+  const syncActiveReindexTasks = async () => {
+    try {
+      const activeTasks = await api.teacher.courses.listActiveReindexTasks();
+      const activeByCourse: Record<number, { taskId: number; status: string }> = {};
+      activeTasks.forEach((t) => {
+        activeByCourse[t.course_id] = { taskId: t.task_id, status: t.status };
+        upsertCachedReindexTask({
+          taskId: t.task_id,
+          courseId: t.course_id,
+          updatedAt: Date.now(),
+        });
+      });
+      const disappeared = Object.entries(reindexTaskByCourseRef.current)
+        .map(([courseId, item]) => ({ courseId: Number(courseId), ...item }))
+        .filter((item) => (item.status === "pending" || item.status === "running") && !activeByCourse[item.courseId]);
+      await Promise.all(
+        disappeared.map(async (item) => {
+          try {
+            const task = await api.teacher.courses.getReindexTask(item.taskId);
+            if (task.status === "success") {
+              if (!notifiedReindexTaskIdsRef.current.has(item.taskId)) {
+                notifiedReindexTaskIdsRef.current.add(item.taskId);
+                toast(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`, "success");
+              }
+              removeCachedReindexTask(item.taskId);
+            }
+            if (task.status === "failed") {
+              if (!notifiedReindexTaskIdsRef.current.has(item.taskId)) {
+                notifiedReindexTaskIdsRef.current.add(item.taskId);
+                toast(task.error_message || "重建索引任务失败", "error");
+              }
+              removeCachedReindexTask(item.taskId);
+            }
+          } catch {
+            // ignore transient task query failures
+          }
+        })
+      );
+      setReindexTaskByCourse((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          const courseId = Number(k);
+          const item = next[courseId];
+          if ((item?.status === "pending" || item?.status === "running") && !activeByCourse[courseId]) {
+            delete next[courseId];
+          }
+        });
+        Object.keys(activeByCourse).forEach((k) => {
+          const courseId = Number(k);
+          next[courseId] = activeByCourse[courseId];
+        });
+        return next;
+      });
+      activeTasks.forEach((t) => {
+        void pollReindexTask(t.course_id, t.task_id);
+      });
+    } catch {
+      // ignore active task recovery failure
+    }
+  };
+
+  const recoverCachedReindexTasks = async () => {
+    const cached = readCachedReindexTasks();
+    if (cached.length === 0) return;
+    await Promise.all(
+      cached.map(async (item) => {
+        try {
+          const task = await api.teacher.courses.getReindexTask(item.taskId);
+          if (task.status === "pending" || task.status === "running") {
+            setReindexTaskByCourse((prev) => ({
+              ...prev,
+              [task.course_id]: { taskId: task.id, status: task.status },
+            }));
+            void pollReindexTask(task.course_id, task.id);
+            return;
+          }
+          if (task.status === "success") {
+            if (!notifiedReindexTaskIdsRef.current.has(task.id)) {
+              notifiedReindexTaskIdsRef.current.add(task.id);
+              toast(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`, "success");
+            }
+            removeCachedReindexTask(task.id);
+            return;
+          }
+          if (task.status === "failed") {
+            if (!notifiedReindexTaskIdsRef.current.has(task.id)) {
+              notifiedReindexTaskIdsRef.current.add(task.id);
+              toast(task.error_message || "重建索引任务失败", "error");
+            }
+            removeCachedReindexTask(task.id);
+          }
+        } catch {
+          // ignore and wait next sync
+        }
+      })
+    );
   };
 
   const syncActiveQuestionTasks = async () => {
@@ -284,19 +434,8 @@ export default function TeacherCourses() {
       .list()
       .then(async (rows) => {
         setList(rows);
-        try {
-          const activeTasks = await api.teacher.courses.listActiveReindexTasks();
-          const next: Record<number, { taskId: number; status: string }> = {};
-          activeTasks.forEach((t) => {
-            next[t.course_id] = { taskId: t.task_id, status: t.status };
-          });
-          setReindexTaskByCourse(next);
-          activeTasks.forEach((t) => {
-            void pollReindexTask(t.course_id, t.task_id);
-          });
-        } catch {
-          // ignore active task recovery failure
-        }
+        await recoverCachedReindexTasks();
+        await syncActiveReindexTasks();
         await recoverCachedQuestionTasks();
         await syncActiveQuestionTasks();
       })
@@ -309,6 +448,7 @@ export default function TeacherCourses() {
 
   useEffect(() => {
     const timer = window.setInterval(() => {
+      void syncActiveReindexTasks();
       void syncActiveQuestionTasks();
     }, 5000);
     return () => window.clearInterval(timer);
@@ -482,6 +622,11 @@ export default function TeacherCourses() {
       .reindex(courseId)
       .then((r) => {
         setReindexTaskByCourse((prev) => ({ ...prev, [courseId]: { taskId: r.task_id, status: r.status } }));
+        upsertCachedReindexTask({
+          taskId: r.task_id,
+          courseId,
+          updatedAt: Date.now(),
+        });
         toast("重建索引任务已提交，系统将在后台处理。");
         void pollReindexTask(courseId, r.task_id);
       })
