@@ -20,6 +20,7 @@ DEFAULT_LLM_KEY = "default_llm"
 DEFAULT_EMBEDDING_KEY = "default_embedding"
 DEFAULT_RERANK_KEY = "default_rerank"
 DEFAULT_PDF_PARSER_KEY = "default_pdf_parser"
+DEFAULT_TTS_KEY = "default_tts"
 
 MASKED_PLACEHOLDER = "***"
 
@@ -128,6 +129,10 @@ def get_default_pdf_parser() -> str:
     return (_cache.get(DEFAULT_PDF_PARSER_KEY) or "").strip()
 
 
+def get_default_tts() -> str:
+    return (_cache.get(DEFAULT_TTS_KEY) or "").strip()
+
+
 async def save_providers_and_defaults(
     session,
     providers: list[dict],
@@ -135,6 +140,7 @@ async def save_providers_and_defaults(
     default_embedding: str = "",
     default_rerank: str = "",
     default_pdf_parser: str = "",
+    default_tts: str = "",
 ) -> None:
     """
     保存提供商列表与默认模型选择。
@@ -165,6 +171,7 @@ async def save_providers_and_defaults(
     _cache[DEFAULT_EMBEDDING_KEY] = (default_embedding or "").strip()
     _cache[DEFAULT_RERANK_KEY] = (default_rerank or "").strip()
     _cache[DEFAULT_PDF_PARSER_KEY] = (default_pdf_parser or "").strip()
+    _cache[DEFAULT_TTS_KEY] = (default_tts or "").strip()
 
     for key, val in (
         (RAG_PROVIDERS_KEY, _cache[RAG_PROVIDERS_KEY]),
@@ -172,6 +179,7 @@ async def save_providers_and_defaults(
         (DEFAULT_EMBEDDING_KEY, _cache[DEFAULT_EMBEDDING_KEY]),
         (DEFAULT_RERANK_KEY, _cache[DEFAULT_RERANK_KEY]),
         (DEFAULT_PDF_PARSER_KEY, _cache[DEFAULT_PDF_PARSER_KEY]),
+        (DEFAULT_TTS_KEY, _cache[DEFAULT_TTS_KEY]),
     ):
         stmt = sqlite_insert(RagConfig).values(key=key, value=val)
         stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": val})

@@ -12,6 +12,7 @@ import TeacherCourses from "./pages/teacher/TeacherCourses";
 import TeacherChapterMaterials from "./pages/teacher/TeacherChapterMaterials";
 import TeacherClasses from "./pages/teacher/TeacherClasses";
 import TeacherChapterQuestions from "./pages/teacher/TeacherChapterQuestions";
+import TeacherPipeline from "./pages/teacher/TeacherPipeline";
 import AdminLayout from "./components/AdminLayout";
 import AdminHome from "./pages/admin/AdminHome";
 import AdminUsers from "./pages/admin/AdminUsers";
@@ -54,6 +55,7 @@ function App() {
         <Route path="/teacher/chapter-materials" element={<TeacherLayout requireAuth fluid><TeacherChapterMaterials /></TeacherLayout>} />
         <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
         <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
+        <Route path="/teacher/pipeline" element={<TeacherLayout requireAuth fluid><TeacherPipeline /></TeacherLayout>} />
         <Route path="/admin" element={<AdminLayout />}>
           <Route index element={<AdminHome />} />
           <Route path="users" element={<AdminUsers />} />

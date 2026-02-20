@@ -51,6 +51,9 @@ export default function TeacherLayout({
           <Link to="/teacher/classes" className="nav-link">
             我的班级
           </Link>
+          <Link to="/teacher/pipeline" className="nav-link">
+            课件流水线
+          </Link>
         </nav>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>

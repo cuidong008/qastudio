@@ -220,6 +220,19 @@ RAG_RERANK_MODELS_BY_TYPE = {
     "qianwen": ["gte-rerank", "gte-rerank-hybrid", "bge-reranker-v2-m3"],
     "zhipu": ["rerank-2", "bge-reranker-v2-m3"],
 }
+RAG_TTS_MODELS_BY_TYPE = {
+    "openai_compatible": ["gpt-4o-mini-tts", "gpt-4o-realtime-preview", "gpt-4o-mini", "gpt-4o", "custom"],
+    "qianwen": [
+        "qwen3-tts-instruct-flash",
+        "qwen3-tts-vd-2026-01-26",
+        "qwen3-tts-vc-2026-01-22",
+        "qwen3-tts-flash",
+        "qwen-tts",
+        "qwen-tts-latest",
+        "custom",
+    ],
+    "zhipu": ["glm-4-flash", "glm-4", "custom"],
+}
 
 
 class RAGProviderOut(BaseModel):
@@ -236,11 +249,13 @@ class RAGProvidersGetOut(BaseModel):
     default_embedding: str
     default_rerank: str
     default_pdf_parser: str
+    default_tts: str
     provider_types: list[dict]
     llm_models_by_type: dict
     embedding_models_by_type: dict
     pdf_parser_models_by_type: dict
     rerank_models_by_type: dict
+    tts_models_by_type: dict
 
 
 class RAGProviderIn(BaseModel):
@@ -257,6 +272,7 @@ class RAGProvidersPutIn(BaseModel):
     default_embedding: str = ""
     default_rerank: str = ""
     default_pdf_parser: str = ""
+    default_tts: str = ""
 
 
 @router.get("/rag/providers", response_model=RAGProvidersGetOut)
@@ -268,6 +284,7 @@ async def get_rag_providers(user: User = Depends(require_admin)):
         get_default_embedding,
         get_default_rerank,
         get_default_pdf_parser,
+        get_default_tts,
     )
     providers = get_providers_list()
     return RAGProvidersGetOut(
@@ -276,11 +293,13 @@ async def get_rag_providers(user: User = Depends(require_admin)):
         default_embedding=get_default_embedding(),
         default_rerank=get_default_rerank(),
         default_pdf_parser=get_default_pdf_parser(),
+        default_tts=get_default_tts(),
         provider_types=RAG_PROVIDER_TYPES,
         llm_models_by_type=RAG_LLM_MODELS_BY_TYPE,
         embedding_models_by_type=RAG_EMBEDDING_MODELS_BY_TYPE,
         pdf_parser_models_by_type=RAG_PDF_PARSER_MODELS_BY_TYPE,
         rerank_models_by_type=RAG_RERANK_MODELS_BY_TYPE,
+        tts_models_by_type=RAG_TTS_MODELS_BY_TYPE,
     )
 
 
@@ -290,13 +309,14 @@ async def put_rag_providers(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    """保存模型提供商与默认 LLM/Embedding/Rerank/PDF 解析器 选择"""
+    """保存模型提供商与默认 LLM/Embedding/Rerank/PDF 解析器/TTS 选择"""
     from ..rag.config_store import save_providers_and_defaults
     providers = [{"id": p.id, "type": p.type, "name": p.name, "base_url": p.base_url or "", "api_key": p.api_key or ""} for p in body.providers]
     await save_providers_and_defaults(
         db, providers,
         body.default_llm, body.default_embedding,
         body.default_rerank, body.default_pdf_parser,
+        body.default_tts,
     )
     from ..rag.config_store import (
         get_providers_list,
@@ -304,6 +324,7 @@ async def put_rag_providers(
         get_default_embedding,
         get_default_rerank,
         get_default_pdf_parser,
+        get_default_tts,
     )
     providers_out = get_providers_list()
     return RAGProvidersGetOut(
@@ -312,11 +333,13 @@ async def put_rag_providers(
         default_embedding=get_default_embedding(),
         default_rerank=get_default_rerank(),
         default_pdf_parser=get_default_pdf_parser(),
+        default_tts=get_default_tts(),
         provider_types=RAG_PROVIDER_TYPES,
         llm_models_by_type=RAG_LLM_MODELS_BY_TYPE,
         embedding_models_by_type=RAG_EMBEDDING_MODELS_BY_TYPE,
         pdf_parser_models_by_type=RAG_PDF_PARSER_MODELS_BY_TYPE,
         rerank_models_by_type=RAG_RERANK_MODELS_BY_TYPE,
+        tts_models_by_type=RAG_TTS_MODELS_BY_TYPE,
     )
 
 

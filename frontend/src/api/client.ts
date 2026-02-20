@@ -16,11 +16,13 @@ export type RagProvidersResponse = {
   default_embedding: string;
   default_rerank: string;
   default_pdf_parser: string;
+  default_tts: string;
   provider_types: { id: string; name: string; need_base_url: boolean }[];
   llm_models_by_type: Record<string, string[]>;
   embedding_models_by_type: Record<string, string[]>;
   pdf_parser_models_by_type: Record<string, string[]>;
   rerank_models_by_type: Record<string, string[]>;
+  tts_models_by_type: Record<string, string[]>;
 };
 
 /** PUT /admin/rag/providers 请求体 */
@@ -30,6 +32,7 @@ export type RagProvidersUpdateBody = {
   default_embedding: string;
   default_rerank: string;
   default_pdf_parser: string;
+  default_tts: string;
 };
 
 /** 后管台 RAG 配置（API Key 等敏感项可能为 ***） */
@@ -486,6 +489,188 @@ export const api = {
       },
     },
     export: (report: string) => `${API_BASE}/teacher/export/csv?report=${report}`,
+    pipeline: {
+      listPdfDocs: () => {
+        return request<
+          {
+            id: number;
+            chapter_id: number | null;
+            chapter_title: string | null;
+            course_id: number | null;
+            course_name: string | null;
+            title: string;
+            file_name: string | null;
+            parse_status: string | null;
+            created_at: string | null;
+            workflow_id: string;
+          }[]
+        >(`/teacher/pipeline/pdf-docs`);
+      },
+      uploadPdfDoc: (file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return requestForm<{
+          id: number;
+          chapter_id: number | null;
+          chapter_title: string | null;
+          course_id: number | null;
+          course_name: string | null;
+          title: string;
+          file_name: string | null;
+          file_size?: number | null;
+          parse_status: string | null;
+          created_at: string | null;
+          workflow_id: string;
+        }>(`/teacher/pipeline/pdf-docs/upload`, form, { method: "POST" });
+      },
+      ttsModels: () =>
+        request<{
+          default_model: string;
+          options: {
+            value: string;
+            label: string;
+            provider_id: string;
+            provider_name: string;
+            provider_type: string;
+            model: string;
+          }[];
+          voices_by_provider_type: Record<string, { value: string; label: string }[]>;
+          voices_by_model: Record<string, { value: string; label: string }[]>;
+        }>(`/teacher/pipeline/tts-models`),
+      getOrCreatePdfWorkflow: (docId: number) =>
+        request<{
+          workflow_id: string;
+          title: string;
+          chapter_id: number | null;
+          created_at: string;
+          updated_at: string;
+          stages: Record<string, { status: string; updated_at: string; outputs: string[] }>;
+        }>(`/teacher/pipeline/pdf-docs/${docId}/workflow`, { method: "POST" }),
+      createWorkflow: (body: { title: string; chapter_id?: number | null }) =>
+        request<{
+          workflow_id: string;
+          title: string;
+          chapter_id: number | null;
+          created_at: string;
+          updated_at: string;
+          stages: Record<string, { status: string; updated_at: string; outputs: string[] }>;
+        }>("/teacher/pipeline/workflows", { method: "POST", body }),
+      getWorkflow: (workflowId: string) =>
+        request<{
+          workflow_id: string;
+          title: string;
+          chapter_id: number | null;
+          created_at: string;
+          updated_at: string;
+          stages: Record<string, { status: string; updated_at: string; outputs: string[] }>;
+        }>(`/teacher/pipeline/workflows/${workflowId}`),
+      stage1Extract: (workflowId: string, body: { file?: File } = {}) => {
+        const form = new FormData();
+        if (body.file) form.append("file", body.file);
+        return requestForm<{ ok: boolean; workflow_id: string; page_count: number; chapter_count: number; outputs: string[] }>(
+          `/teacher/pipeline/workflows/${workflowId}/stage1/extract`,
+          form,
+          { method: "POST" }
+        );
+      },
+      stage2Generate: (
+        workflowId: string,
+        body: {
+          source_file?: string;
+          max_slides?: number;
+          prefer_llm?: boolean;
+          title?: string;
+          output_json_file?: string;
+        }
+      ) =>
+        request<{
+          ok: boolean;
+          workflow_id: string;
+          slide_count: number;
+          fallback_used: boolean;
+          fallback_reason: string | null;
+          outputs: string[];
+        }>(`/teacher/pipeline/workflows/${workflowId}/stage2/generate`, { method: "POST", body }),
+      stage3GeneratePpt: (
+        workflowId: string,
+        body: { source_file?: string; output_file?: string; template_file?: string | null }
+      ) =>
+        request<{ ok: boolean; workflow_id: string; slide_count: number; output: string }>(
+          `/teacher/pipeline/workflows/${workflowId}/stage3/generate-ppt`,
+          { method: "POST", body }
+        ),
+      stage3UploadEditedPpt: (workflowId: string, file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return requestForm<{ ok: boolean; workflow_id: string; output: string }>(
+          `/teacher/pipeline/workflows/${workflowId}/stage3/upload-edited-ppt`,
+          form,
+          { method: "POST" }
+        );
+      },
+      stage4GenerateScript: (
+        workflowId: string,
+        body: {
+          source_ppt?: string;
+          fallback_ppt?: string;
+          prefer_llm?: boolean;
+          output_segments_file?: string;
+          output_script_file?: string;
+        }
+      ) =>
+        request<{
+          ok: boolean;
+          workflow_id: string;
+          segment_count: number;
+          fallback_used: boolean;
+          fallback_reason: string | null;
+          outputs: string[];
+        }>(`/teacher/pipeline/workflows/${workflowId}/stage4/generate-script`, { method: "POST", body }),
+      stage5Tts: (
+        workflowId: string,
+        body: { script_file?: string; output_file?: string; model?: string; voice?: string; speed?: number }
+      ) =>
+        request<{ ok: boolean; workflow_id: string; output: string; bytes: number }>(
+          `/teacher/pipeline/workflows/${workflowId}/stage5/tts`,
+          { method: "POST", body }
+        ),
+      stage6RenderVideo: (
+        workflowId: string,
+        body: {
+          ppt_file?: string;
+          fallback_ppt?: string;
+          audio_file?: string;
+          output_file?: string;
+          timing_file?: string | null;
+          default_slide_seconds?: number;
+        }
+      ) =>
+        request<{ ok: boolean; workflow_id: string; output: string; slide_count: number; durations: number[] }>(
+          `/teacher/pipeline/workflows/${workflowId}/stage6/render-video`,
+          { method: "POST", body }
+        ),
+      downloadFile: (workflowId: string, path: string) =>
+        requestBlob(`/teacher/pipeline/workflows/${workflowId}/files/download?path=${encodeURIComponent(path)}`),
+      uploadFileOverride: (workflowId: string, path: string, file: File) => {
+        const form = new FormData();
+        form.append("path", path);
+        form.append("file", file);
+        return requestForm<{ ok: boolean; workflow_id: string; path: string; bytes: number }>(
+          `/teacher/pipeline/workflows/${workflowId}/files/upload`,
+          form,
+          { method: "POST" }
+        );
+      },
+      readTextFile: (workflowId: string, path: string) =>
+        request<{ path: string; content: string }>(
+          `/teacher/pipeline/workflows/${workflowId}/files/text?path=${encodeURIComponent(path)}`
+        ),
+      saveTextFile: (workflowId: string, body: { path: string; content: string }) =>
+        request<{ path: string; content: string }>(`/teacher/pipeline/workflows/${workflowId}/files/text`, {
+          method: "PUT",
+          body,
+        }),
+    },
   },
   feedback: {
     submit: (content: string, source: "form" | "dialogue" = "form") =>

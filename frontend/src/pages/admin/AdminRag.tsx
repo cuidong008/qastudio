@@ -12,6 +12,7 @@ export default function AdminRag() {
   const [defaultEmbedding, setDefaultEmbedding] = useState("");
   const [defaultRerank, setDefaultRerank] = useState("");
   const [defaultPdfParser, setDefaultPdfParser] = useState("");
+  const [defaultTts, setDefaultTts] = useState("");
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
@@ -34,6 +35,7 @@ export default function AdminRag() {
         setDefaultEmbedding(p.default_embedding || "");
         setDefaultRerank(p.default_rerank || "");
         setDefaultPdfParser(p.default_pdf_parser || "");
+        setDefaultTts(p.default_tts || "");
       })
       .catch((e) => setError(e?.message || "获取配置失败"))
       .finally(() => setLoading(false));
@@ -52,6 +54,7 @@ export default function AdminRag() {
   const embeddingModelsByType = providersData?.embedding_models_by_type ?? {};
   const pdfParserModelsByType = providersData?.pdf_parser_models_by_type ?? {};
   const rerankModelsByType = providersData?.rerank_models_by_type ?? {};
+  const ttsModelsByType = providersData?.tts_models_by_type ?? {};
 
   const defaultLlmOptions = useMemo(() => {
     const out: { value: string; label: string }[] = [];
@@ -111,6 +114,20 @@ export default function AdminRag() {
     return out;
   }, [providers, rerankModelsByType]);
 
+  const defaultTtsOptions = useMemo(() => {
+    const out: { value: string; label: string }[] = [];
+    for (const p of providers) {
+      const models = ttsModelsByType[p.type];
+      if (models?.length) {
+        for (const m of models) {
+          if (m === "custom") continue;
+          out.push({ value: `${p.id}:${m}`, label: `${p.name} — ${m}` });
+        }
+      }
+    }
+    return out;
+  }, [providers, ttsModelsByType]);
+
   const save = () => {
     setSaving(true);
     setMessage("");
@@ -151,6 +168,7 @@ export default function AdminRag() {
         default_embedding: defaultEmbedding,
         default_rerank: defaultRerank,
         default_pdf_parser: defaultPdfParser,
+        default_tts: defaultTts,
       })
       .then(() =>
         api.admin.rag.updateConfig(configPayload)
@@ -202,6 +220,7 @@ export default function AdminRag() {
     setDefaultEmbedding((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultRerank((v) => (v.startsWith(id + ":") ? "" : v));
     setDefaultPdfParser((v) => (v.startsWith(id + ":") ? "" : v));
+    setDefaultTts((v) => (v.startsWith(id + ":") ? "" : v));
   };
 
   const startEdit = (p: RagProvider) => {
@@ -372,7 +391,7 @@ export default function AdminRag() {
       <div className="card" style={{ maxWidth: 640, marginBottom: 24 }}>
         <h3 style={{ marginBottom: 12, fontSize: 16 }}>设置默认模型</h3>
         <p style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>
-          从已添加的提供商中选择默认使用的 LLM、Embedding、Rerank，以及 PDF 外部解析器。
+          从已添加的提供商中选择默认使用的 LLM、Embedding、Rerank、TTS，以及 PDF 外部解析器。
         </p>
         <div style={sectionStyle}>
           <label style={labelStyle}>默认 LLM（大模型）</label>
@@ -409,6 +428,19 @@ export default function AdminRag() {
           >
             <option value="">暂不使用</option>
             {defaultRerankOptions.map((o) => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))}
+          </select>
+        </div>
+        <div style={sectionStyle}>
+          <label style={labelStyle}>默认 TTS（文本转语音）</label>
+          <select
+            style={inputStyle}
+            value={defaultTts}
+            onChange={(e) => setDefaultTts(e.target.value)}
+          >
+            <option value="">暂不指定（回退默认）</option>
+            {defaultTtsOptions.map((o) => (
               <option key={o.value} value={o.value}>{o.label}</option>
             ))}
           </select>

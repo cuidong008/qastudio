@@ -92,33 +92,39 @@ function buildLlmOptionsWithIcon(x: IThirdOAIModel) {
 export const useSelectLlmOptionsByModelType = () => {
   const llmInfo: IThirdOAIModelCollection = useFetchLlmList();
 
+  const isModelMatched = useCallback(
+    (x: IThirdOAIModel, modelType: LlmModelType) => {
+      const modelTag = modelType.toUpperCase();
+      return (
+        (x.model_type.includes(modelType) ||
+          (x.tags && x.tags.includes(modelTag))) &&
+        x.available &&
+        x.status === '1'
+      );
+    },
+    [],
+  );
+
   const groupImage2TextOptions = useCallback(() => {
     const modelType = LlmModelType.Image2text;
-    const modelTag = modelType.toUpperCase();
     return Object.entries(llmInfo)
       .map(([key, value]) => {
         return {
           label: key,
           options: value
-            .filter(
-              (x) =>
-                (x.model_type.includes(modelType) ||
-                  (x.tags && x.tags.includes(modelTag))) &&
-                x.available &&
-                x.status === '1',
-            )
+            .filter((x) => isModelMatched(x, modelType))
             .map(buildLlmOptionsWithIcon),
         };
       })
       .filter((x) => x.options.length > 0);
-  }, [llmInfo]);
+  }, [llmInfo, isModelMatched]);
 
   const groupOptionsByModelType = useCallback(
     (modelType: LlmModelType) => {
       return Object.entries(llmInfo)
         .filter(([, value]) =>
           modelType
-            ? value.some((x) => x.model_type.includes(modelType))
+            ? value.some((x) => isModelMatched(x, modelType))
             : true,
         )
         .map(([key, value]) => {
@@ -126,16 +132,14 @@ export const useSelectLlmOptionsByModelType = () => {
             label: key,
             options: value
               .filter(
-                (x) =>
-                  (modelType ? x.model_type.includes(modelType) : true) &&
-                  x.available,
+                (x) => (modelType ? isModelMatched(x, modelType) : true),
               )
               .map(buildLlmOptionsWithIcon),
           };
         })
         .filter((x) => x.options.length > 0);
     },
-    [llmInfo],
+    [llmInfo, isModelMatched],
   );
 
   return {
