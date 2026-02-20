@@ -14,6 +14,45 @@
 - Python 3.10+
 - Node.js 18+
 
+### 文档转换依赖（可选，按操作系统）
+
+用于以下能力：
+- `soffice`：PPTX 转 PDF
+- `pdftoppm`：PDF 转图片
+
+#### macOS
+
+```bash
+brew install --cask libreoffice
+brew install poppler
+```
+
+#### Linux
+
+```bash
+# Debian/Ubuntu
+sudo apt update
+sudo apt install -y libreoffice poppler-utils
+
+# Fedora/RHEL/CentOS（使用 dnf）
+sudo dnf install -y libreoffice poppler-utils
+```
+
+#### Windows
+
+```powershell
+# 使用 winget
+winget install -e --id TheDocumentFoundation.LibreOffice
+winget install -e --id oschwartz10612.Poppler
+```
+
+安装后可验证：
+
+```bash
+soffice --version
+pdftoppm -v
+```
+
 ### 后端
 
 ```bash
