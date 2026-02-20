@@ -1,5 +1,6 @@
 import React, { useEffect, useRef, useState } from "react";
 import { api } from "../../api/client";
+import { toast } from "../../utils/toast";
 
 type CourseItem = {
   id: number;
@@ -24,6 +25,54 @@ type KnowledgePointDraft = {
   content: string;
   ppt_slide_ref: string;
   order_index: number;
+};
+
+type CachedQuestionTask = {
+  taskId: number;
+  chapterId: number;
+  courseId: number | null;
+  updatedAt: number;
+};
+
+const QUESTION_TASK_CACHE_KEY = "teacher:question-task-cache";
+
+const readCachedQuestionTasks = (): CachedQuestionTask[] => {
+  try {
+    const raw = localStorage.getItem(QUESTION_TASK_CACHE_KEY);
+    if (!raw) return [];
+    const arr = JSON.parse(raw);
+    if (!Array.isArray(arr)) return [];
+    return arr
+      .map((x) => ({
+        taskId: Number(x?.taskId || 0),
+        chapterId: Number(x?.chapterId || 0),
+        courseId: x?.courseId == null ? null : Number(x.courseId || 0),
+        updatedAt: Number(x?.updatedAt || 0),
+      }))
+      .filter((x) => x.taskId > 0 && x.chapterId > 0)
+      .slice(-30);
+  } catch {
+    return [];
+  }
+};
+
+const writeCachedQuestionTasks = (items: CachedQuestionTask[]) => {
+  try {
+    localStorage.setItem(QUESTION_TASK_CACHE_KEY, JSON.stringify(items.slice(-30)));
+  } catch {
+    // ignore cache write failure
+  }
+};
+
+const upsertCachedQuestionTask = (item: CachedQuestionTask) => {
+  const curr = readCachedQuestionTasks();
+  const next = [...curr.filter((x) => x.taskId !== item.taskId), item];
+  writeCachedQuestionTasks(next);
+};
+
+const removeCachedQuestionTask = (taskId: number) => {
+  const curr = readCachedQuestionTasks();
+  writeCachedQuestionTasks(curr.filter((x) => x.taskId !== taskId));
 };
 
 export default function TeacherCourses() {
@@ -56,6 +105,9 @@ export default function TeacherCourses() {
   });
   const pollingReindexTaskIdsRef = useRef<Set<number>>(new Set());
   const notifiedReindexTaskIdsRef = useRef<Set<number>>(new Set());
+  const pollingQuestionTaskIdsRef = useRef<Set<number>>(new Set());
+  const notifiedQuestionTaskIdsRef = useRef<Set<number>>(new Set());
+  const questionTaskByChapterRef = useRef<Record<number, { taskId: number; status: string }>>({});
   const aliveRef = useRef(true);
 
   useEffect(() => {
@@ -63,6 +115,10 @@ export default function TeacherCourses() {
       aliveRef.current = false;
     };
   }, []);
+
+  useEffect(() => {
+    questionTaskByChapterRef.current = questionTaskByChapter;
+  }, [questionTaskByChapter]);
 
   const pollReindexTask = async (courseId: number, taskId: number) => {
     if (taskId <= 0) return;
@@ -79,7 +135,7 @@ export default function TeacherCourses() {
           if (task.status === "success") {
             if (!notifiedReindexTaskIdsRef.current.has(taskId)) {
               notifiedReindexTaskIdsRef.current.add(taskId);
-              alert(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`);
+              toast(`索引完成，共 ${task.result_payload?.chunks_indexed ?? 0} 个切片。`, "success");
             }
             setReindexTaskByCourse((prev) => {
               if (prev[courseId]?.taskId !== taskId) return prev;
@@ -92,7 +148,7 @@ export default function TeacherCourses() {
           if (task.status === "failed") {
             if (!notifiedReindexTaskIdsRef.current.has(taskId)) {
               notifiedReindexTaskIdsRef.current.add(taskId);
-              alert(task.error_message || "重建索引任务失败");
+              toast(task.error_message || "重建索引任务失败", "error");
             }
             setReindexTaskByCourse((prev) => {
               if (prev[courseId]?.taskId !== taskId) return prev;
@@ -108,11 +164,118 @@ export default function TeacherCourses() {
       }
       if (!notifiedReindexTaskIdsRef.current.has(taskId)) {
         notifiedReindexTaskIdsRef.current.add(taskId);
-        alert("重建索引任务仍在处理中，请稍后再看。");
+        toast("重建索引任务仍在处理中，请稍后再看。");
       }
     } finally {
       pollingReindexTaskIdsRef.current.delete(taskId);
     }
+  };
+
+  const syncActiveQuestionTasks = async () => {
+    try {
+      const activeQuestionTasks = await api.teacher.courses.listActiveQuestionTasks();
+      const activeByChapter: Record<number, { taskId: number; status: string }> = {};
+      activeQuestionTasks.forEach((t) => {
+        activeByChapter[t.chapter_id] = { taskId: t.task_id, status: t.status };
+        upsertCachedQuestionTask({
+          taskId: t.task_id,
+          chapterId: t.chapter_id,
+          courseId: t.course_id,
+          updatedAt: Date.now(),
+        });
+      });
+      const disappeared = Object.entries(questionTaskByChapterRef.current)
+        .map(([chapterId, item]) => ({ chapterId: Number(chapterId), ...item }))
+        .filter((item) => (item.status === "pending" || item.status === "running") && !activeByChapter[item.chapterId]);
+      await Promise.all(
+        disappeared.map(async (item) => {
+          try {
+            const task = await api.teacher.courses.getQuestionTask(item.taskId);
+            if (task.status === "success") {
+              if (!notifiedQuestionTaskIdsRef.current.has(item.taskId)) {
+                notifiedQuestionTaskIdsRef.current.add(item.taskId);
+                const byType = task.result_payload?.by_type;
+                toast(
+                  `生成完成：共 ${task.result_payload?.created ?? 0} 题（单选 ${byType?.single_choice ?? 0}，多选 ${byType?.multiple_choice ?? 0}，判断 ${byType?.judge ?? 0}，问答 ${byType?.qa ?? 0}，填空 ${byType?.blank ?? 0}），跳过 ${task.result_payload?.skipped ?? 0} 题。`,
+                  "success"
+                );
+              }
+              removeCachedQuestionTask(item.taskId);
+            }
+            if (task.status === "failed") {
+              if (!notifiedQuestionTaskIdsRef.current.has(item.taskId)) {
+                notifiedQuestionTaskIdsRef.current.add(item.taskId);
+                toast(task.error_message || "生成任务失败", "error");
+              }
+              removeCachedQuestionTask(item.taskId);
+            }
+          } catch {
+            // ignore transient task query failures
+          }
+        })
+      );
+      setQuestionTaskByChapter((prev) => {
+        const next = { ...prev };
+        Object.keys(next).forEach((k) => {
+          const chapterId = Number(k);
+          const item = next[chapterId];
+          if ((item?.status === "pending" || item?.status === "running") && !activeByChapter[chapterId]) {
+            delete next[chapterId];
+          }
+        });
+        Object.keys(activeByChapter).forEach((k) => {
+          const chapterId = Number(k);
+          next[chapterId] = activeByChapter[chapterId];
+        });
+        return next;
+      });
+      activeQuestionTasks.forEach((t) => {
+        void pollQuestionTask(t.chapter_id, t.task_id, t.course_id);
+      });
+    } catch {
+      // ignore active task recovery failure
+    }
+  };
+
+  const recoverCachedQuestionTasks = async () => {
+    const cached = readCachedQuestionTasks();
+    if (cached.length === 0) return;
+    await Promise.all(
+      cached.map(async (item) => {
+        try {
+          const task = await api.teacher.courses.getQuestionTask(item.taskId);
+          if (task.status === "pending" || task.status === "running") {
+            setQuestionTaskByChapter((prev) => ({
+              ...prev,
+              [task.chapter_id]: { taskId: task.id, status: task.status },
+            }));
+            void pollQuestionTask(task.chapter_id, task.id, task.course_id);
+            return;
+          }
+          if (task.status === "success") {
+            if (!notifiedQuestionTaskIdsRef.current.has(task.id)) {
+              notifiedQuestionTaskIdsRef.current.add(task.id);
+              const byType = task.result_payload?.by_type;
+              toast(
+                `生成完成：共 ${task.result_payload?.created ?? 0} 题（单选 ${byType?.single_choice ?? 0}，多选 ${byType?.multiple_choice ?? 0}，判断 ${byType?.judge ?? 0}，问答 ${byType?.qa ?? 0}，填空 ${byType?.blank ?? 0}），跳过 ${task.result_payload?.skipped ?? 0} 题。`,
+                "success"
+              );
+            }
+            removeCachedQuestionTask(task.id);
+            return;
+          }
+          if (task.status === "failed") {
+            if (!notifiedQuestionTaskIdsRef.current.has(task.id)) {
+              notifiedQuestionTaskIdsRef.current.add(task.id);
+              toast(task.error_message || "生成任务失败", "error");
+            }
+            removeCachedQuestionTask(task.id);
+          }
+        } catch {
+          // ignore and wait next sync
+        }
+      })
+    );
   };
 
   const load = () => {
@@ -134,12 +297,21 @@ export default function TeacherCourses() {
         } catch {
           // ignore active task recovery failure
         }
+        await recoverCachedQuestionTasks();
+        await syncActiveQuestionTasks();
       })
       .catch(() => setList([]))
       .finally(() => setLoading(false));
   };
   useEffect(() => {
     load();
+  }, []);
+
+  useEffect(() => {
+    const timer = window.setInterval(() => {
+      void syncActiveQuestionTasks();
+    }, 5000);
+    return () => window.clearInterval(timer);
   }, []);
 
   useEffect(() => {
@@ -310,10 +482,11 @@ export default function TeacherCourses() {
       .reindex(courseId)
       .then((r) => {
         setReindexTaskByCourse((prev) => ({ ...prev, [courseId]: { taskId: r.task_id, status: r.status } }));
+        toast("重建索引任务已提交，系统将在后台处理。");
         void pollReindexTask(courseId, r.task_id);
       })
       .catch((e) => {
-        alert(e?.message || "重建索引失败");
+        toast(e?.message || "重建索引失败", "error");
         setReindexTaskByCourse((prev) => {
           const next = { ...prev };
           delete next[courseId];
@@ -342,31 +515,60 @@ export default function TeacherCourses() {
   };
 
   const pollQuestionTask = async (chapterId: number, taskId: number, courseId: number | null) => {
+    if (taskId <= 0) return;
+    if (pollingQuestionTaskIdsRef.current.has(taskId)) return;
+    pollingQuestionTaskIdsRef.current.add(taskId);
     const maxPoll = 180;
-    for (let i = 0; i < maxPoll; i += 1) {
-      await new Promise((r) => setTimeout(r, 2000));
-      try {
-        const task = await api.teacher.courses.getQuestionTask(taskId);
-        setQuestionTaskByChapter((prev) => ({ ...prev, [chapterId]: { taskId, status: task.status } }));
-        if (task.status === "success") {
-          if (courseId != null) {
-            await api.teacher.courses.chapters(courseId).then(setChapters).catch(() => undefined);
+    try {
+      for (let i = 0; i < maxPoll; i += 1) {
+        await new Promise((r) => setTimeout(r, 2000));
+        if (!aliveRef.current) return;
+        try {
+          const task = await api.teacher.courses.getQuestionTask(taskId);
+          setQuestionTaskByChapter((prev) => ({ ...prev, [chapterId]: { taskId, status: task.status } }));
+          if (task.status === "success") {
+            if (courseId != null) {
+              await api.teacher.courses.chapters(courseId).then(setChapters).catch(() => undefined);
+            }
+            if (!notifiedQuestionTaskIdsRef.current.has(taskId)) {
+              notifiedQuestionTaskIdsRef.current.add(taskId);
+              const byType = task.result_payload?.by_type;
+              toast(
+                `生成完成：共 ${task.result_payload?.created ?? 0} 题（单选 ${byType?.single_choice ?? 0}，多选 ${byType?.multiple_choice ?? 0}，判断 ${byType?.judge ?? 0}，问答 ${byType?.qa ?? 0}，填空 ${byType?.blank ?? 0}），跳过 ${task.result_payload?.skipped ?? 0} 题。`,
+                "success"
+              );
+            }
+            removeCachedQuestionTask(taskId);
+            setQuestionTaskByChapter((prev) => {
+              if (prev[chapterId]?.taskId !== taskId) return prev;
+              const next = { ...prev };
+              delete next[chapterId];
+              return next;
+            });
+            return;
           }
-          const byType = task.result_payload?.by_type;
-          alert(
-            `生成完成：共 ${task.result_payload?.created ?? 0} 题（单选 ${byType?.single_choice ?? 0}，多选 ${byType?.multiple_choice ?? 0}，判断 ${byType?.judge ?? 0}，问答 ${byType?.qa ?? 0}，填空 ${byType?.blank ?? 0}），跳过 ${task.result_payload?.skipped ?? 0} 题。`
-          );
-          return;
+          if (task.status === "failed") {
+            if (!notifiedQuestionTaskIdsRef.current.has(taskId)) {
+              notifiedQuestionTaskIdsRef.current.add(taskId);
+              toast(task.error_message || "生成任务失败", "error");
+            }
+            removeCachedQuestionTask(taskId);
+            setQuestionTaskByChapter((prev) => {
+              if (prev[chapterId]?.taskId !== taskId) return prev;
+              const next = { ...prev };
+              delete next[chapterId];
+              return next;
+            });
+            return;
+          }
+        } catch {
+          // ignore and keep polling
         }
-        if (task.status === "failed") {
-          alert(task.error_message || "生成任务失败");
-          return;
-        }
-      } catch {
-        // ignore and keep polling
       }
+      toast("生成任务仍在处理中，请稍后再看。");
+    } finally {
+      pollingQuestionTaskIdsRef.current.delete(taskId);
     }
-    alert("生成任务仍在处理中，请稍后再看。");
   };
 
   const submitGenerateQuestions = () => {
@@ -382,10 +584,17 @@ export default function TeacherCourses() {
       .generateChapterQuestions(chapter.id, questionGenForm)
       .then((r) => {
         setQuestionTaskByChapter((prev) => ({ ...prev, [chapter.id]: { taskId: r.task_id, status: r.status } }));
+        upsertCachedQuestionTask({
+          taskId: r.task_id,
+          chapterId: chapter.id,
+          courseId: chapter.course_id,
+          updatedAt: Date.now(),
+        });
         setQuestionGenModalChapter(null);
+        toast("习题生成任务已提交，系统将在后台处理。");
         pollQuestionTask(chapter.id, r.task_id, chapter.course_id);
       })
-      .catch((e) => alert(e?.message || "生成失败"))
+      .catch((e) => toast(e?.message || "生成失败", "error"))
       .finally(() => undefined);
   };
 

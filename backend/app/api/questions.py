@@ -9,6 +9,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from ..db import get_db
 from ..db.models import User, Question, AnswerRecord
 from ..api.auth import get_current_user
+from ..services.llm_grading_service import grade_qa_or_blank
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
@@ -41,6 +42,9 @@ class SubmitAnswerOut(BaseModel):
     question_type: str
     explanation: str | None
     ppt_ref: str | None
+    grading_source: str | None = None  # rule | llm
+    grading_confidence: float | None = None
+    grading_reason: str | None = None
 
 
 class UpdateWrongReasonIn(BaseModel):
@@ -99,10 +103,26 @@ async def submit_answer(
     if not question:
         raise HTTPException(status_code=404, detail="题目不存在")
     scene = body.scene if body.scene in {"preview", "review", "exercise"} else "exercise"
-    if (question.question_type or "") == "multiple_choice":
+    question_type = (question.question_type or "single_choice").strip().lower()
+    grading_source = "rule"
+    grading_confidence: float | None = None
+    grading_reason: str | None = None
+    if question_type == "multiple_choice":
         is_correct = _normalize_multi_answer(question.correct_answer) == _normalize_multi_answer(body.user_answer)
     else:
         is_correct = question.correct_answer.strip().lower() == body.user_answer.strip().lower()
+    if question_type in {"qa", "blank"}:
+        graded = grade_qa_or_blank(
+            question_type=question_type,
+            question_text=question.question_text or "",
+            standard_answer=question.correct_answer or "",
+            user_answer=body.user_answer or "",
+        )
+        if graded is not None:
+            is_correct = graded.is_correct
+            grading_source = "llm"
+            grading_confidence = graded.confidence
+            grading_reason = graded.reason
     record = AnswerRecord(
         user_id=user.id,
         question_id=question.id,
@@ -117,9 +137,12 @@ async def submit_answer(
         answer_record_id=record.id,
         is_correct=is_correct,
         correct_answer=question.correct_answer,
-        question_type=question.question_type or "single_choice",
+        question_type=question_type,
         explanation=question.explanation,
         ppt_ref=question.ppt_ref,
+        grading_source=grading_source,
+        grading_confidence=grading_confidence,
+        grading_reason=grading_reason,
     )
 
 

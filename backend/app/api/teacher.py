@@ -232,6 +232,14 @@ class TeacherGenerateTaskStatusOut(BaseModel):
     updated_at: str | None
 
 
+class TeacherGenerateTaskSummaryOut(BaseModel):
+    task_id: int
+    course_id: int
+    chapter_id: int
+    status: str
+    updated_at: str | None
+
+
 class TeacherDocumentProcessTaskOut(BaseModel):
     ok: bool = True
     task_id: int
@@ -885,7 +893,8 @@ async def _generate_knowledge_points_for_chapter(
         context=context,
         count=count,
     )
-    raw = llm.generate(
+    raw = await asyncio.to_thread(
+        llm.generate,
         prompt,
         max_tokens=max(1000, int(settings.llm_max_tokens or 512)),
         temperature=0.2,
@@ -956,7 +965,8 @@ async def _generate_knowledge_points_for_chapter_auto(
         context=context,
         max_count=max_count,
     )
-    raw = llm.generate(
+    raw = await asyncio.to_thread(
+        llm.generate,
         prompt,
         max_tokens=max(1000, int(settings.llm_max_tokens or 512)),
         temperature=0.2,
@@ -2121,7 +2131,8 @@ async def _generate_questions_for_chapter(
         diff_applied_target=diff_limits["applied"],
         diff_extended_target=diff_limits["extended"],
     )
-    raw = llm.generate(
+    raw = await asyncio.to_thread(
+        llm.generate,
         prompt,
         max_tokens=max(1400, int(settings.llm_max_tokens or 512)),
         temperature=0.2,
@@ -2342,6 +2353,36 @@ async def get_generate_teacher_chapter_questions_task(
         created_at=task.created_at.isoformat() if task.created_at else None,
         updated_at=task.updated_at.isoformat() if task.updated_at else None,
     )
+
+
+@router.get("/questions/active-tasks", response_model=list[TeacherGenerateTaskSummaryOut])
+async def list_generate_teacher_chapter_questions_active_tasks(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(QuestionGenerationTask)
+        .where(
+            QuestionGenerationTask.teacher_id == user.id,
+            QuestionGenerationTask.status.in_(["pending", "running"]),
+        )
+        .order_by(QuestionGenerationTask.chapter_id, QuestionGenerationTask.id.desc())
+    )
+    rows = r.scalars().all()
+    latest_by_chapter: dict[int, QuestionGenerationTask] = {}
+    for task in rows:
+        if task.chapter_id not in latest_by_chapter:
+            latest_by_chapter[task.chapter_id] = task
+    return [
+        TeacherGenerateTaskSummaryOut(
+            task_id=t.id,
+            course_id=t.course_id,
+            chapter_id=t.chapter_id,
+            status=t.status,
+            updated_at=t.updated_at.isoformat() if t.updated_at else None,
+        )
+        for t in latest_by_chapter.values()
+    ]
 
 
 async def _run_document_process_task(task_id: int):

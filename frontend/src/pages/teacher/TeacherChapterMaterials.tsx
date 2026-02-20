@@ -1,6 +1,7 @@
 import { useEffect, useMemo, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { api } from "../../api/client";
+import { toast } from "../../utils/toast";
 
 type ChapterDocItem = {
   id: number;
@@ -172,7 +173,7 @@ export default function TeacherChapterMaterials() {
   const reprocessDocument = async (docId: number) => {
     if (!confirm("将重新识别讲义、重新切片并重建索引，是否继续？")) return;
     if (docTaskByDoc[docId]?.status === "pending" || docTaskByDoc[docId]?.status === "running") {
-      alert("该文档已有处理任务在执行中");
+      toast("该文档已有处理任务在执行中");
       return;
     }
     try {
@@ -183,14 +184,14 @@ export default function TeacherChapterMaterials() {
         delete next[docId];
         return next;
       });
-      alert("任务已开始，系统将在后台处理。");
+      toast("任务已开始，系统将在后台处理。");
       void pollDocumentTask(docId, r.task_id);
       void pollDocumentStatus(docId);
       if (selectedDocId === docId) {
         setDocDetail((prev) => (prev ? { ...prev, parse_status: "processing", parse_error: null } : prev));
       }
     } catch (e: any) {
-      alert(e?.message || "重新处理失败");
+      toast(e?.message || "重新处理失败", "error");
     }
   };
 
@@ -236,7 +237,7 @@ export default function TeacherChapterMaterials() {
           if (selectedDocId === docId) {
             await api.teacher.courses.documentDetail(docId).then(setDocDetail).catch(() => undefined);
           }
-          alert("已完成重新识别、切片与重建索引。");
+          toast("已完成重新识别、切片与重建索引。", "success");
           return;
         }
         if (task.status === "failed") {
@@ -246,7 +247,7 @@ export default function TeacherChapterMaterials() {
           if (selectedDocId === docId) {
             await api.teacher.courses.documentDetail(docId).then(setDocDetail).catch(() => undefined);
           }
-          alert("处理失败，可点击“查看失败日志”。");
+          toast("处理失败，可点击“查看失败日志”。", "error");
           return;
         }
       } catch {

@@ -17,6 +17,7 @@ import AdminHome from "./pages/admin/AdminHome";
 import AdminUsers from "./pages/admin/AdminUsers";
 import AdminRag from "./pages/admin/AdminRag";
 import Login from "./pages/Login";
+import ToastHost from "./components/ToastHost";
 
 function App() {
   const { user, loading } = useAuth();
@@ -39,27 +40,30 @@ function App() {
   }
 
   return (
-    <Routes>
-      <Route path="/login" element={<Login />} />
-      <Route path="/student" element={<Navigate to="/student/inclass" replace />} />
-      <Route path="/student/preview" element={<Layout role="student" requireAuth><Preview /></Layout>} />
-      <Route path="/student/inclass" element={<Layout role="student" requireAuth><InClass /></Layout>} />
-      <Route path="/student/review" element={<Layout role="student" requireAuth><Review /></Layout>} />
-      <Route path="/student/exercises" element={<Layout role="student" requireAuth><Exercises /></Layout>} />
-      <Route path="/student/feedback" element={<Layout role="student" requireAuth><Feedback /></Layout>} />
-      <Route path="/teacher" element={<TeacherLayout requireAuth><TeacherDashboard /></TeacherLayout>} />
-      <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />
-      <Route path="/teacher/chapter-materials" element={<TeacherLayout requireAuth fluid><TeacherChapterMaterials /></TeacherLayout>} />
-      <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
-      <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
-      <Route path="/admin" element={<AdminLayout />}>
-        <Route index element={<AdminHome />} />
-        <Route path="users" element={<AdminUsers />} />
-        <Route path="rag" element={<AdminRag />} />
-      </Route>
-      <Route path="/" element={<Navigate to={user?.role === "admin" ? "/admin" : user?.role === "teacher" ? "/teacher" : "/student/inclass"} replace />} />
-      <Route path="*" element={<Navigate to="/" replace />} />
-    </Routes>
+    <>
+      <Routes>
+        <Route path="/login" element={<Login />} />
+        <Route path="/student" element={<Navigate to="/student/inclass" replace />} />
+        <Route path="/student/preview" element={<Layout role="student" requireAuth><Preview /></Layout>} />
+        <Route path="/student/inclass" element={<Layout role="student" requireAuth><InClass /></Layout>} />
+        <Route path="/student/review" element={<Layout role="student" requireAuth><Review /></Layout>} />
+        <Route path="/student/exercises" element={<Layout role="student" requireAuth><Exercises /></Layout>} />
+        <Route path="/student/feedback" element={<Layout role="student" requireAuth><Feedback /></Layout>} />
+        <Route path="/teacher" element={<TeacherLayout requireAuth><TeacherDashboard /></TeacherLayout>} />
+        <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />
+        <Route path="/teacher/chapter-materials" element={<TeacherLayout requireAuth fluid><TeacherChapterMaterials /></TeacherLayout>} />
+        <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
+        <Route path="/teacher/classes" element={<TeacherLayout requireAuth><TeacherClasses /></TeacherLayout>} />
+        <Route path="/admin" element={<AdminLayout />}>
+          <Route index element={<AdminHome />} />
+          <Route path="users" element={<AdminUsers />} />
+          <Route path="rag" element={<AdminRag />} />
+        </Route>
+        <Route path="/" element={<Navigate to={user?.role === "admin" ? "/admin" : user?.role === "teacher" ? "/teacher" : "/student/inclass"} replace />} />
+        <Route path="*" element={<Navigate to="/" replace />} />
+      </Routes>
+      <ToastHost />
+    </>
   );
 }
 

@@ -29,7 +29,15 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
   const [questions, setQuestions] = useState<QuestionItem[]>([]);
   const [current, setCurrent] = useState<QuestionItem | null>(null);
   const [userAnswer, setUserAnswer] = useState("");
-  const [result, setResult] = useState<{ is_correct: boolean; correct_answer: string; explanation: string | null; ppt_ref: string | null } | null>(null);
+  const [result, setResult] = useState<{
+    is_correct: boolean;
+    correct_answer: string;
+    explanation: string | null;
+    ppt_ref: string | null;
+    grading_source?: string | null;
+    grading_confidence?: number | null;
+    grading_reason?: string | null;
+  } | null>(null);
   const [tab, setTab] = useState<"practice" | "wrong">("practice");
   const hasAvailableCourse = courses.length > 0;
 
@@ -240,6 +248,14 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
                 <p style={{ marginBottom: 8 }}>
                   <strong>解析：</strong>
                   {result.explanation}
+                </p>
+              )}
+              {(result.grading_source === "llm" || result.grading_reason) && (
+                <p style={{ marginBottom: 8, color: "var(--text-muted)" }}>
+                  <strong>判卷：</strong>
+                  {result.grading_source === "llm" ? "LLM 语义判卷" : "规则判卷"}
+                  {typeof result.grading_confidence === "number" ? `（置信度 ${(result.grading_confidence * 100).toFixed(0)}%）` : ""}
+                  {result.grading_reason ? `，${result.grading_reason}` : ""}
                 </p>
               )}
               {result.ppt_ref && <p style={{ color: "var(--accent)", marginBottom: 16 }}>参考 PPT：{result.ppt_ref}</p>}

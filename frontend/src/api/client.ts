@@ -221,7 +221,17 @@ export const api = {
       );
     },
     submit: (questionId: number, userAnswer: string, scene: "preview" | "review" | "exercise" = "exercise") =>
-      request<{ answer_record_id: number; is_correct: boolean; correct_answer: string; question_type: string; explanation: string | null; ppt_ref: string | null }>(
+      request<{
+        answer_record_id: number;
+        is_correct: boolean;
+        correct_answer: string;
+        question_type: string;
+        explanation: string | null;
+        ppt_ref: string | null;
+        grading_source?: string | null;
+        grading_confidence?: number | null;
+        grading_reason?: string | null;
+      }>(
         "/questions/submit",
         { method: "POST", body: { question_id: questionId, user_answer: userAnswer, scene } }
       ),
@@ -347,6 +357,14 @@ export const api = {
           created_at: string | null;
           updated_at: string | null;
         }>(`/teacher/questions/tasks/${taskId}`),
+      listActiveQuestionTasks: () =>
+        request<{
+          task_id: number;
+          course_id: number;
+          chapter_id: number;
+          status: string;
+          updated_at: string | null;
+        }[]>("/teacher/questions/active-tasks"),
       chapterQuestions: (chapterId: number, params?: { knowledgePointId?: number }) => {
         const qs = new URLSearchParams();
         if (params?.knowledgePointId != null) qs.set("knowledge_point_id", String(params.knowledgePointId));
