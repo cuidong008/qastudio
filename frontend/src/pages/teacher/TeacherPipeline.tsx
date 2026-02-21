@@ -41,8 +41,6 @@ export default function TeacherPipeline() {
   const [busy, setBusy] = useState<Record<string, boolean>>({});
 
   const [stage2MaxSlides, setStage2MaxSlides] = useState(20);
-  const [stage2PreferLlm, setStage2PreferLlm] = useState(true);
-  const [stage4PreferLlm, setStage4PreferLlm] = useState(true);
   const [stage3EditedFile, setStage3EditedFile] = useState<File | null>(null);
   // TTS 使用 RAG 配置的默认 TTS（admin/rag），此处仅保存用于音色列表查找
   const [stage5DefaultModel, setStage5DefaultModel] = useState("");
@@ -192,7 +190,7 @@ export default function TeacherPipeline() {
       await api.teacher.pipeline.stage2Generate(activeWorkflowId, {
         source_file: branch.sourceChapterPath,
         max_slides: stage2MaxSlides,
-        prefer_llm: stage2PreferLlm,
+        prefer_llm: true, // 固定使用 RAG 配置（admin/rag）中的 LLM
         title: `${selectedDoc?.file_name || selectedDoc?.title || "教学内容"} - ${splitKey}`,
         output_json_file: branch.stage2Json,
       });
@@ -245,7 +243,7 @@ export default function TeacherPipeline() {
       await api.teacher.pipeline.stage4GenerateScript(activeWorkflowId, {
         source_ppt: branch.stage3Edited,
         fallback_ppt: branch.stage3Ppt,
-        prefer_llm: stage4PreferLlm,
+        prefer_llm: true, // 固定使用 RAG 配置（admin/rag）中的 LLM
         output_script_file: branch.stage4Script,
         output_segments_file: branch.stage4Segments,
       });
@@ -463,13 +461,12 @@ export default function TeacherPipeline() {
         <div className="card">
           <h3 style={{ marginTop: 0 }}>阶段2~6（按选中章节分支执行）</h3>
           <p style={{ marginTop: 0, color: "var(--text-muted)", fontSize: 13 }}>
-            参数说明：`最大页数`用于限制阶段2自动生成的PPT页数；阶段5使用「RAG 配置」中的默认 TTS，此处仅可调`音色/语速`；`默认每页时长`用于阶段6在没有时间轴文件时控制翻页节奏。
+            参数说明：`最大页数`用于限制阶段2自动生成的PPT页数；阶段2与阶段4直接使用「RAG 配置」中选择的 LLM，无需在此页选择；阶段5使用「RAG 配置」中的默认 TTS，此处仅可调`音色/语速`；`默认每页时长`用于阶段6在没有时间轴文件时控制翻页节奏。
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
               <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>最大页数</span>
               <input type="number" min={5} max={60} value={stage2MaxSlides} onChange={(e) => setStage2MaxSlides(Number(e.target.value) || 20)} />
-              <label><input type="checkbox" checked={stage2PreferLlm} onChange={(e) => setStage2PreferLlm(e.target.checked)} /> 优先LLM</label>
               <button type="button" className="btn-primary" onClick={stage2Run} disabled={!selectedSplitPath || !!busy.stage2}>
                 {busy.stage2 ? "执行中..." : "生成PPT大纲与内容"}
               </button>
@@ -494,7 +491,6 @@ export default function TeacherPipeline() {
               </button>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <label><input type="checkbox" checked={stage4PreferLlm} onChange={(e) => setStage4PreferLlm(e.target.checked)} /> 阶段4优先LLM</label>
               <button type="button" className="btn-primary" onClick={stage4Run} disabled={!selectedSplitPath || !!busy.stage4}>
                 {busy.stage4 ? "执行中..." : "生成讲解脚本"}
               </button>

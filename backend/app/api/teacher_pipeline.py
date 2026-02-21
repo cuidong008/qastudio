@@ -762,33 +762,51 @@ def _qianwen_tts_to_file(
             len(allowed_voices),
         )
         voice = new_voice
-    def _split_text_for_qwen_tts(full_text: str, max_len: int = 600) -> list[str]:
+    # 千问 TTS API：输入长度为 UTF-8 字节数 [0, 600]，按字节切分
+    _QWEN_TTS_MAX_BYTES = 600
+
+    def _utf8_byte_len(s: str) -> int:
+        return len((s or "").encode("utf-8"))
+
+    def _truncate_to_utf8_bytes(s: str, max_bytes: int) -> str:
+        b = s.encode("utf-8")
+        if len(b) <= max_bytes:
+            return s
+        return b[:max_bytes].decode("utf-8", errors="ignore").strip() or s[:1]
+
+    def _split_text_for_qwen_tts(full_text: str, max_bytes: int = _QWEN_TTS_MAX_BYTES) -> list[str]:
         txt = (full_text or "").strip()
         if not txt:
             return []
-        if len(txt) <= max_len:
+        if _utf8_byte_len(txt) <= max_bytes:
             return [txt]
         parts: list[str] = []
         buf = ""
-        # Prefer splitting by sentence-level punctuation to keep prosody natural.
         for seg in re.split(r"([。！？!?；;，,\n])", txt):
             if not seg:
                 continue
-            if len(buf) + len(seg) <= max_len:
+            seg_bytes = _utf8_byte_len(seg)
+            buf_bytes = _utf8_byte_len(buf)
+            if buf_bytes + seg_bytes <= max_bytes:
                 buf += seg
                 continue
             if buf.strip():
                 parts.append(buf.strip())
                 buf = ""
-            while len(seg) > max_len:
-                parts.append(seg[:max_len].strip())
-                seg = seg[max_len:]
+            while _utf8_byte_len(seg) > max_bytes:
+                parts.append(_truncate_to_utf8_bytes(seg, max_bytes))
+                remainder = seg.encode("utf-8")[max_bytes:].decode("utf-8", errors="ignore").strip()
+                seg = remainder
             buf = seg
         if buf.strip():
             parts.append(buf.strip())
         return [p for p in parts if p]
 
     def _qwen_tts_request_once(input_text: str) -> bytes:
+        # 发送前按 UTF-8 字节截断，确保符合 API [0, 600] 字节要求
+        if _utf8_byte_len(input_text) > _QWEN_TTS_MAX_BYTES:
+            input_text = _truncate_to_utf8_bytes(input_text, _QWEN_TTS_MAX_BYTES)
+            logger.warning("[TTS][QWEN] request text truncated to 600 utf8 bytes")
         payload = {
             "model": model_name,
             "input": {
@@ -851,7 +869,7 @@ def _qianwen_tts_to_file(
         )
         raise RuntimeError(f"未拿到音频输出: {json.dumps(data, ensure_ascii=False)[:800]}")
 
-    chunks = _split_text_for_qwen_tts(text, max_len=600)
+    chunks = _split_text_for_qwen_tts(text, max_bytes=_QWEN_TTS_MAX_BYTES)
     if not chunks:
         raise RuntimeError("文本为空，无法进行 TTS")
     logger.warning("[TTS][QWEN] split into chunks count=%s lens=%s", len(chunks), [len(x) for x in chunks[:20]])
@@ -895,21 +913,22 @@ def _qianwen_tts_to_file(
 
 
 def _llm_generate_slides(text: str, max_slides: int = 20) -> list[dict[str, Any]]:
-    client = _openai_client()
-    prompt = (
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    system = (
         "你是教学PPT助手。请根据教材文本生成教学幻灯片内容。"
         "输出 JSON 数组，每项包含 slide_no(int), title(str), bullets(str[]), notes(str)。"
         f"总页数不超过 {max_slides}。bullets 每页 3~5 条，notes 为讲解备注。"
     )
-    resp = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": text[:12000]},
-        ],
-        temperature=0.3,
+    prompt = f"{system}\n\n教材文本：\n{text[:12000]}"
+    settings = get_rag_settings()
+    raw = get_llm(settings).generate(
+        prompt,
+        max_tokens=max(settings.llm_max_tokens, 4096),
+        temperature=settings.llm_temperature if settings.llm_temperature is not None else 0.3,
     )
-    raw = (resp.output_text or "").strip()
+    raw = (raw or "").strip()
     m = re.search(r"\[\s*\{[\s\S]*\}\s*\]", raw)
     payload = m.group(0) if m else raw
     data = json.loads(payload)
@@ -1011,21 +1030,22 @@ def _fallback_script(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
 
 
 def _llm_script(segments: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    client = _openai_client()
-    prompt = (
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    system = (
         "你是教师讲解稿助手。请按页生成讲解词。"
         "输出 JSON 数组，每项包含 slide_no(int), script(str)。语气自然、简洁、适合课堂讲解。"
     )
-    src = json.dumps(segments, ensure_ascii=False)
-    resp = client.responses.create(
-        model="gpt-4o-mini",
-        input=[
-            {"role": "system", "content": prompt},
-            {"role": "user", "content": src[:12000]},
-        ],
+    src = json.dumps(segments, ensure_ascii=False)[:12000]
+    prompt = f"{system}\n\nPPT 按页内容：\n{src}"
+    settings = get_rag_settings()
+    raw = get_llm(settings).generate(
+        prompt,
+        max_tokens=max(settings.llm_max_tokens, 4096),
         temperature=0.4,
     )
-    raw = (resp.output_text or "").strip()
+    raw = (raw or "").strip()
     m = re.search(r"\[\s*\{[\s\S]*\}\s*\]", raw)
     payload = m.group(0) if m else raw
     data = json.loads(payload)
