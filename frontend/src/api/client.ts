@@ -648,6 +648,7 @@ export const api = {
           audio_file?: string;
           output_file?: string;
           timing_file?: string | null;
+          script_segments_file?: string | null;
           default_slide_seconds?: number;
         }
       ) =>

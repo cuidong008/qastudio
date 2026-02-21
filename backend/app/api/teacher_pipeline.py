@@ -1076,11 +1076,37 @@ def _run_cmd(args: list[str], cwd: Path | None = None) -> None:
         raise HTTPException(status_code=400, detail=f"命令执行失败: {' '.join(args)}; {stderr}")
 
 
+def _get_audio_duration_seconds(audio_path: Path) -> float | None:
+    """用 ffprobe 获取音频时长（秒），失败返回 None。"""
+    try:
+        out = subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                "-show_entries",
+                "format=duration",
+                "-of",
+                "default=noprint_wrappers=1:nokey=1",
+                str(audio_path),
+            ],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if out.returncode == 0 and out.stdout:
+            return float(out.stdout.strip())
+    except (subprocess.TimeoutExpired, ValueError, FileNotFoundError):
+        pass
+    return None
+
+
 def _build_stage6_video(
     ppt_path: Path,
     audio_path: Path,
     out_video: Path,
     durations: list[float] | None = None,
+    script_segments_path: Path | None = None,
 ) -> dict[str, Any]:
     _require_tool("soffice", "用于将 PPTX 转 PDF")
     _require_tool("pdftoppm", "用于将 PDF 转图片")
@@ -1111,10 +1137,48 @@ def _build_stage6_video(
         if not images:
             raise HTTPException(status_code=400, detail="PDF 转图片失败，未生成页图")
 
-        # 3) 每页做小视频
-        durs = durations or [8.0] * len(images)
+        # 3) 每页时长：有传入则用传入的；否则按「每页字数/总字数 * 音频总时长」分配，无分段文件则均分
+        default_per_slide = 8.0
+        if durations is not None and len(durations) > 0:
+            durs = list(durations)
+        else:
+            total_sec = _get_audio_duration_seconds(audio_path)
+            if total_sec is None or total_sec <= 0:
+                durs = [default_per_slide] * len(images)
+            else:
+                segments: list[dict[str, Any]] = []
+                if script_segments_path and script_segments_path.exists():
+                    try:
+                        raw = json.loads(script_segments_path.read_text(encoding="utf-8"))
+                        if isinstance(raw, list):
+                            segments = [x for x in raw if isinstance(x, dict)]
+                    except (json.JSONDecodeError, OSError):
+                        pass
+                n_slides = len(images)
+                use_segments = segments and len(segments) > 0
+                if use_segments:
+                    # 取前 n_slides 段，按字数占比分配时长
+                    segs = segments[:n_slides]
+                    total_chars = sum(len(str(s.get("script", "") or "")) for s in segs)
+                    if total_chars > 0:
+                        durs = [
+                            max(1.0, len(str(s.get("script", "") or "")) / total_chars * total_sec)
+                            for s in segs
+                        ]
+                        if len(durs) < n_slides:
+                            assigned = sum(durs)
+                            remaining = max(0, total_sec - assigned)
+                            pad = remaining / (n_slides - len(durs)) if (n_slides - len(durs)) else default_per_slide
+                            durs = durs + [max(1.0, pad)] * (n_slides - len(durs))
+                        else:
+                            durs = durs[:n_slides]
+                    else:
+                        use_segments = False
+                if not use_segments:
+                    per_slide = total_sec / n_slides
+                    durs = [max(1.0, per_slide)] * n_slides
         if len(durs) < len(images):
-            durs = durs + [durs[-1] if durs else 8.0] * (len(images) - len(durs))
+            durs = durs + [durs[-1] if durs else default_per_slide] * (len(images) - len(durs))
         durs = durs[: len(images)]
 
         seg_dir = tmp / "segments"
@@ -1244,6 +1308,7 @@ class Stage6RunIn(BaseModel):
     audio_file: str = "stage5/full_narration.mp3"
     output_file: str = "stage6/final_video.mp4"
     timing_file: str | None = "stage6/timeline.json"
+    script_segments_file: str | None = "stage4/script_segments.json"  # 用于按每页字数占比分配时长
     default_slide_seconds: float = Field(default=8.0, ge=1.0, le=60.0)
 
 
@@ -1967,11 +2032,24 @@ async def stage6_render_video(
             if isinstance(data, dict) and isinstance(data.get("durations"), list):
                 durations = [max(1.0, float(x)) for x in data["durations"] if isinstance(x, (int, float))]
 
+    # 无时间轴时由 _build_stage6_video 按「每页字数/总字数*音频时长」或均分计算每页时长
     if durations is None:
-        durations = [body.default_slide_seconds]
+        pass  # 保持 None
+
+    script_segments_path: Path | None = None
+    if body.script_segments_file:
+        seg_path = _safe_workflow_file(workflow_id, body.script_segments_file)
+        if seg_path.exists():
+            script_segments_path = seg_path
 
     out = _safe_workflow_file(workflow_id, body.output_file)
-    info = _build_stage6_video(ppt_path=ppt, audio_path=audio, out_video=out, durations=durations)
+    info = _build_stage6_video(
+        ppt_path=ppt,
+        audio_path=audio,
+        out_video=out,
+        durations=durations,
+        script_segments_path=script_segments_path,
+    )
 
     _touch_stage(workflow_id, "stage6", "done", outputs=[body.output_file], extra=info)
     return {"ok": True, "workflow_id": workflow_id, "output": body.output_file, **info}

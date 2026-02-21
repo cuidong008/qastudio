@@ -53,8 +53,6 @@ export default function TeacherPipeline() {
   const [stage5VoiceGenderFilter, setStage5VoiceGenderFilter] = useState<"" | "female" | "male">("");
   const [stage5Voice, setStage5Voice] = useState("alloy");
   const [stage5Speed, setStage5Speed] = useState(1);
-  const [stage6DefaultSeconds, setStage6DefaultSeconds] = useState(8);
-
   const [editorPath, setEditorPath] = useState("stage1/extracted_content.md");
   const [editorContent, setEditorContent] = useState("");
 
@@ -286,7 +284,7 @@ export default function TeacherPipeline() {
         audio_file: branch.stage5Audio,
         output_file: branch.stage6Video,
         timing_file: branch.stage6Timeline,
-        default_slide_seconds: stage6DefaultSeconds,
+        script_segments_file: branch.stage4Segments,
       });
       await refreshWorkflow(activeWorkflowId);
       toast("阶段6完成", "success");
@@ -461,7 +459,7 @@ export default function TeacherPipeline() {
         <div className="card">
           <h3 style={{ marginTop: 0 }}>阶段2~6（按选中章节分支执行）</h3>
           <p style={{ marginTop: 0, color: "var(--text-muted)", fontSize: 13 }}>
-            参数说明：`最大页数`用于限制阶段2自动生成的PPT页数；阶段2与阶段4直接使用「RAG 配置」中选择的 LLM，无需在此页选择；阶段5使用「RAG 配置」中的默认 TTS，此处仅可调`音色/语速`；`默认每页时长`用于阶段6在没有时间轴文件时控制翻页节奏。
+            参数说明：`最大页数`用于限制阶段2自动生成的PPT页数；阶段2与阶段4直接使用「RAG 配置」中选择的 LLM，无需在此页选择；阶段5使用「RAG 配置」中的默认 TTS，此处仅可调`音色/语速`；阶段6在没有时间轴文件时会根据讲解音频总时长与每页讲稿字数占比自动分配每页时长（此页时长 = 此页字数/总字数 × 音频时长），无需手动填写。
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -535,8 +533,6 @@ export default function TeacherPipeline() {
               </button>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>默认每页时长(秒)</span>
-              <input type="number" step={0.5} min={1} max={60} value={stage6DefaultSeconds} onChange={(e) => setStage6DefaultSeconds(Number(e.target.value) || 8)} />
               <button type="button" className="btn-primary" onClick={stage6Run} disabled={!selectedSplitPath || !!busy.stage6}>
                 {busy.stage6 ? "执行中..." : "合成讲解视频"}
               </button>
