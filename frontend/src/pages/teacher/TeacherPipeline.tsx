@@ -44,14 +44,15 @@ export default function TeacherPipeline() {
   const [stage2PreferLlm, setStage2PreferLlm] = useState(true);
   const [stage4PreferLlm, setStage4PreferLlm] = useState(true);
   const [stage3EditedFile, setStage3EditedFile] = useState<File | null>(null);
-  const [stage5Model, setStage5Model] = useState("gpt-4o-mini-tts");
-  const [stage5ModelOptions, setStage5ModelOptions] = useState<{ value: string; label: string; provider_type: string }[]>([]);
+  // TTS 使用 RAG 配置的默认 TTS（admin/rag），此处仅保存用于音色列表查找
+  const [stage5DefaultModel, setStage5DefaultModel] = useState("");
   const [stage5VoicesByProviderType, setStage5VoicesByProviderType] = useState<
-    Record<string, { value: string; label: string }[]>
+    Record<string, { value: string; label: string; gender?: string }[]>
   >({});
   const [stage5VoicesByModel, setStage5VoicesByModel] = useState<
-    Record<string, { value: string; label: string }[]>
+    Record<string, { value: string; label: string; gender?: string }[]>
   >({});
+  const [stage5VoiceGenderFilter, setStage5VoiceGenderFilter] = useState<"" | "female" | "male">("");
   const [stage5Voice, setStage5Voice] = useState("alloy");
   const [stage5Speed, setStage5Speed] = useState(1);
   const [stage6DefaultSeconds, setStage6DefaultSeconds] = useState(8);
@@ -96,27 +97,17 @@ export default function TeacherPipeline() {
     }
   };
 
-  const loadTtsModels = async () => {
+  const loadTtsDefaultAndVoices = async () => {
     try {
       const r = await api.teacher.pipeline.ttsModels();
-      console.info("[TeacherPipeline] ttsModels payload", {
-        options: r.options?.length || 0,
-        voicesByProviderType: Object.fromEntries(
-          Object.entries(r.voices_by_provider_type || {}).map(([k, v]) => [k, v.length])
-        ),
-        voicesByModel: Object.keys(r.voices_by_model || {}).length,
-        defaultModel: r.default_model,
-      });
-      setStage5ModelOptions(r.options.map((x) => ({ value: x.value, label: x.label, provider_type: x.provider_type })));
       setStage5VoicesByProviderType(r.voices_by_provider_type || {});
       setStage5VoicesByModel(r.voices_by_model || {});
       if (r.default_model) {
-        setStage5Model(r.default_model);
+        setStage5DefaultModel(r.default_model);
       }
     } catch (e: any) {
-      console.error("[TeacherPipeline] ttsModels failed", e);
-      toast(e?.message || "TTS 模型与音色加载失败", "error");
-      setStage5ModelOptions([]);
+      console.error("[TeacherPipeline] TTS 默认与音色加载失败", e);
+      toast(e?.message || "TTS 音色加载失败", "error");
       setStage5VoicesByProviderType({});
       setStage5VoicesByModel({});
     }
@@ -144,7 +135,7 @@ export default function TeacherPipeline() {
 
   useEffect(() => {
     void loadPdfDocs();
-    void loadTtsModels();
+    void loadTtsDefaultAndVoices();
   }, []);
 
   const openDocWorkflow = async (doc: PdfDoc) => {
@@ -274,7 +265,7 @@ export default function TeacherPipeline() {
       await api.teacher.pipeline.stage5Tts(activeWorkflowId, {
         script_file: branch.stage4Script,
         output_file: branch.stage5Audio,
-        model: stage5Model,
+        model: "", // 使用 RAG 配置的默认 TTS（admin/rag）
         voice: stage5Voice,
         speed: stage5Speed,
       });
@@ -308,21 +299,42 @@ export default function TeacherPipeline() {
     }
   };
 
-  const selectedModelProviderType =
-    stage5ModelOptions.find((x) => x.value === stage5Model)?.provider_type || "openai_compatible";
   const stage5VoiceOptions =
-    stage5VoicesByModel[stage5Model] ??
-    (selectedModelProviderType === "qianwen"
-      ? []
-      : stage5VoicesByProviderType[selectedModelProviderType] || []);
-  const stage5VoiceValues = stage5VoiceOptions.map((x) => x.value);
+    stage5VoicesByModel[stage5DefaultModel] ??
+    stage5VoicesByProviderType["qianwen"] ??
+    stage5VoicesByProviderType["openai_compatible"] ??
+    [];
+  const stage5VoiceOptionsFiltered = useMemo(() => {
+    if (!stage5VoiceGenderFilter) return stage5VoiceOptions;
+    return stage5VoiceOptions.filter((v) => (v.gender || "") === stage5VoiceGenderFilter);
+  }, [stage5VoiceOptions, stage5VoiceGenderFilter]);
+  const stage5VoiceValues = stage5VoiceOptionsFiltered.map((x) => x.value);
 
   useEffect(() => {
     if (!stage5VoiceValues.length) return;
     if (!stage5VoiceValues.includes(stage5Voice)) {
       setStage5Voice(stage5VoiceValues[0]);
     }
-  }, [selectedModelProviderType, stage5VoiceValues.join(","), stage5Voice]);
+  }, [stage5VoiceValues.join(","), stage5Voice]);
+
+  const stage5Preview = async () => {
+    setBusyFlag("ttsPreview", true);
+    try {
+      const blob = await api.teacher.pipeline.ttsPreview({ voice: stage5Voice, speed: stage5Speed });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audio.onended = () => URL.revokeObjectURL(url);
+      audio.onerror = () => {
+        URL.revokeObjectURL(url);
+        toast("试听播放失败", "error");
+      };
+      await audio.play();
+    } catch (e: any) {
+      toast(e?.message || "试听生成失败", "error");
+    } finally {
+      setBusyFlag("ttsPreview", false);
+    }
+  };
 
   const downloadByPath = async (path: string) => {
     if (!activeWorkflowId) return toast("请先选择 PDF", "error");
@@ -451,7 +463,7 @@ export default function TeacherPipeline() {
         <div className="card">
           <h3 style={{ marginTop: 0 }}>阶段2~6（按选中章节分支执行）</h3>
           <p style={{ marginTop: 0, color: "var(--text-muted)", fontSize: 13 }}>
-            参数说明：`最大页数`用于限制阶段2自动生成的PPT页数；`TTS模型/音色/语速`用于阶段5配音；`默认每页时长`用于阶段6在没有时间轴文件时控制翻页节奏。
+            参数说明：`最大页数`用于限制阶段2自动生成的PPT页数；阶段5使用「RAG 配置」中的默认 TTS，此处仅可调`音色/语速`；`默认每页时长`用于阶段6在没有时间轴文件时控制翻页节奏。
           </p>
           <div style={{ display: "grid", gap: 10 }}>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
@@ -491,32 +503,34 @@ export default function TeacherPipeline() {
               </button>
             </div>
             <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
-              <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>TTS模型</span>
-              {stage5ModelOptions.length ? (
-                <select value={stage5Model} onChange={(e) => setStage5Model(e.target.value)} style={{ minWidth: 340 }}>
-                  {stage5ModelOptions.map((opt) => (
-                    <option key={opt.value} value={opt.value}>
-                      {opt.label}
-                    </option>
-                  ))}
-                </select>
-              ) : (
-                <input value={stage5Model} onChange={(e) => setStage5Model(e.target.value)} placeholder="provider_id:model" />
-              )}
+              <span style={{ color: "var(--text-muted)", fontSize: 13 }}>使用 RAG 默认 TTS</span>
+              <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>性别</span>
+              <select
+                value={stage5VoiceGenderFilter}
+                onChange={(e) => setStage5VoiceGenderFilter((e.target.value || "") as "" | "female" | "male")}
+                style={{ minWidth: 72 }}
+              >
+                <option value="">全部</option>
+                <option value="female">女声</option>
+                <option value="male">男声</option>
+              </select>
               <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>音色</span>
-              {stage5VoiceOptions.length ? (
+              {stage5VoiceOptionsFiltered.length ? (
                 <select value={stage5Voice} onChange={(e) => setStage5Voice(e.target.value)} style={{ minWidth: 160 }}>
-                  {stage5VoiceOptions.map((v) => (
+                  {stage5VoiceOptionsFiltered.map((v) => (
                     <option key={v.value} value={v.value}>
                       {v.label}
                     </option>
                   ))}
                 </select>
               ) : (
-                <input value={stage5Voice} onChange={(e) => setStage5Voice(e.target.value)} placeholder="voice" />
+                <input value={stage5Voice} onChange={(e) => setStage5Voice(e.target.value)} placeholder="voice" style={{ minWidth: 120 }} />
               )}
               <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>语速</span>
-              <input type="number" step={0.1} min={0.5} max={1.5} value={stage5Speed} onChange={(e) => setStage5Speed(Number(e.target.value) || 1)} />
+              <input type="number" step={0.1} min={0.5} max={1.5} value={stage5Speed} onChange={(e) => setStage5Speed(Number(e.target.value) || 1)} style={{ width: 56 }} />
+              <button type="button" className="btn-secondary" onClick={stage5Preview} disabled={!!busy.ttsPreview}>
+                {busy.ttsPreview ? "试听中..." : "试听"}
+              </button>
               <button type="button" className="btn-primary" onClick={stage5Run} disabled={!selectedSplitPath || !!busy.stage5}>
                 {busy.stage5 ? "执行中..." : "生成讲解音频"}
               </button>

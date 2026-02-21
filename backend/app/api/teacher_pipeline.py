@@ -4,6 +4,7 @@
 """
 from __future__ import annotations
 
+import hashlib
 import json
 import io
 import os
@@ -23,7 +24,7 @@ from typing import Any
 from urllib.parse import quote
 
 from fastapi import APIRouter, Depends, File, Form, HTTPException, Query, UploadFile
-from fastapi.responses import FileResponse
+from fastapi.responses import FileResponse, Response
 from openai import OpenAI
 from pydantic import BaseModel, Field
 from pypdf import PdfReader
@@ -69,6 +70,49 @@ VOICE_ZH_LABELS = {
     "Eric": "四川-程川",
     "Rocky": "粤语-阿强",
     "Kiki": "粤语-阿清",
+}
+
+# 音色性别：用于前端按性别筛选。未知音色不包含在 map 中，前端显示为「全部」可选。
+VOICE_GENDER: dict[str, str] = {
+    # 千问 qwen3-tts-flash 常见音色（女声）
+    "Serena": "female",
+    "Chelsie": "female",
+    "Momo": "female",
+    "Vivian": "female",
+    "Moon": "female",
+    "Maia": "female",
+    "Bella": "female",
+    "Jennifer": "female",
+    "Katerina": "female",
+    "Cherry": "female",
+    "Ono Anna": "female",
+    "Jada": "female",
+    "Sunny": "female",
+    "Kiki": "female",
+    # 千问 男声
+    "Ethan": "male",
+    "Kai": "male",
+    "Ryan": "male",
+    "Aiden": "male",
+    "Lenn": "male",
+    "Emilien": "male",
+    "Andre": "male",
+    "Dylan": "male",
+    "Li": "male",
+    "Marcus": "male",
+    "Roy": "male",
+    "Peter": "male",
+    "Eric": "male",
+    "Rocky": "male",
+    "Nofish": "male",
+    "Radio Gol": "male",
+    # OpenAI 兼容 TTS 音色
+    "alloy": "female",
+    "echo": "male",
+    "fable": "female",
+    "onyx": "male",
+    "nova": "female",
+    "shimmer": "female",
 }
 
 _QWEN_DOC_VOICE_CACHE: dict[str, Any] = {"at": 0.0, "map": {}}
@@ -433,6 +477,13 @@ def _extract_voices_from_model_meta(data: Any) -> list[str]:
 def _voice_label_zh(voice: str) -> str:
     cn = VOICE_ZH_LABELS.get(voice)
     return f"{cn}（{voice}）" if cn else voice
+
+
+def _voice_gender(voice: str) -> str | None:
+    """返回 'male' | 'female'，未知则返回 None。"""
+    if not voice:
+        return None
+    return VOICE_GENDER.get(voice.strip())
 
 
 def _normalize_model_family(model_id: str) -> str:
@@ -1156,7 +1207,13 @@ class Stage4RunIn(BaseModel):
 class Stage5RunIn(BaseModel):
     script_file: str = "stage4/narration_script.txt"
     output_file: str = "stage5/full_narration.mp3"
-    model: str = "gpt-4o-mini-tts"
+    model: str = ""  # 空则使用 RAG 配置的默认 TTS（admin/rag 默认 TTS）
+    voice: str = "alloy"
+    speed: float = Field(default=1.0, ge=0.5, le=1.5)
+
+
+class TTSPreviewIn(BaseModel):
+    """试听请求：使用 RAG 默认 TTS，生成固定试听文案的短音频。"""
     voice: str = "alloy"
     speed: float = Field(default=1.0, ge=0.5, le=1.5)
 
@@ -1206,6 +1263,7 @@ class TTSModelOptionOut(BaseModel):
 class TTSVoiceOptionOut(BaseModel):
     value: str
     label: str
+    gender: str | None = None  # "male" | "female"，未知则为 None
 
 
 class TTSModelsOut(BaseModel):
@@ -1366,7 +1424,7 @@ async def list_tts_models(
             model_voices = model_voice_map.get(m, [])
             if model_voices:
                 voices_by_model[model_key] = [
-                    TTSVoiceOptionOut(value=v, label=_voice_label_zh(v))
+                    TTSVoiceOptionOut(value=v, label=_voice_label_zh(v), gender=_voice_gender(v))
                     for v in model_voices
                 ]
                 existing = {x.value for x in voices_by_provider_type.get(provider_type, [])}
@@ -1374,7 +1432,7 @@ async def list_tts_models(
                 for v in model_voices:
                     if v in existing:
                         continue
-                    merged.append(TTSVoiceOptionOut(value=v, label=_voice_label_zh(v)))
+                    merged.append(TTSVoiceOptionOut(value=v, label=_voice_label_zh(v), gender=_voice_gender(v)))
                     existing.add(v)
                 voices_by_provider_type[provider_type] = merged
 
@@ -1398,6 +1456,83 @@ async def list_tts_models(
         voices_by_provider_type=voices_by_provider_type,
         voices_by_model=voices_by_model,
     )
+
+
+# 试听固定文案，用于前端「试听」按钮
+TTS_PREVIEW_TEXT = "你好，这是当前音色的试听。"
+
+
+def _tts_preview_cache_dir() -> Path:
+    d = _pipeline_root() / "tts_preview_cache"
+    d.mkdir(parents=True, exist_ok=True)
+    return d
+
+
+def _tts_preview_cache_path(model_in: str, voice: str, speed: float) -> Path:
+    key = f"{model_in}|{voice}|{speed}"
+    name = hashlib.sha256(key.encode("utf-8")).hexdigest()[:32] + ".mp3"
+    return _tts_preview_cache_dir() / name
+
+
+@router.post("/tts-preview")
+async def tts_preview(
+    body: TTSPreviewIn,
+    user: User = Depends(require_teacher),
+) -> Response:
+    """使用 RAG 默认 TTS 生成试听短音频，返回 audio/mpeg。相同 model+voice+speed 会走缓存，不重复调用模型。"""
+    _ = user
+    model_in = ""
+    try:
+        from ..rag.config_store import get_default_tts
+        model_in = (get_default_tts() or "").strip()
+    except Exception:
+        pass
+    if not model_in:
+        model_in = "gpt-4o-mini-tts"
+
+    cache_path = _tts_preview_cache_path(model_in, body.voice, body.speed)
+    if cache_path.exists():
+        return Response(content=cache_path.read_bytes(), media_type="audio/mpeg")
+
+    with tempfile.NamedTemporaryFile(suffix=".mp3", delete=False) as tmp:
+        out = Path(tmp.name)
+    try:
+        provider, resolved_model_name = _resolve_provider_and_model(model_in)
+        provider_type = ((provider or {}).get("type") or "").strip()
+        if provider and provider_type == "qianwen":
+            api_key = ((provider or {}).get("api_key") or "").strip()
+            if not api_key:
+                raise HTTPException(status_code=400, detail="该模型提供商未配置 API Key")
+            base_url = ((provider or {}).get("base_url") or "").strip()
+            _qianwen_tts_to_file(
+                api_key=api_key,
+                base_url=base_url,
+                model_name=resolved_model_name,
+                text=TTS_PREVIEW_TEXT,
+                voice=body.voice,
+                out_file=out,
+            )
+        else:
+            client, model_name = _resolve_tts_client_and_model(model_in)
+            speech = client.audio.speech.create(
+                model=model_name,
+                voice=body.voice,
+                input=TTS_PREVIEW_TEXT,
+                speed=body.speed,
+            )
+            speech.stream_to_file(str(out))
+        audio_bytes = out.read_bytes()
+        cache_path.write_bytes(audio_bytes)
+        return Response(content=audio_bytes, media_type="audio/mpeg")
+    except Exception as e:
+        logger.exception("[TTS] preview failed voice=%s", body.voice)
+        raise HTTPException(status_code=400, detail=f"试听生成失败: {str(e)}") from e
+    finally:
+        if out.exists():
+            try:
+                out.unlink()
+            except Exception:
+                pass
 
 
 @router.post("/pdf-docs/{doc_id}/workflow", response_model=PipelineOut)
@@ -1730,13 +1865,22 @@ async def stage5_tts(
 
     out = _safe_workflow_file(workflow_id, body.output_file)
     out.parent.mkdir(parents=True, exist_ok=True)
+    model_in = (body.model or "").strip()
+    if not model_in:
+        try:
+            from ..rag.config_store import get_default_tts
+            model_in = (get_default_tts() or "").strip()
+        except Exception:
+            model_in = ""
+        if not model_in:
+            model_in = "gpt-4o-mini-tts"
     try:
-        provider, resolved_model_name = _resolve_provider_and_model(body.model)
+        provider, resolved_model_name = _resolve_provider_and_model(model_in)
         provider_type = ((provider or {}).get("type") or "").strip()
         logger.warning(
             "[TTS] stage5 start workflow=%s model_in=%s resolved_model=%s provider_type=%s voice=%s speed=%s",
             workflow_id,
-            body.model,
+            model_in,
             resolved_model_name,
             provider_type or "<none>",
             body.voice,
@@ -1756,7 +1900,7 @@ async def stage5_tts(
                 out_file=out,
             )
         else:
-            client, model_name = _resolve_tts_client_and_model(body.model)
+            client, model_name = _resolve_tts_client_and_model(model_in)
             speech = client.audio.speech.create(
                 model=model_name,
                 voice=body.voice,
@@ -1768,7 +1912,7 @@ async def stage5_tts(
         logger.exception(
             "[TTS] stage5 failed workflow=%s model=%s voice=%s output=%s",
             workflow_id,
-            body.model,
+            model_in,
             body.voice,
             body.output_file,
         )

@@ -222,15 +222,7 @@ RAG_RERANK_MODELS_BY_TYPE = {
 }
 RAG_TTS_MODELS_BY_TYPE = {
     "openai_compatible": ["gpt-4o-mini-tts", "gpt-4o-realtime-preview", "gpt-4o-mini", "gpt-4o", "custom"],
-    "qianwen": [
-        "qwen3-tts-instruct-flash",
-        "qwen3-tts-vd-2026-01-26",
-        "qwen3-tts-vc-2026-01-22",
-        "qwen3-tts-flash",
-        "qwen-tts",
-        "qwen-tts-latest",
-        "custom",
-    ],
+    "qianwen": ["qwen3-tts-flash", "custom"],
     "zhipu": ["glm-4-flash", "glm-4", "custom"],
 }
 

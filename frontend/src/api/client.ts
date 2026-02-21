@@ -534,9 +534,15 @@ export const api = {
             provider_type: string;
             model: string;
           }[];
-          voices_by_provider_type: Record<string, { value: string; label: string }[]>;
-          voices_by_model: Record<string, { value: string; label: string }[]>;
+          voices_by_provider_type: Record<string, { value: string; label: string; gender?: string }[]>;
+          voices_by_model: Record<string, { value: string; label: string; gender?: string }[]>;
         }>(`/teacher/pipeline/tts-models`),
+      ttsPreview: (body: { voice: string; speed: number }) =>
+        requestBlob(`/teacher/pipeline/tts-preview`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body),
+        }),
       getOrCreatePdfWorkflow: (docId: number) =>
         request<{
           workflow_id: string;
