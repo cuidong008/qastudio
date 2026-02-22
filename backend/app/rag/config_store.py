@@ -62,6 +62,7 @@ async def save_to_db(session, updates: dict[str, str | int | float | bool]) -> N
     """
     将 updates 合并进内存并写库。
     敏感键若值为 MASKED_PLACEHOLDER 或空，则不更新（保留原值）。
+    保存后清除 Embedding 实例缓存，使切换模型/类型或 API Key 后下次请求立即生效。
     """
     from ..db.models import RagConfig
 
@@ -77,6 +78,11 @@ async def save_to_db(session, updates: dict[str, str | int | float | bool]) -> N
         await session.execute(stmt)
     await session.commit()
     # 不再次 load_from_db，已在 _cache 中更新
+    try:
+        from .embedding.factory import clear_embedding_cache
+        clear_embedding_cache()
+    except Exception:
+        pass
 
 def _to_str(v: str | int | float | bool) -> str:
     if v is None:
@@ -185,3 +191,8 @@ async def save_providers_and_defaults(
         stmt = stmt.on_conflict_do_update(index_elements=["key"], set_={"value": val})
         await session.execute(stmt)
     await session.commit()
+    try:
+        from .embedding.factory import clear_embedding_cache
+        clear_embedding_cache()
+    except Exception:
+        pass
