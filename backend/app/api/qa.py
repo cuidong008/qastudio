@@ -14,6 +14,7 @@ from ..db import get_db
 from ..db.models import User, QuestionAsked, KnowledgeDocument, KnowledgePoint, Chapter
 from ..api.auth import get_current_user
 from ..services.qa_engine import answer_from_documents, answer_question, QAResponse
+from ..rag.generator import distill_answer_if_raw
 
 router = APIRouter(prefix="/qa", tags=["qa"])
 logger = logging.getLogger(__name__)
@@ -213,6 +214,12 @@ async def ask(
             answer, ppt_ref, knowledge_point, in_scope, rag_reference_doc_id, rag_reference_page = rag_ask(
                 question, course_id, chapter_id=None
             )
+            logger.warning(
+                "[RAG-TRACE] qa_api after rag_ask answer_len=%s preview=%r ppt_ref=%r",
+                len(answer or ""),
+                (answer or "")[:150],
+                ppt_ref,
+            )
             # 仅在确实没有任何引用信息时，才降级为“知识库无答案”兜底
             if "未在课程知识库" in (answer or "") and not (ppt_ref or knowledge_point):
                 logger.warning("[RAG-TRACE] qa_api_rag_miss_to_general_answer q=%r course_id=%s", question, course_id)
@@ -229,6 +236,10 @@ async def ask(
                     knowledge_point,
                     in_scope,
                 )
+            # 若答案仍像课件原文，用大模型蒸馏成针对问题的简洁回答（RAG 与非 RAG 统一）
+            logger.warning("[RAG-TRACE] qa_api before distill_answer_if_raw")
+            answer = distill_answer_if_raw(question, answer or "")
+            logger.warning("[RAG-TRACE] qa_api after distill_answer_if_raw answer_len=%s", len(answer or ""))
             question_asked_id = None
             if user:
                 rag_hit = bool(
@@ -259,10 +270,12 @@ async def ask(
                 question_asked_id=question_asked_id,
             )
         logger.warning("[RAG-TRACE] qa_api_rag_disabled_by_config course_id=%s", course_id)
-    except Exception:
+    except Exception as e:
+        logger.warning("[RAG-TRACE] qa_api rag path failed or disabled, fallback to keyword: %s", e)
         pass  # RAG 失败时回退到下方关键词检索
 
     # 从知识库检索：按课程下全部章节检索，按关键词在 content/title 中匹配（简单 LIKE）
+    logger.warning("[RAG-TRACE] qa_api using KEYWORD path (no RAG or RAG failed)")
     q_docs = select(KnowledgeDocument)
     if chapter_ids_by_course:
         q_docs = q_docs.where(KnowledgeDocument.chapter_id.in_(chapter_ids_by_course))
@@ -328,6 +341,13 @@ async def ask(
     doc_tuples = _build_doc_tuples(docs, points if not docs else None)
     if doc_tuples:
         cleaned_answer = _summarize_doc_answer(body.question, doc_tuples)
+        logger.warning(
+            "[RAG-TRACE] qa_api keyword path after _summarize_doc_answer answer_len=%s preview=%r",
+            len(cleaned_answer or ""),
+            (cleaned_answer or "")[:150],
+        )
+        # 若仍像课件原文（如 LLM 未总结或失败后用了 answer_from_documents 的截断原文），蒸馏成简洁回答
+        cleaned_answer = distill_answer_if_raw(body.question, cleaned_answer or "")
         first_ref = doc_tuples[0][1]
         first_title = doc_tuples[0][2]
         guessed_page = None

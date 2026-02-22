@@ -14,30 +14,30 @@ _TOTAL_PAGES_RE = re.compile(r"^\s*(?:共?\s*)?\d+\s*页\s*$")
 _ZH_TOKEN_RE = re.compile(r"[\u4e00-\u9fff]{2,}")
 _EN_TOKEN_RE = re.compile(r"[a-z0-9]{3,}")
 
+# 判定是否为“课件原文”而非简洁回答：含页码块、多页结构、学校/课程标题等
+_RAW_SLIDE_PAGE_MARKERS = re.compile(r"\[第\s*\d+\s*页\]")
+_RAW_SLIDE_PAGE_FULLWIDTH = re.compile(r"[【\[]\s*第\s*\d+\s*页\s*[】\]]")  # 【第1页】或 [第1页]
+_RAW_SLIDE_HEADER_HINTS = re.compile(r"(西发航空学院|Year-end\s+SUMMARY|^\d+min\s|局域网技术概述)", re.IGNORECASE | re.MULTILINE)
+_RAW_SLIDE_ANY_PAGE = re.compile(r"第\s*\d+\s*页")
+
 # 输出格式约定：模型尽量返回简洁答案；引用由上下文自动带出
 RAG_SYSTEM_PROMPT = """你是一名课程助教。请仅根据下面「课程知识库片段」回答学生问题。
 要求：
-1. 答案简洁，不超纲，仅基于给定片段。
-2. 不要在答案正文里输出“参考：xxx”、页码或文档名；引用由系统单独展示。
+1. 答案简洁，不超纲，仅基于给定片段；用 2～5 句直接回答，不要照抄课件原文。
+2. 答案正文中不要包含：页码（如 [第1页]）、学校/课程标题、日程（如 15min）、无关排版；引用由系统单独展示。
 3. 若问题与课程内容无关或无法从片段中找到依据，请回答「该问题未在课程知识库中匹配到相关内容，请结合教材与课堂 PPT 复习。」。
 4. 仅输出 JSON，不要输出其他文字。格式：
 {"answer":"...","ref_pages":[7,8]}
-- answer: 字符串
+- answer: 字符串（仅简洁回答，勿带课件结构）
 - ref_pages: 整数数组，若无法确定则 []"""
 
+# 无 chunks 时返回的引用文案（前端会展示为「参考文档：当前问题在知识库中没有参考答案」）
+NO_CHUNKS_REF = "当前问题在知识库中没有参考答案"
 
-def _extractive_fallback(chunks: list[RetrievedChunk]) -> str:
-    """
-    当检索到片段但 LLM 返回“无答案”时，使用首片段做保底摘要，
-    避免出现“明明命中了却显示无参考答案”。
-    """
-    if not chunks:
-        return ""
-    text = (chunks[0].text or "").replace("\n", " ").strip()
-    if not text:
-        return ""
-    # 控制长度，优先给出可读结论
-    return (text[:220] + "…") if len(text) > 220 else text
+_NO_CHUNKS_PROMPT = """你是一名课程助教。当前用户问题在课程知识库中没有匹配到相关内容。
+请基于通用知识用 2～5 句简短、直接回答用户问题，不要提及知识库或检索。
+
+用户问题：{question}"""
 
 
 def _clean_answer_text(answer: str) -> str:
@@ -47,6 +47,94 @@ def _clean_answer_text(answer: str) -> str:
     # 无论“参考：”出现在行首还是行中，统一剔除后续内容
     text = _REF_ANY_RE.sub("", text).strip()
     return text
+
+
+def _looks_like_raw_slide(text: str) -> bool:
+    """若答案像课件原文（含页码块、多页结构、无关标题），应交给大模型蒸馏成简洁回答。"""
+    t = (text or "").strip()
+    if not t:
+        logger.warning("[RAG-TRACE] looks_like_raw_slide: empty text -> False")
+        return False
+    # 含有 [第N页] 或 【第N页】 这类页码块
+    if _RAW_SLIDE_PAGE_MARKERS.search(t) or _RAW_SLIDE_PAGE_FULLWIDTH.search(t):
+        logger.warning("[RAG-TRACE] looks_like_raw_slide: page_markers matched -> True (len=%s)", len(t))
+        return True
+    # 含有课程/学校标题、日程等无关信息
+    if _RAW_SLIDE_HEADER_HINTS.search(t):
+        logger.warning("[RAG-TRACE] looks_like_raw_slide: header_hints matched -> True (len=%s)", len(t))
+        return True
+    # 任意“第X页”出现至少一次且篇幅较长，视为原文
+    if _RAW_SLIDE_ANY_PAGE.search(t) and len(t) > 200:
+        logger.warning("[RAG-TRACE] looks_like_raw_slide: any_page+long matched -> True (len=%s)", len(t))
+        return True
+    # 多处“第X页”
+    if len(_RAW_SLIDE_ANY_PAGE.findall(t)) >= 2:
+        logger.warning("[RAG-TRACE] looks_like_raw_slide: multi_page matched -> True (len=%s)", len(t))
+        return True
+    # 兜底：很长且同时含“页”和分段/标题感（多换行或含 [】）
+    if len(t) > 350 and "页" in t and ("第" in t or "[" in t or "【" in t):
+        logger.warning("[RAG-TRACE] looks_like_raw_slide: fallback long+page matched -> True (len=%s)", len(t))
+        return True
+    logger.warning("[RAG-TRACE] looks_like_raw_slide: no rule matched -> False (len=%s preview=%r)", len(t), t[:120])
+    return False
+
+
+def _distill_raw_content(question: str, raw_content: str, llm, max_tokens: int = 420, temperature: float = 0.3) -> str:
+    """
+    用大模型把课件原文针对用户问题提炼成简洁回答，去掉页码、标题、学校名等无用信息。
+    """
+    logger.warning("[RAG-TRACE] distill_raw_content enter raw_len=%s", len(raw_content or ""))
+    prompt = f"""你是一名课程助教。用户的问题是：「{question}」
+
+下面是从课件/PPT 中摘录的原始片段（可能包含页码标记、课件标题、学校名、日程等无关信息）。
+请仅根据该片段，针对用户问题给出简洁、直接的回答。
+要求：
+1. 去掉所有 [第N页]、学校名、课程标题、日程（如 15min）、无关排版，只保留与问题相关的知识点。
+2. 用 2～10 句中文作答，不要照抄大段原文。
+3. 不要输出「根据片段」「根据课件」等前缀，直接给答案。
+4. 若片段中确实没有与问题相关的内容，请简短说明「该片段中未直接涉及该问题」即可。
+
+【原始片段】
+{raw_content[:3200]}
+
+【简洁回答】
+"""
+    try:
+        out = llm.generate(prompt, max_tokens=max_tokens, temperature=temperature)
+        cleaned = (out or "").strip()
+        if cleaned:
+            result = _clean_answer_text(cleaned)
+            logger.warning("[RAG-TRACE] distill_raw_content success result_len=%s", len(result))
+            return result
+    except Exception as e:
+        logger.warning("[RAG-TRACE] distill_raw_content_failed: %s", e)
+    logger.warning("[RAG-TRACE] distill_raw_content fallback to truncated raw")
+    return _clean_answer_text(raw_content[:500] + "…") if len((raw_content or "").strip()) > 500 else _clean_answer_text(raw_content or "")
+
+
+def distill_answer_if_raw(question: str, answer: str) -> str:
+    """
+    若 answer 像课件原文则用大模型蒸馏成简洁回答，否则原样返回。
+    供 RAG 与非 RAG 路径统一使用。
+    """
+    a = answer or ""
+    logger.warning("[RAG-TRACE] distill_answer_if_raw enter answer_len=%s preview=%r", len(a), a[:150])
+    if not _looks_like_raw_slide(a):
+        logger.warning("[RAG-TRACE] distill_answer_if_raw skip (not raw_slide) return as-is")
+        return a.strip()
+    logger.warning("[RAG-TRACE] distill_answer_if_raw calling _distill_raw_content")
+    try:
+        settings = get_rag_settings()
+        llm = get_llm(settings)
+        return _distill_raw_content(
+            question, answer or "", llm,
+            max_tokens=min(getattr(settings, "llm_max_tokens", 512), 420),
+            temperature=getattr(settings, "llm_temperature", 0.3),
+        )
+    except Exception as e:
+        logger.warning("[RAG-TRACE] distill_answer_if_raw_failed: %s", e)
+        logger.warning("[RAG-TRACE] distill_answer_if_raw return original answer on error")
+        return (answer or "").strip()
 
 
 def _extract_json_obj(raw: str) -> dict | None:
@@ -201,29 +289,43 @@ def generate_answer(
     返回 (answer, ppt_ref, knowledge_point, in_scope)。
     """
     settings = get_rag_settings()
-    if not chunks:
-        return (
-            "当前问题未在课程知识库中匹配到相关内容，请换一种问法或限定章节后再试。建议结合教材与课堂 PPT 复习。",
-            None,
-            None,
-            True,
-            None,
-            None,
-        )
-    prompt = build_prompt(question, chunks)
     llm = get_llm(settings)
+    logger.warning("[RAG-TRACE] generate_answer enter chunks=%s question=%r", len(chunks or []), (question or "")[:80])
+    if not chunks:
+        logger.warning("[RAG-TRACE] generate_answer no_chunks -> using LLM for answer, ref=%s", NO_CHUNKS_REF)
+        prompt = _NO_CHUNKS_PROMPT.format(question=question)
+        raw = llm.generate(
+            prompt,
+            max_tokens=min(settings.llm_max_tokens, 360),
+            temperature=settings.llm_temperature,
+        )
+        answer = _clean_answer_text((raw or "").strip()) or "请结合教材与课堂 PPT 复习。"
+        logger.warning("[RAG-TRACE] generate_answer no_chunks done answer_len=%s", len(answer))
+        return (answer, NO_CHUNKS_REF, None, True, None, None)
+    prompt = build_prompt(question, chunks)
     raw = llm.generate(
         prompt,
         max_tokens=settings.llm_max_tokens,
         temperature=settings.llm_temperature,
     )
     answer, llm_pages = _parse_structured_llm_output(raw)
-    if "未在课程知识库" in answer:
-        fallback = _extractive_fallback(chunks)
-        if fallback:
-            logger.warning("[RAG-TRACE] generator_llm_miss_use_extractive_fallback")
-            answer = fallback
-    answer = _clean_answer_text(answer)
+    logger.warning(
+        "[RAG-TRACE] generate_answer after_parse answer_len=%s preview=%r",
+        len(answer or ""),
+        (answer or "")[:180],
+    )
+    looks_raw = _looks_like_raw_slide(answer)
+    logger.warning("[RAG-TRACE] generate_answer looks_like_raw_slide=%s", looks_raw)
+    # 若答案仍像课件原文（页码、标题等），用大模型蒸馏成针对问题的简洁回答
+    if looks_raw:
+        logger.warning("[RAG-TRACE] generate_answer doing distill (answer_looks_like_raw_slide)")
+        answer = _distill_raw_content(
+            question, answer, llm,
+            max_tokens=min(settings.llm_max_tokens, 420),
+            temperature=settings.llm_temperature,
+        )
+        answer = _clean_answer_text(answer)
+        logger.warning("[RAG-TRACE] generate_answer after_distill answer_len=%s", len(answer or ""))
     # 从最高分 chunk 取引用信息
     best = chunks[0]
     meta = best.metadata or {}
