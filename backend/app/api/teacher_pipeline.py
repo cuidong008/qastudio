@@ -912,16 +912,26 @@ def _qianwen_tts_to_file(
             raise RuntimeError(f"音频合并失败（ffmpeg rc={proc.returncode}）: {(proc.stderr or '')[:500]}")
 
 
+# 阶段2 PPT 大纲生成：送入 LLM 的教材文本最大字符数（受上下文长度限制，可酌情调大）
+_STAGE2_INPUT_TEXT_MAX_CHARS = 1000000
+
+
 def _llm_generate_slides(text: str, max_slides: int = 20) -> list[dict[str, Any]]:
     from ..rag.config import get_rag_settings
     from ..rag.llm import get_llm
 
     system = (
-        "你是教学PPT助手。请根据教材文本生成教学幻灯片内容。"
-        "输出 JSON 数组，每项包含 slide_no(int), title(str), bullets(str[]), notes(str)。"
-        f"总页数不超过 {max_slides}。bullets 每页 3~5 条，notes 为讲解备注。"
+        "你是教学PPT助手。请根据教材文本生成教学幻灯片内容。\n"
+        "要求：\n"
+        "1) 每一页的 title 必须是你根据该页内容**概括出的知识点短语**（例如「二叉树的三种遍历」「牛顿第一定律」），不要使用「第X页」「## 标题」等页码或 Markdown 格式。bullets 和 notes 是该知识点的讲解、要点或实例。若某知识点内容较多，可拆成多页。\n"
+        "2) **实例与例题**：若教材中有例题、示例、案例，必须在 bullets 或 notes 中写出**实例的完整内容**（如题目条件、关键步骤、结论或要点），便于学生直接看懂，不要只写「例题」「见教材」「示例见上文」等条目而无具体内容。可单独一页「XX 例题」或「应用示例」，把题目与解题要点都写进该页的 bullets/notes。\n"
+        "3) 输出 JSON 数组，每项包含 slide_no(int), title(str), bullets(str[]), notes(str)。bullets 每页 3~5 条，notes 为讲解备注。\n"
+        f"4) 总页数**最多**不超过 {max_slides} 页，为上限；根据内容需要决定实际页数，不必凑满。"
     )
-    prompt = f"{system}\n\n教材文本：\n{text[:12000]}"
+    input_text = text[: _STAGE2_INPUT_TEXT_MAX_CHARS]
+    if len(text) > _STAGE2_INPUT_TEXT_MAX_CHARS:
+        input_text += "\n\n[注：以上为教材节选，因长度限制已截断，请基于已给内容生成。]"
+    prompt = f"{system}\n\n教材文本：\n{input_text}"
     settings = get_rag_settings()
     raw = get_llm(settings).generate(
         prompt,
@@ -936,7 +946,12 @@ def _llm_generate_slides(text: str, max_slides: int = 20) -> list[dict[str, Any]
         raise RuntimeError("LLM 输出格式不正确")
     slides: list[dict[str, Any]] = []
     for i, item in enumerate(data[:max_slides], start=1):
-        title = str(item.get("title") or "").strip()[:40] or f"教学要点{i}"
+        title = str(item.get("title") or "").strip()
+        # 去掉 Markdown 标题符、页码式标题，避免 LLM 误输出 "## 第93页"
+        title = re.sub(r"^#+\s*", "", title).strip()
+        if re.match(r"^第\s*\d+\s*页\s*$", title) or not title or len(title) < 2:
+            title = f"教学要点{i}"
+        title = title[:40]
         bullets = item.get("bullets") if isinstance(item.get("bullets"), list) else []
         bullets_clean = [str(x).strip()[:80] for x in bullets if str(x).strip()][:5]
         notes = str(item.get("notes") or "").strip()[:500]
@@ -1912,7 +1927,13 @@ async def stage4_generate_script(
     seg_file = _safe_workflow_file(workflow_id, body.output_segments_file)
     seg_file.parent.mkdir(parents=True, exist_ok=True)
     seg_file.write_text(json.dumps(scripts, ensure_ascii=False, indent=2), encoding="utf-8")
-    merged = "\n\n".join([f"[第{x['slide_no']}页]\n{x['script']}" for x in scripts]) + "\n"
+    # 用 PPT 每页标题作为讲解稿中的分页标记，无标题时退回「第X页」
+    title_by_slide = {s["slide_no"]: (s.get("title") or f"第{s['slide_no']}页") for s in segments}
+    parts = []
+    for x in scripts:
+        label = title_by_slide.get(x["slide_no"]) or ("第%d页" % x["slide_no"])
+        parts.append(f"[{label}]\n{x['script']}")
+    merged = "\n\n".join(parts) + "\n"
     script_file = _safe_workflow_file(workflow_id, body.output_script_file)
     script_file.parent.mkdir(parents=True, exist_ok=True)
     script_file.write_text(merged, encoding="utf-8")

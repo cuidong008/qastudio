@@ -11,6 +11,19 @@ from .base import BaseEmbedding
 logger = logging.getLogger(__name__)
 
 
+def _apply_hf_endpoint() -> None:
+    """若 RAG 配置中设置了 Hugging Face 镜像，则设置 HF_ENDPOINT（国内可用 hf-mirror.com）"""
+    try:
+        from ..config import get_rag_settings
+        s = get_rag_settings()
+        endpoint = (getattr(s, "hf_endpoint", None) or "").strip()
+        if endpoint:
+            os.environ["HF_ENDPOINT"] = endpoint.rstrip("/")
+            logger.info("[RAG-EMBED] 使用 Hugging Face 镜像: %s", os.environ["HF_ENDPOINT"])
+    except Exception:
+        pass
+
+
 def _cache_roots() -> list[str]:
     roots: list[str] = []
     for key in ("SENTENCE_TRANSFORMERS_HOME", "HF_HOME", "TRANSFORMERS_CACHE"):
@@ -45,34 +58,51 @@ def _is_repo_cached(repo_id: str) -> bool:
     return False
 
 
+def _load_sentence_transformer(model_name: str, local_files_only: bool):
+    from sentence_transformers import SentenceTransformer
+    if local_files_only:
+        return SentenceTransformer(model_name, model_kwargs={"local_files_only": True})
+    return SentenceTransformer(model_name)
+
+
 class BuiltinEmbedding(BaseEmbedding):
     def __init__(self, model_name: str = "paraphrase-multilingual-MiniLM-L12-v2"):
         try:
-            from sentence_transformers import SentenceTransformer
+            from sentence_transformers import SentenceTransformer  # noqa: F401
         except ImportError:
             raise ImportError(
                 "builtin embedding 需要安装 sentence-transformers: pip install sentence-transformers"
             )
+        _apply_hf_endpoint()
         cache_roots = _cache_roots()
         model_name = (model_name or "").strip()
         is_local_path = "/" in model_name and Path(model_name).expanduser().exists()
         repo_cached_before = _is_repo_cached(model_name) if (model_name and not is_local_path) else False
+        use_local_only = is_local_path or repo_cached_before
 
         logger.warning(
-            "[RAG-EMBED] 内置 Embedding 加载开始 model=%s is_local_path=%s cache_roots=%s",
+            "[RAG-EMBED] 内置 Embedding 加载开始 model=%s is_local_path=%s use_local_only=%s cache_roots=%s",
             model_name,
             is_local_path,
+            use_local_only,
             cache_roots,
         )
         if not is_local_path:
             if repo_cached_before:
-                logger.warning("[RAG-EMBED] 检测到本地已有缓存，将直接加载 model=%s", model_name)
+                logger.warning("[RAG-EMBED] 检测到本地已有缓存，将仅从本地加载不请求 Hugging Face model=%s", model_name)
             else:
                 logger.warning("[RAG-EMBED] 未检测到本地缓存，若网络可用将开始下载 model=%s", model_name)
 
         start = time.perf_counter()
         try:
-            self._model = SentenceTransformer(model_name)
+            if use_local_only:
+                try:
+                    self._model = _load_sentence_transformer(model_name, local_files_only=True)
+                except Exception as e1:
+                    logger.warning("[RAG-EMBED] 仅本地加载失败，尝试联网加载 model=%s error=%s", model_name, e1)
+                    self._model = _load_sentence_transformer(model_name, local_files_only=False)
+            else:
+                self._model = _load_sentence_transformer(model_name, local_files_only=False)
             self._dim = self._model.get_sentence_embedding_dimension()
             repo_cached_after = _is_repo_cached(model_name) if (model_name and not is_local_path) else False
             elapsed = time.perf_counter() - start

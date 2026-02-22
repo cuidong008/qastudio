@@ -31,6 +31,8 @@ class RAGSettings(BaseSettings):
     embedding_dim: int = 384  # builtin 或外部模型维度需一致
     # builtin：本地模型名（sentence-transformers）
     embedding_builtin_model: str = "paraphrase-multilingual-MiniLM-L12-v2"
+    # Hugging Face 镜像（仅影响 builtin 从 HF 下载模型），国内可填 https://hf-mirror.com
+    hf_endpoint: str = ""
     # external：OpenAI 兼容或指定厂商
     embedding_external_api_key: str = ""
     embedding_external_base_url: str = ""
@@ -186,6 +188,10 @@ def _resolve_from_providers() -> dict:
     return overlay
 
 
+# 仅从 .env 读取的 key，不随 Web 配置存库（如 Hugging Face 镜像）
+_ENV_ONLY_KEYS = frozenset({"hf_endpoint"})
+
+
 def get_rag_settings() -> RAGSettings:
     """优先使用 Web 界面（数据库）中的配置；若配置了模型提供商与默认模型则据此解析，否则用传统 key 与 .env"""
     defaults = RAGSettings().model_dump()
@@ -194,6 +200,8 @@ def get_rag_settings() -> RAGSettings:
         if is_loaded():
             db = get_all()
             for key, val in db.items():
+                if key in _ENV_ONLY_KEYS:
+                    continue  # hf_endpoint 等仅从 .env 读取
                 if key in defaults and val is not None and str(val).strip() != "":
                     defaults[key] = _coerce(str(val), key)
             # 若存在提供商与默认模型，则用其覆盖 llm / embedding 相关项

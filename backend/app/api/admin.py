@@ -4,11 +4,15 @@ import logging
 
 from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
 from pydantic import BaseModel
-from sqlalchemy import select
+from sqlalchemy import delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
-from ..db.models import User, UserRole, Class, Course, Teaching, Chapter, CourseReindexTask
+from ..db.models import (
+    User, UserRole, Class, Course, Teaching, Chapter, CourseReindexTask,
+    QuestionGenerationTask, DocumentProcessTask, ReviewRecord,
+    CourseQuestionSynonym, QuestionAsked,
+)
 from ..api.auth import require_admin
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
 from ..services.course_knowledge_service import clear_course_knowledge
@@ -699,8 +703,36 @@ async def delete_course(
     c = r.scalar_one_or_none()
     if not c:
         raise HTTPException(status_code=404, detail="课程不存在")
+    r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id))
+    chapter_ids = [row[0] for row in r_ch.all()]
+    # 先删依赖 chapter 的任务表（含 doc_id 引用 knowledge_documents），再删章节关联数据，最后删章节
+    if chapter_ids:
+        await db.execute(delete(QuestionGenerationTask).where(QuestionGenerationTask.chapter_id.in_(chapter_ids)))
+        await db.execute(delete(DocumentProcessTask).where(DocumentProcessTask.chapter_id.in_(chapter_ids)))
+        await db.execute(delete(ReviewRecord).where(ReviewRecord.chapter_id.in_(chapter_ids)))
+    await db.flush()
+    for ch_id in chapter_ids:
+        await cleanup_chapter_related_data(db, ch_id)
+    await db.flush()
+    if chapter_ids:
+        await db.execute(delete(Chapter).where(Chapter.id.in_(chapter_ids)))
+    await db.execute(delete(Chapter).where(Chapter.course_id == course_id))
+    await db.flush()
+    logger.info("delete_course_chapters course_id=%s chapter_ids=%s", course_id, chapter_ids)
+    await db.execute(delete(Teaching).where(Teaching.course_id == course_id))
+    await db.execute(delete(CourseQuestionSynonym).where(CourseQuestionSynonym.course_id == course_id))
+    await db.execute(update(Class).where(Class.course_id == course_id).values(course_id=None))
+    await db.execute(update(QuestionAsked).where(QuestionAsked.course_id == course_id).values(course_id=None))
+    await db.execute(delete(CourseReindexTask).where(CourseReindexTask.course_id == course_id))
     await db.delete(c)
     await db.commit()
+    try:
+        from ..rag.config import get_rag_settings
+        from ..rag.store.chroma_store import ChromaVectorStore
+        store = ChromaVectorStore(get_rag_settings())
+        store.delete_by_course(course_id)
+    except Exception as e:
+        logger.warning("delete_course_vector_cleanup_skipped course_id=%s err=%s", course_id, str(e)[:200])
     return {"ok": True}
 
 
@@ -780,8 +812,12 @@ async def clear_course_knowledge_endpoint(
         raise HTTPException(status_code=404, detail="课程不存在")
     stats = await clear_course_knowledge(db, course_id)
     await db.commit()
-    from ..services.rag_index_service import build_index_for_course
-    chunks = await build_index_for_course(db, course_id)
+    chunks = 0
+    try:
+        from ..services.rag_index_service import build_index_for_course
+        chunks = await build_index_for_course(db, course_id)
+    except Exception as e:
+        logger.warning("clear_knowledge_reindex_skipped course_id=%s err=%s", course_id, str(e)[:300])
     return {"ok": True, "stats": stats, "chunks_indexed": chunks}
 
 

@@ -154,6 +154,7 @@ export default function TeacherCourses() {
   const notifiedQuestionTaskIdsRef = useRef<Set<number>>(new Set());
   const questionTaskByChapterRef = useRef<Record<number, { taskId: number; status: string }>>({});
   const reindexTaskByCourseRef = useRef<Record<number, { taskId: number; status: string }>>({});
+  const listRef = useRef<CourseItem[]>([]);
   const aliveRef = useRef(true);
 
   useEffect(() => {
@@ -167,6 +168,10 @@ export default function TeacherCourses() {
   }, [questionTaskByChapter]);
 
   useEffect(() => {
+    listRef.current = list;
+  }, [list]);
+
+  useEffect(() => {
     reindexTaskByCourseRef.current = reindexTaskByCourse;
   }, [reindexTaskByCourse]);
 
@@ -175,9 +180,10 @@ export default function TeacherCourses() {
     if (pollingReindexTaskIdsRef.current.has(taskId)) return;
     pollingReindexTaskIdsRef.current.add(taskId);
     const maxPoll = 180;
+    const pollIntervalMs = 2000;
     try {
       for (let i = 0; i < maxPoll; i += 1) {
-        await new Promise((r) => setTimeout(r, 2000));
+        if (i > 0) await new Promise((r) => setTimeout(r, pollIntervalMs));
         if (!aliveRef.current) return;
         try {
           const task = await api.teacher.courses.getReindexTask(taskId);
@@ -218,6 +224,12 @@ export default function TeacherCourses() {
         notifiedReindexTaskIdsRef.current.add(taskId);
         toast("重建索引任务仍在处理中，请稍后再看。");
       }
+      setReindexTaskByCourse((prev) => {
+        if (prev[courseId]?.taskId !== taskId) return prev;
+        const next = { ...prev };
+        delete next[courseId];
+        return next;
+      });
     } finally {
       pollingReindexTaskIdsRef.current.delete(taskId);
     }
@@ -261,6 +273,7 @@ export default function TeacherCourses() {
           }
         })
       );
+      const courseIdsInList = new Set(listRef.current.map((c) => c.id));
       setReindexTaskByCourse((prev) => {
         const next = { ...prev };
         Object.keys(next).forEach((k) => {
@@ -269,15 +282,16 @@ export default function TeacherCourses() {
           if ((item?.status === "pending" || item?.status === "running") && !activeByCourse[courseId]) {
             delete next[courseId];
           }
+          if (!courseIdsInList.has(courseId)) delete next[courseId];
         });
         Object.keys(activeByCourse).forEach((k) => {
           const courseId = Number(k);
-          next[courseId] = activeByCourse[courseId];
+          if (courseIdsInList.has(courseId)) next[courseId] = activeByCourse[courseId];
         });
         return next;
       });
       activeTasks.forEach((t) => {
-        void pollReindexTask(t.course_id, t.task_id);
+        if (courseIdsInList.has(t.course_id)) void pollReindexTask(t.course_id, t.task_id);
       });
     } catch {
       // ignore active task recovery failure
@@ -287,10 +301,12 @@ export default function TeacherCourses() {
   const recoverCachedReindexTasks = async () => {
     const cached = readCachedReindexTasks();
     if (cached.length === 0) return;
+    const courseIdsInList = new Set(listRef.current.map((c) => c.id));
     await Promise.all(
       cached.map(async (item) => {
         try {
           const task = await api.teacher.courses.getReindexTask(item.taskId);
+          if (!courseIdsInList.has(task.course_id)) return;
           if (task.status === "pending" || task.status === "running") {
             setReindexTaskByCourse((prev) => ({
               ...prev,
@@ -434,6 +450,7 @@ export default function TeacherCourses() {
       .list()
       .then(async (rows) => {
         setList(rows);
+        listRef.current = rows;
         await recoverCachedReindexTasks();
         await syncActiveReindexTasks();
         await recoverCachedQuestionTasks();
@@ -800,7 +817,7 @@ export default function TeacherCourses() {
                         className="btn-ghost"
                         style={{ marginRight: 8, color: "var(--danger, #c00)" }}
                         onClick={() => doClearKnowledge(c.id, c.name)}
-                        disabled={!!reindexTaskByCourse[c.id] || clearingId !== null}
+                        disabled={clearingId !== null}
                       >
                         {clearingId === c.id ? "清理中…" : "一键清理"}
                       </button>
