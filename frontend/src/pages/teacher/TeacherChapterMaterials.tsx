@@ -250,9 +250,42 @@ export default function TeacherChapterMaterials() {
           toast("处理失败，可点击“查看失败日志”。", "error");
           return;
         }
+        if (task.status === "cancelled") {
+          setDocTaskByDoc((prev) => {
+            const next = { ...prev };
+            delete next[docId];
+            return next;
+          });
+          await loadChapterDocuments(chapterId);
+          if (selectedDocId === docId) {
+            await api.teacher.courses.documentDetail(docId).then(setDocDetail).catch(() => undefined);
+          }
+          toast("任务已停止。", "success");
+          return;
+        }
       } catch {
         // ignore
       }
+    }
+  };
+
+  const cancelDocumentTask = async (docId: number) => {
+    const entry = docTaskByDoc[docId];
+    if (!entry || (entry.status !== "pending" && entry.status !== "running")) return;
+    try {
+      await api.teacher.courses.cancelDocumentProcessTask(entry.taskId);
+      setDocTaskByDoc((prev) => {
+        const next = { ...prev };
+        delete next[docId];
+        return next;
+      });
+      await loadChapterDocuments(chapterId);
+      if (selectedDocId === docId) {
+        await api.teacher.courses.documentDetail(docId).then(setDocDetail).catch(() => undefined);
+      }
+      toast("已发送停止请求，任务将在当前步骤结束后停止。");
+    } catch (e: any) {
+      toast(e?.message || "停止任务失败", "error");
     }
   };
 
@@ -336,25 +369,38 @@ export default function TeacherChapterMaterials() {
                       {docDetail.source_type === "preview_video" ? "播放视频" : "查看PDF"}
                     </button>
                     {docDetail.source_type !== "preview_video" && (
-                      <button
-                        type="button"
-                        className="btn-ghost"
-                        onClick={() => reprocessDocument(docDetail.id)}
-                        disabled={
-                          docUploading ||
-                          statusPollingDocIds[docDetail.id] ||
+                      <>
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          onClick={() => reprocessDocument(docDetail.id)}
+                          disabled={
+                            docUploading ||
+                            statusPollingDocIds[docDetail.id] ||
+                            effectiveStatus === "processing" ||
+                            docTaskByDoc[docDetail.id]?.status === "pending" ||
+                            docTaskByDoc[docDetail.id]?.status === "running"
+                          }
+                        >
+                          {statusPollingDocIds[docDetail.id] ||
                           effectiveStatus === "processing" ||
                           docTaskByDoc[docDetail.id]?.status === "pending" ||
                           docTaskByDoc[docDetail.id]?.status === "running"
-                        }
-                      >
-                        {statusPollingDocIds[docDetail.id] ||
-                        effectiveStatus === "processing" ||
-                        docTaskByDoc[docDetail.id]?.status === "pending" ||
-                        docTaskByDoc[docDetail.id]?.status === "running"
-                          ? "处理中…"
-                          : "重新识别+切片+重建索引"}
-                      </button>
+                            ? "处理中…"
+                            : "重新识别+切片+重建索引"}
+                        </button>
+                        {(docTaskByDoc[docDetail.id]?.status === "pending" ||
+                          docTaskByDoc[docDetail.id]?.status === "running") && (
+                          <button
+                            type="button"
+                            className="btn-ghost"
+                            style={{ color: "var(--danger, #c00)" }}
+                            onClick={() => cancelDocumentTask(docDetail.id)}
+                          >
+                            停止任务
+                          </button>
+                        )}
+                      </>
                     )}
                     {effectiveError && (
                       <button

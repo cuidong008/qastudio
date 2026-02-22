@@ -455,6 +455,17 @@ export const api = {
           created_at: string | null;
           updated_at: string | null;
         }>(`/teacher/documents/tasks/${taskId}`),
+      cancelDocumentProcessTask: (taskId: number) =>
+        request<{
+          id: number;
+          course_id: number;
+          chapter_id: number;
+          doc_id: number;
+          status: string;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/teacher/documents/tasks/${taskId}/cancel`, { method: "POST" }),
       documentFileUrl: (docId: number) => `${API_BASE}/teacher/documents/${docId}/file`,
     },
     classes: {

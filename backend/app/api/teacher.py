@@ -41,6 +41,39 @@ router = APIRouter(prefix="/teacher", tags=["teacher"])
 logger = logging.getLogger(__name__)
 DOC_PROCESS_TASK_STALE_MINUTES = 30
 
+# 文档处理任务运行时状态（内存）：重启后为空，不持久化
+_document_task_running: set[int] = set()
+_document_task_cancelled: set[int] = set()
+
+
+async def reset_document_process_tasks_on_startup() -> None:
+    """应用启动时将 DB 中未完成的任务标为已取消，避免重启后仍显示「处理中」。"""
+    async with AsyncSessionLocal() as db:
+        r = await db.execute(
+            select(DocumentProcessTask).where(
+                DocumentProcessTask.status.in_(["pending", "running"])
+            )
+        )
+        tasks = r.scalars().all()
+        if not tasks:
+            return
+        msg = "服务重启已中断"
+        for t in tasks:
+            t.status = "cancelled"
+            t.error_message = msg
+        doc_ids = [t.doc_id for t in tasks]
+        rdoc = await db.execute(
+            select(KnowledgeDocument).where(
+                KnowledgeDocument.id.in_(doc_ids),
+                KnowledgeDocument.parse_status == "processing",
+            )
+        )
+        for d in rdoc.scalars().all():
+            d.parse_status = "failed"
+            d.parse_error = (d.parse_error or "").strip() or msg
+        await db.commit()
+        logger.info("document_process_tasks_reset_on_startup count=%s doc_ids=%s", len(tasks), doc_ids)
+
 
 class ConfigChapterIn(BaseModel):
     chapter_id: int
@@ -1499,16 +1532,8 @@ def _pdf_extract_text_with_external_vlm(
     return output, page_count
 
 
-async def _parse_pdf_document_and_reindex(
-    *,
-    db: AsyncSession,
-    doc: KnowledgeDocument,
-    chapter: Chapter,
-    course: Course,
-    file_binary: bytes,
-    file_name: str,
-) -> None:
-    """解析 PDF 文档并触发课程索引重建；异常由调用方统一处理并回写状态。"""
+def _extract_pdf_text(file_binary: bytes, file_name: str) -> tuple[str, int | None]:
+    """仅做 PDF 文本提取，不访问 DB。返回 (extracted_text, total_pages)，失败时抛出 HTTPException。"""
     engine = (settings.pdf_parse_engine or "mineru_then_pypdf").strip().lower()
     prefer_chinese = bool(re.search(r"[\u4e00-\u9fff]", file_name or "")) or (settings.mineru_lang or "").startswith("ch")
     default_pdf_parser = ""
@@ -1518,14 +1543,8 @@ async def _parse_pdf_document_and_reindex(
     except Exception:
         default_pdf_parser = ""
     logger.info(
-        "doc_parse_start chapter_id=%s course_id=%s doc_id=%s file=%s size=%s engine=%s default_pdf_parser=%s",
-        chapter.id,
-        course.id,
-        doc.id,
-        file_name,
-        len(file_binary),
-        engine,
-        bool(default_pdf_parser),
+        "doc_parse_start file=%s size=%s engine=%s default_pdf_parser=%s",
+        file_name, len(file_binary), engine, bool(default_pdf_parser),
     )
     extracted_text = ""
     total_pages: int | None = None
@@ -1540,9 +1559,7 @@ async def _parse_pdf_document_and_reindex(
             )
             logger.info(
                 "doc_parse_external_vlm_ok file=%s text_len=%s pages=%s",
-                file_name,
-                len((extracted_text or "").strip()),
-                total_pages,
+                file_name, len((extracted_text or "").strip()), total_pages,
             )
         except Exception as e:
             logger.warning("doc_parse_external_vlm_failed file=%s err=%s", file_name, str(e))
@@ -1596,9 +1613,7 @@ async def _parse_pdf_document_and_reindex(
                     if len(fallback_text.strip()) > len(extracted_text.strip()):
                         logger.info(
                             "doc_parse_use_pypdf_better_text file=%s mineru_len=%s pypdf_len=%s",
-                            file_name,
-                            len(extracted_text.strip()),
-                            len(fallback_text.strip()),
+                            file_name, len(extracted_text.strip()), len(fallback_text.strip()),
                         )
                         extracted_text, total_pages = fallback_text, fallback_pages
                 except Exception:
@@ -1612,9 +1627,7 @@ async def _parse_pdf_document_and_reindex(
                     mineru_errors.append(str(e))
     logger.info(
         "doc_parse_result file=%s text_len=%s pages=%s usable=%s",
-        file_name,
-        len((extracted_text or "").strip()),
-        total_pages,
+        file_name, len((extracted_text or "").strip()), total_pages,
         _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese),
     )
     if not _looks_like_useful_text(extracted_text, prefer_chinese=prefer_chinese):
@@ -1630,7 +1643,20 @@ async def _parse_pdf_document_and_reindex(
         extra = f"；最后错误: {mineru_errors[-1][:220]}{hint_text}" if mineru_errors else ""
         logger.error("doc_parse_failed_no_text file=%s extra=%s", file_name, extra)
         raise HTTPException(status_code=400, detail=f"未提取到可用文本，请检查 PDF 或 OCR 配置{extra}")
+    return extracted_text, total_pages
 
+
+async def _parse_pdf_document_and_reindex(
+    *,
+    db: AsyncSession,
+    doc: KnowledgeDocument,
+    chapter: Chapter,
+    course: Course,
+    file_binary: bytes,
+    file_name: str,
+) -> None:
+    """解析 PDF 文档并触发课程索引重建；异常由调用方统一处理并回写状态。"""
+    extracted_text, total_pages = _extract_pdf_text(file_binary, file_name)
     doc.content = extracted_text
     doc.page_ref = f"{total_pages}页" if total_pages else None
     doc.parse_error = None
@@ -2418,90 +2444,196 @@ async def list_generate_teacher_chapter_questions_active_tasks(
     ]
 
 
+def _is_document_task_cancelled(task_id: int) -> bool:
+    return task_id in _document_task_cancelled
+
+
 async def _run_document_process_task(task_id: int):
+    """文档处理任务：先用短事务标记「处理中」并读取文件，再在无 DB 占用下做解析，最后用新 session 写回并建索引，避免长时间占用 SQLite 导致其他请求 database is locked。"""
+    doc_id: int | None = None
+    course_id: int | None = None
+    file_binary: bytes | None = None
+    file_name = ""
+
     async with AsyncSessionLocal() as db:
         r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
         task = r.scalar_one_or_none()
         if not task:
             logger.warning("doc_task_missing task_id=%s", task_id)
             return
+        if _is_document_task_cancelled(task_id):
+            logger.info("doc_task_skipped_cancelled task_id=%s", task_id)
+            return
         logger.info(
             "doc_task_start task_id=%s doc_id=%s chapter_id=%s course_id=%s teacher_id=%s",
-            task.id,
-            task.doc_id,
-            task.chapter_id,
-            task.course_id,
-            task.teacher_id,
+            task.id, task.doc_id, task.chapter_id, task.course_id, task.teacher_id,
         )
         task.status = "running"
         task.error_message = None
         await db.commit()
+        _document_task_running.add(task_id)
 
-        doc: KnowledgeDocument | None = None
-        try:
-            r_doc = await db.execute(
-                select(KnowledgeDocument, Chapter, Course)
-                .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
-                .join(Course, Course.id == Chapter.course_id)
-                .where(
-                    KnowledgeDocument.id == task.doc_id,
-                    Chapter.id == task.chapter_id,
-                    Course.id == task.course_id,
-                    Course.owner_teacher_id == task.teacher_id,
-                )
+        r_doc = await db.execute(
+            select(KnowledgeDocument, Chapter, Course)
+            .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
+            .join(Course, Course.id == Chapter.course_id)
+            .where(
+                KnowledgeDocument.id == task.doc_id,
+                Chapter.id == task.chapter_id,
+                Course.id == task.course_id,
+                Course.owner_teacher_id == task.teacher_id,
             )
-            row = r_doc.first()
-            if not row:
-                raise RuntimeError("文档不存在或无权限")
-            doc, chapter, course = row[0], row[1], row[2]
-            logger.info("doc_task_loaded task_id=%s doc_id=%s file=%s", task.id, doc.id, doc.file_name)
-            if doc.source_type != "pdf_upload":
-                raise RuntimeError("仅 PDF 讲义支持重新识别与切片")
-            if not doc.file_path:
-                raise RuntimeError("文档原文件不存在，无法重新识别")
-            abs_path = Path(settings.upload_dir) / doc.file_path
-            if not abs_path.exists():
-                raise RuntimeError("文档文件不存在，无法重新识别")
-            binary = abs_path.read_bytes()
-            if not binary:
-                raise RuntimeError("文档文件为空，无法重新识别")
-            doc.parse_status = "processing"
-            doc.parse_error = None
-            doc.chunk_count = None
-            await db.commit()
-            logger.info("doc_task_parse_begin task_id=%s doc_id=%s path=%s", task.id, doc.id, str(abs_path))
-
-            await _parse_pdf_document_and_reindex(
-                db=db,
-                doc=doc,
-                chapter=chapter,
-                course=course,
-                file_binary=binary,
-                file_name=doc.file_name or doc.title or abs_path.name,
-            )
-            task.status = "success"
-            task.result_payload = json.dumps(
-                {
-                    "doc_id": doc.id,
-                    "parse_status": doc.parse_status,
-                    "chunk_count": doc.chunk_count,
-                },
-                ensure_ascii=False,
-            )
-            task.error_message = None
-            logger.info("doc_task_success task_id=%s doc_id=%s chunk_count=%s", task.id, doc.id, doc.chunk_count)
-        except Exception as e:
-            if isinstance(e, HTTPException):
-                err_msg = e.detail if isinstance(e.detail, str) else str(e.detail)
-            else:
-                err_msg = str(e)
+        )
+        row = r_doc.first()
+        if not row:
             task.status = "failed"
-            task.error_message = err_msg[:4000]
-            logger.exception("doc_task_failed task_id=%s doc_id=%s err=%s", task.id, task.doc_id, err_msg[:500])
-            if doc is not None:
-                doc.parse_status = "failed"
-                doc.parse_error = err_msg[:500]
+            task.error_message = "文档不存在或无权限"
+            await db.commit()
+            _document_task_running.discard(task_id)
+            return
+        doc, chapter, course = row[0], row[1], row[2]
+        logger.info("doc_task_loaded task_id=%s doc_id=%s file=%s", task.id, doc.id, doc.file_name)
+        if doc.source_type != "pdf_upload":
+            task.status = "failed"
+            task.error_message = "仅 PDF 讲义支持重新识别与切片"
+            await db.commit()
+            _document_task_running.discard(task_id)
+            return
+        if not doc.file_path:
+            task.status = "failed"
+            task.error_message = "文档原文件不存在，无法重新识别"
+            await db.commit()
+            _document_task_running.discard(task_id)
+            return
+        abs_path = Path(settings.upload_dir) / doc.file_path
+        if not abs_path.exists():
+            task.status = "failed"
+            task.error_message = "文档文件不存在，无法重新识别"
+            await db.commit()
+            _document_task_running.discard(task_id)
+            return
+        binary = abs_path.read_bytes()
+        if not binary:
+            task.status = "failed"
+            task.error_message = "文档文件为空，无法重新识别"
+            await db.commit()
+            _document_task_running.discard(task_id)
+            return
+        doc.parse_status = "processing"
+        doc.parse_error = None
+        doc.chunk_count = None
         await db.commit()
+        doc_id = doc.id
+        course_id = course.id
+        file_binary = binary
+        file_name = doc.file_name or doc.title or abs_path.name
+    # 此处 DB 已释放，后续解析与索引构建不会长时间占用 SQLite
+
+    if _is_document_task_cancelled(task_id):
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
+            t = r.scalar_one_or_none()
+            if t:
+                t.status = "cancelled"
+                t.error_message = "用户取消"
+            rdoc = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
+            d = rdoc.scalar_one_or_none()
+            if d:
+                d.parse_status = "failed"
+                d.parse_error = "用户取消"
+            await db.commit()
+        _document_task_running.discard(task_id)
+        logger.info("doc_task_cancelled task_id=%s doc_id=%s", task_id, doc_id)
+        return
+
+    try:
+        extracted_text, total_pages = _extract_pdf_text(file_binary, file_name)
+    except Exception as e:
+        err_msg = (e.detail if isinstance(e, HTTPException) and isinstance(e.detail, str) else str(e))
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
+            t = r.scalar_one_or_none()
+            if t:
+                t.status = "failed"
+                t.error_message = err_msg[:4000]
+            rdoc = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
+            d = rdoc.scalar_one_or_none()
+            if d:
+                d.parse_status = "failed"
+                d.parse_error = err_msg[:500]
+            await db.commit()
+        _document_task_running.discard(task_id)
+        logger.exception("doc_task_failed task_id=%s doc_id=%s err=%s", task_id, doc_id, err_msg[:500])
+        return
+    logger.info("doc_task_parse_begin task_id=%s doc_id=%s path=%s", task_id, doc_id, file_name)
+
+    if _is_document_task_cancelled(task_id):
+        async with AsyncSessionLocal() as db:
+            r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
+            t = r.scalar_one_or_none()
+            if t:
+                t.status = "cancelled"
+                t.error_message = "用户取消"
+            rdoc = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
+            d = rdoc.scalar_one_or_none()
+            if d:
+                d.parse_status = "failed"
+                d.parse_error = "用户取消"
+            await db.commit()
+        _document_task_running.discard(task_id)
+        logger.info("doc_task_cancelled task_id=%s doc_id=%s", task_id, doc_id)
+        return
+
+    async with AsyncSessionLocal() as db:
+        try:
+            rdoc = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
+            doc = rdoc.scalar_one_or_none()
+            if not doc:
+                raise RuntimeError("文档不存在")
+            doc.content = extracted_text
+            doc.page_ref = f"{total_pages}页" if total_pages else None
+            doc.parse_error = None
+            doc.parse_status = "done"
+            from ..rag import ChunkDocument
+            from ..rag.chunking import chunk_documents
+            preview_chunks = chunk_documents(
+                [ChunkDocument(text=(doc.content or "").strip(), course_id=course_id, chapter_id=doc.chapter_id, title=doc.title, source_id=f"doc_{doc.id}")]
+            )
+            doc.chunk_count = len(preview_chunks)
+            from ..services.rag_index_service import build_index_for_course
+            try:
+                await build_index_for_course(db, course_id)
+            except Exception as idx_err:
+                logger.exception("doc_reindex_failed file=%s course_id=%s doc_id=%s", file_name, course_id, doc_id)
+                tip = f"索引失败: {str(idx_err)[:240]}"
+                doc.parse_error = f"{doc.parse_error}；{tip}" if doc.parse_error else tip
+            r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
+            t = r.scalar_one_or_none()
+            if t:
+                t.status = "success"
+                t.result_payload = json.dumps(
+                    {"doc_id": doc.id, "parse_status": doc.parse_status, "chunk_count": doc.chunk_count},
+                    ensure_ascii=False,
+                )
+                t.error_message = None
+            await db.commit()
+            _document_task_running.discard(task_id)
+            logger.info("doc_task_success task_id=%s doc_id=%s chunk_count=%s", task_id, doc_id, doc.chunk_count)
+        except Exception as e:
+            err_msg = (e.detail if isinstance(e, HTTPException) and isinstance(e.detail, str) else str(e))
+            logger.exception("doc_task_failed task_id=%s doc_id=%s err=%s", task_id, doc_id, err_msg[:500])
+            r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
+            t = r.scalar_one_or_none()
+            if t:
+                t.status = "failed"
+                t.error_message = err_msg[:4000]
+            rdoc = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
+            d = rdoc.scalar_one_or_none()
+            if d:
+                d.parse_status = "failed"
+                d.parse_error = err_msg[:500]
+            await db.commit()
+            _document_task_running.discard(task_id)
 
 
 def _run_document_process_task_thread(task_id: int):
@@ -2512,6 +2644,7 @@ def _run_document_process_task_thread(task_id: int):
         logger.info("doc_task_thread_end task_id=%s", task_id)
     except Exception:
         logger.exception("doc_task_thread_crash task_id=%s", task_id)
+        _document_task_running.discard(task_id)
 
 
 def _parse_numeric_id_csv(value: str | None) -> list[int]:
@@ -2948,6 +3081,15 @@ async def get_reprocess_teacher_document_task(
     task = r.scalar_one_or_none()
     if not task:
         raise HTTPException(status_code=404, detail="任务不存在")
+    # 内存优先：已取消或重启后未在运行中的任务不再显示为处理中
+    if task_id in _document_task_cancelled:
+        status, err = "cancelled", (task.error_message or "已取消")
+    elif task_id in _document_task_running:
+        status, err = task.status, task.error_message
+    elif task.status in ("pending", "running"):
+        status, err = "cancelled", "任务已停止或服务已重启"
+    else:
+        status, err = task.status, task.error_message
     req_payload = {}
     res_payload = None
     try:
@@ -2963,13 +3105,30 @@ async def get_reprocess_teacher_document_task(
         course_id=task.course_id,
         chapter_id=task.chapter_id,
         doc_id=task.doc_id,
-        status=task.status,
+        status=status,
         request_payload=req_payload,
         result_payload=res_payload,
-        error_message=task.error_message,
+        error_message=err,
         created_at=task.created_at.isoformat() if task.created_at else None,
         updated_at=task.updated_at.isoformat() if task.updated_at else None,
     )
+
+
+@router.post("/documents/tasks/{task_id}/cancel", response_model=TeacherDocumentProcessTaskStatusOut)
+async def cancel_reprocess_teacher_document_task(
+    task_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """停止正在进行的文档处理任务（仅内存标记，后台会在下次检查点退出）。"""
+    r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id, DocumentProcessTask.teacher_id == user.id))
+    task = r.scalar_one_or_none()
+    if not task:
+        raise HTTPException(status_code=404, detail="任务不存在")
+    if task.status not in ("pending", "running"):
+        return await get_reprocess_teacher_document_task(task_id, db, user)
+    _document_task_cancelled.add(task_id)
+    return await get_reprocess_teacher_document_task(task_id, db, user)
 
 
 @router.get("/documents/{doc_id}/file")

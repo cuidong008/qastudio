@@ -1,13 +1,28 @@
 """数据库会话"""
-from sqlalchemy import text
+from sqlalchemy import event, text
 from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession, async_sessionmaker
 from .models import Base
 from ..config import settings
 
+# SQLite 并发：延长锁等待时间，避免 PDF 解析/索引构建占用连接时其他请求报 database is locked
+_connect_args = {}
+if "sqlite" in settings.database_url:
+    _connect_args["timeout"] = 120  # 秒，等待锁的最长时间
+
 engine = create_async_engine(
     settings.database_url,
     echo=settings.debug,
+    connect_args=_connect_args,
 )
+
+# SQLite：在连接创建时（无事务）启用 WAL，不能在事务内执行 PRAGMA journal_mode
+if "sqlite" in settings.database_url:
+
+    @event.listens_for(engine.sync_engine, "connect")
+    def _set_sqlite_wal(dbapi_conn, _connection_record):
+        # 新连接尚未进入事务，此时才能改 journal_mode
+        dbapi_conn.execute("PRAGMA journal_mode=WAL")
+
 AsyncSessionLocal = async_sessionmaker(engine, class_=AsyncSession, expire_on_commit=False)
 
 

@@ -12,6 +12,12 @@ from .api import auth, chapters, questions, preview, qa, teacher, ppt, feedback,
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     await init_db()
+    # 文档处理任务：将 DB 中未完成任务标为已取消，重启后不再显示「处理中」
+    try:
+        from .api.teacher import reset_document_process_tasks_on_startup
+        await reset_document_process_tasks_on_startup()
+    except Exception:
+        pass
     # 加载 Web 界面配置的 RAG 到内存（数据库优先于 .env）
     try:
         from .rag.config_store import load_from_db

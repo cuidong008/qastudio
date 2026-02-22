@@ -11,6 +11,7 @@ from ..config import settings
 from ..db.models import (
     AnswerRecord,
     ChapterConfig,
+    DocumentProcessTask,
     KnowledgeDocument,
     KnowledgePoint,
     PptFile,
@@ -76,6 +77,9 @@ async def cleanup_chapter_related_data(db: AsyncSession, chapter_id: int) -> dic
     stats["chapter_configs"] = (
         await db.execute(delete(ChapterConfig).where(ChapterConfig.chapter_id == chapter_id))
     ).rowcount or 0
+
+    # 章节级文档处理任务随章节删除
+    await db.execute(delete(DocumentProcessTask).where(DocumentProcessTask.chapter_id == chapter_id))
 
     if ppt_ids:
         stats["ppt_slides"] = (
