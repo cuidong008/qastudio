@@ -1,14 +1,22 @@
 import { createContext, useContext, useEffect, useState, ReactNode } from "react";
 import { api, setToken, clearToken } from "./client";
 
-type User = { id: number; username: string; role: string; display_name: string | null; avatar_url: string | null };
+type User = {
+  id: number;
+  username: string;
+  role: string;
+  display_name: string | null;
+  student_no: string | null;
+  avatar_url: string | null;
+  username_changed_at: string | null;
+};
 
 const AuthContext = createContext<{
   user: User | null;
   loading: boolean;
   login: (username: string, password: string) => Promise<User>;
   logout: () => void;
-  updateProfile: (payload: { display_name?: string | null; avatar_url?: string | null }) => Promise<User>;
+  updateProfile: (payload: { display_name?: string | null; avatar_url?: string | null; username?: string | null }) => Promise<User>;
   changePassword: (currentPassword: string, newPassword: string) => Promise<void>;
 }>(null!);
 
@@ -34,7 +42,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setUser(null);
   };
 
-  const updateProfile = async (payload: { display_name?: string | null; avatar_url?: string | null }): Promise<User> => {
+  const updateProfile = async (payload: { display_name?: string | null; avatar_url?: string | null; username?: string | null }): Promise<User> => {
     const updated = await api.auth.updateProfile(payload);
     const next = updated as User;
     setUser(next);

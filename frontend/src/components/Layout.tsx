@@ -1,5 +1,5 @@
 import { ReactNode, useEffect } from "react";
-import { Link, useLocation, useNavigate } from "react-router-dom";
+import { NavLink, useLocation, useNavigate } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
 const nav = [
@@ -28,7 +28,7 @@ export default function Layout({
     requireAuth && !user
       ? "/login"
       : requireAuth && user && user.role !== role
-        ? user.role === "teacher"
+        ? (user.role === "teacher" || user.role === "teaching_leader")
           ? "/teacher"
           : "/student/inclass"
         : null;
@@ -62,9 +62,9 @@ export default function Layout({
           {!isStudent && (
             <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
               {nav.map(({ to, label }) => (
-                <Link key={to} to={to} className="nav-link">
-                  {label}
-                </Link>
+                <NavLink key={to} to={to} className="nav-link">
+                  <span>{label}</span>
+                </NavLink>
               ))}
             </nav>
           )}

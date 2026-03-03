@@ -3,6 +3,7 @@ import asyncio
 import base64
 import csv
 import difflib
+import html
 import io
 import json
 import logging
@@ -12,10 +13,13 @@ import re
 import subprocess
 import tempfile
 import time
+import zipfile
 from datetime import datetime, timedelta
 from pathlib import Path
+from urllib.parse import quote_plus
+from urllib.request import Request, urlopen
 
-from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, BackgroundTasks
+from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, BackgroundTasks, Form
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
 from pydantic import BaseModel, Field
@@ -28,18 +32,24 @@ from ..db.session import AsyncSessionLocal
 from ..db.models import (
     User, Class, Course, Chapter, Teaching, UserRole,
     StudentClassMembership,
-    Question, KnowledgePoint, KnowledgeDocument, PreviewRecord,
-    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask, DocumentProcessTask, CourseReindexTask,
-    ReviewRecord,
+    Question, KnowledgePoint, KnowledgeDocument, DocumentChapter, PreviewRecord,
+    AnswerRecord, QuestionAsked, ChapterConfig, CourseQuestionSynonym, QuestionGenerationTask, DocumentProcessTask, CourseReindexTask, Paper, PaperFile,
+    ReviewRecord, StudentFeedback,
 )
 from ..api.auth import require_teacher
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
 from ..services.course_knowledge_service import clear_course_knowledge
 from ..services.course_reindex_task_service import run_course_reindex_task_thread
+from ..services.difficulty import difficulty_from_score
 
 router = APIRouter(prefix="/teacher", tags=["teacher"])
 logger = logging.getLogger(__name__)
 DOC_PROCESS_TASK_STALE_MINUTES = 30
+
+
+def _is_teacher_scoped(user: User) -> bool:
+    """教师或教研组长：仅能操作自己名下的数据；admin 可看全部"""
+    return user.role in (UserRole.teacher.value, UserRole.teaching_leader.value)
 
 # 文档处理任务运行时状态（内存）：重启后为空，不持久化
 _document_task_running: set[int] = set()
@@ -92,11 +102,128 @@ class ChapterConfigOut(BaseModel):
     question_limit: int | None
 
 
+class PaperGenerateDefaultRowOut(BaseModel):
+    """生成试卷页「题型数量&难度配置」表格一行的默认值（无 id）"""
+    type: str  # single_choice | multiple_choice | judge | blank | qa
+    count: int
+    difficulty: str
+    score: float
+
+
+class ExerciseGenerateDefaultRowOut(BaseModel):
+    """生成习题页「题目类型配置」表格一行的默认值（最大数量、难度系数）"""
+    type: str  # single_choice | multiple_choice | judge | blank | qa
+    max: int
+    difficulty: str
+
+
+@router.get("/config/exercise-generate-defaults", response_model=list[ExerciseGenerateDefaultRowOut])
+async def get_exercise_generate_defaults(
+    user: User = Depends(require_teacher),
+):
+    """获取生成习题页「题目类型配置」表格的默认行（最大数量、难度系数由后台配置）"""
+    s = settings
+    return [
+        ExerciseGenerateDefaultRowOut(
+            type="single_choice",
+            max=s.exercise_default_single_choice_max,
+            difficulty=s.exercise_default_difficulty,
+        ),
+        ExerciseGenerateDefaultRowOut(
+            type="multiple_choice",
+            max=s.exercise_default_multiple_choice_max,
+            difficulty=s.exercise_default_difficulty,
+        ),
+        ExerciseGenerateDefaultRowOut(
+            type="judge",
+            max=s.exercise_default_judge_max,
+            difficulty=s.exercise_default_difficulty,
+        ),
+        ExerciseGenerateDefaultRowOut(
+            type="blank",
+            max=s.exercise_default_blank_max,
+            difficulty=s.exercise_default_difficulty,
+        ),
+        ExerciseGenerateDefaultRowOut(
+            type="qa",
+            max=s.exercise_default_qa_max,
+            difficulty=s.exercise_default_difficulty,
+        ),
+    ]
+
+
 class StatsOverviewOut(BaseModel):
     preview_completion_rate: float
-    top_asked: list[dict]
+    preview_student_count: int = 0  # 有预习记录的学生数（去重）
+    completed_question_count: int = 0  # 完成习题数（作答记录数）
+    feedback_question_count: int = 0  # 反馈问题数（按课程/班级筛选）
+    top_asked: list[dict]  # 每项含 question, count, course_id (可选)
     answer_accuracy_rate: float
+    ai_irrelevant_count: int = 0  # AI无关问题数：答疑未命中课程知识库的提问条数（rag_hit=False）
     weak_knowledge_points: list[str]
+    weak_knowledge_point_course_ids: list[int | None] = []  # 与 weak_knowledge_points 同序，每条对应课程 id
+    weak_knowledge_point_wrong_counts: list[int] = []  # 与 weak_knowledge_points 同序，每条错题次数
+
+
+class StatsByCourseStudentRowOut(BaseModel):
+    """学情课程统计详细表一行：按课程+学生维度，班级名称来自教师管理且关联该课程、该学生为其成员的班级"""
+    course_id: int
+    course_name: str
+    student_id: int
+    student_no: str
+    student_name: str
+    class_name: str  # 从 teacher/classes 关联：该课程下、该学生所属的班级名称
+    preview_rate: str  # 该学生在该课程下的预习完成率（课程维度），如 "85.0%"
+    preview_completed_chapter_ids: list[int] = []  # 该学生在该课程下已完成预习的章节 id 列表，学情章节表按「本章是否完成」显示 100% 或 0%
+    completed_question_count: int
+    completed_question_count_by_chapter: list[dict] = []  # 学情章节表用：按章节的完成习题数，[{"chapter_id": int, "count": int}]
+    correct_question_count_by_chapter: list[dict] = []  # 学情章节表用：按章节的正确习题数，[{"chapter_id": int, "count": int}]，用于计算每章正确率
+    accuracy_rate: str  # 如 "92.1%" 或 "—"
+    feedback_question_count: int
+    ai_ask_count: int
+    ai_irrelevant_count: int
+    weak_knowledge_points: str  # 学情课程表：按「课程+学生」维度的高频薄弱知识点，多条用 "; " 连接
+    weak_knowledge_points_by_chapter: list[dict] = []  # 学情章节表：按「课程+章节+学生」维度，[{"chapter_id": int, "weak_knowledge_points": str}]
+
+
+@router.get("/config/paper-generate-defaults", response_model=list[PaperGenerateDefaultRowOut])
+async def get_paper_generate_defaults(
+    user: User = Depends(require_teacher),
+):
+    """获取生成试卷页「题型数量&难度配置」表格的默认行（数量、难度、每题分数由后台配置）"""
+    s = settings
+    return [
+        PaperGenerateDefaultRowOut(
+            type="single_choice",
+            count=s.paper_default_single_choice_count,
+            difficulty=s.paper_default_difficulty,
+            score=s.paper_default_single_choice_score,
+        ),
+        PaperGenerateDefaultRowOut(
+            type="multiple_choice",
+            count=s.paper_default_multiple_choice_count,
+            difficulty=s.paper_default_difficulty,
+            score=s.paper_default_multiple_choice_score,
+        ),
+        PaperGenerateDefaultRowOut(
+            type="judge",
+            count=s.paper_default_judge_count,
+            difficulty=s.paper_default_difficulty,
+            score=s.paper_default_judge_score,
+        ),
+        PaperGenerateDefaultRowOut(
+            type="blank",
+            count=s.paper_default_blank_count,
+            difficulty=s.paper_default_difficulty,
+            score=s.paper_default_blank_score,
+        ),
+        PaperGenerateDefaultRowOut(
+            type="qa",
+            count=s.paper_default_qa_count,
+            difficulty=s.paper_default_difficulty,
+            score=s.paper_default_qa_score,
+        ),
+    ]
 
 
 @router.get("/config/chapters", response_model=list[ChapterConfigOut])
@@ -106,7 +233,7 @@ async def list_chapter_configs(
 ):
     """获取所有章节及其配置（用于教师端配置页）"""
     chapter_qry = select(Chapter).order_by(Chapter.order_index, Chapter.id)
-    if user.role == UserRole.teacher.value:
+    if _is_teacher_scoped(user):
         chapter_qry = (
             select(Chapter)
             .join(Course, Course.id == Chapter.course_id)
@@ -141,7 +268,7 @@ async def config_chapter(
 ):
     """持久化章节配置：预习开关、难度筛选、题量限制"""
     chapter_qry = select(Chapter).where(Chapter.id == body.chapter_id)
-    if user.role == UserRole.teacher.value:
+    if _is_teacher_scoped(user):
         chapter_qry = (
             select(Chapter)
             .join(Course, Course.id == Chapter.course_id)
@@ -176,6 +303,7 @@ class TeacherCourseOut(BaseModel):
     name: str
     code: str | None
     description: str | None
+    remark: str | None = None
     is_active: bool
     owner_teacher_id: int | None
     created_at: str | None
@@ -185,6 +313,7 @@ class TeacherCourseCreateIn(BaseModel):
     name: str
     code: str | None = None
     description: str | None = None
+    remark: str | None = Field(default=None, max_length=128)
     is_active: bool = True
 
 
@@ -192,6 +321,7 @@ class TeacherCourseUpdateIn(BaseModel):
     name: str | None = None
     code: str | None = None
     description: str | None = None
+    remark: str | None = Field(default=None, max_length=128)
     is_active: bool | None = None
 
 
@@ -246,6 +376,120 @@ class TeacherGenerateQuestionsIn(BaseModel):
     judge_max: int = Field(default=0, ge=0, le=30)
     qa_max: int = Field(default=0, ge=0, le=30)
     blank_max: int = Field(default=0, ge=0, le=30)
+    question_bank_type: str = Field(default="training", min_length=1, max_length=20)
+    single_choice_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    multiple_choice_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    judge_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    qa_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    blank_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    knowledge_point_ids: list[int] = Field(default_factory=list)
+
+
+class TeacherPaperGenerateConfigIn(BaseModel):
+    type: str = Field(min_length=1, max_length=32)
+    count: int = Field(default=0, ge=0, le=200)
+    difficulty: float | None = Field(default=None, ge=0, le=1, multiple_of=0.01)
+    score: float = Field(default=0, ge=0, le=100)
+
+
+class TeacherGeneratePaperIn(BaseModel):
+    course_id: int
+    chapter_ids: list[int] = Field(default_factory=list, min_length=1)
+    paper_title: str = Field(min_length=1, max_length=128)
+    paper_bank_type: str = Field(default="training", min_length=1, max_length=20)  # training | formal
+    question_source: str = Field(default="local", min_length=1, max_length=20)  # local | internet
+    overall_difficulty: float | None = Field(default=None, ge=0, le=1, multiple_of=0.01)
+    configs: list[TeacherPaperGenerateConfigIn] = Field(default_factory=list, min_length=1)
+    save_to_bank: bool = True
+
+
+class TeacherPaperInsufficientOut(BaseModel):
+    question_type: str
+    requested: int
+    available: int
+    missing: int
+
+
+class TeacherPaperPreviewQuestionOut(BaseModel):
+    question_type: str
+    question_text: str
+    options: list[str] = []
+    correct_answer: str
+    explanation: str | None = None
+    difficulty_score: float
+    score: float
+    source: str  # local | internet
+
+
+class TeacherGeneratePaperOut(BaseModel):
+    ok: bool = True
+    paper_id: int | None = None
+    status: str
+    is_partial: bool
+    message: str
+    insufficient_types: list[TeacherPaperInsufficientOut] = []
+    preview_questions: list[TeacherPaperPreviewQuestionOut] = []
+    total_score: float
+    overall_difficulty: float
+
+
+class TeacherPaperListItemOut(BaseModel):
+    id: int
+    course_id: int
+    course_name: str
+    title: str
+    paper_type: str  # electronic | file
+    paper_bank_type: str
+    question_source: str
+    status: str
+    review_status: str  # pending | reviewed
+    is_partial: bool
+    total_score: float
+    overall_difficulty: float
+    chapter_ids: list[int] = []
+    created_at: str | None
+    updated_at: str | None
+
+
+class TeacherPaperDetailOut(TeacherPaperListItemOut):
+    request_payload: dict
+    content_payload: dict | None
+    error_message: str | None
+
+
+class TeacherPaperUpdateIn(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=128)
+    status: str | None = Field(default=None, min_length=1, max_length=24)
+    paper_bank_type: str | None = Field(default=None, min_length=1, max_length=20)
+    question_source: str | None = Field(default=None, min_length=1, max_length=20)
+    total_score: float | None = Field(default=None, ge=0)
+    overall_difficulty: float | None = Field(default=None, ge=0, le=1)
+    request_payload: dict | None = None
+    content_payload: dict | None = None
+    error_message: str | None = None
+
+
+class TeacherPaperPageOut(BaseModel):
+    items: list[TeacherPaperListItemOut]
+    total: int
+    page: int
+    page_size: int
+
+
+class TeacherPaperBatchDeleteIn(BaseModel):
+    paper_ids: list[int] = Field(min_length=1)
+
+
+class TeacherPaperBatchDeleteOut(BaseModel):
+    ok: bool = True
+    deleted: int
+
+
+class TeacherPaperFileOut(BaseModel):
+    id: int
+    paper_id: int
+    file_name: str
+    created_at: str | None
 
 
 class TeacherGenerateTaskOut(BaseModel):
@@ -283,7 +527,7 @@ class TeacherDocumentProcessTaskOut(BaseModel):
 class TeacherDocumentProcessTaskStatusOut(BaseModel):
     id: int
     course_id: int
-    chapter_id: int
+    chapter_id: int | None
     doc_id: int
     status: str
     request_payload: dict
@@ -324,11 +568,17 @@ class TeacherQuestionOut(BaseModel):
     chapter_id: int
     chapter_title: str
     question_type: str
+    question_bank_type: str
     difficulty: str
+    difficulty_score: float
     question_text: str
     options: str | None
     correct_answer: str
     explanation: str | None
+    remark: str | None
+    is_approved: bool
+    generated_time: str | None
+    edited_time: str | None
     knowledge_point_ids: str | None
     knowledge_points: list[str] = []
     created_at: str | None
@@ -336,10 +586,55 @@ class TeacherQuestionOut(BaseModel):
 
 class TeacherQuestionUpdateIn(BaseModel):
     difficulty: str | None = None
+    question_bank_type: str | None = None
+    difficulty_score: float | None = Field(default=None, ge=0, le=1, multiple_of=0.01)
     question_text: str | None = None
     options: list[str] | None = None
     correct_answer: str | None = None
     explanation: str | None = None
+    remark: str | None = Field(default=None, max_length=128)
+    is_approved: bool | None = None
+    knowledge_point_ids: list[int] | None = None
+
+
+class TeacherImportQuestionPreviewItemOut(BaseModel):
+    chapter_id: int | None = None
+    chapter_title: str | None = None
+    question_type: str
+    question_text: str
+    options: list[str] = []
+    correct_answer: str
+    explanation: str | None = None
+    difficulty_score: float | None = None  # 0~1，识别不到则为 None
+
+
+class TeacherImportQuestionsPreviewOut(BaseModel):
+    course_id: int
+    chapter_ids: list[int]
+    question_bank_type: str
+    parsed_count: int
+    items: list[TeacherImportQuestionPreviewItemOut]
+
+
+class TeacherImportConfirmItemIn(BaseModel):
+    chapter_id: int
+    question_type: str
+    question_text: str
+    options: list[str] = []
+    correct_answer: str
+    explanation: str | None = None
+    difficulty_score: float | None = None
+
+
+class TeacherImportConfirmIn(BaseModel):
+    course_id: int
+    question_bank_type: str = "training"
+    items: list[TeacherImportConfirmItemIn]
+
+
+class TeacherImportConfirmOut(BaseModel):
+    imported_count: int
+    message: str
 
 
 class TeacherDocumentChunkOut(BaseModel):
@@ -350,6 +645,7 @@ class TeacherDocumentChunkOut(BaseModel):
 class TeacherKnowledgeDocumentOut(BaseModel):
     id: int
     chapter_id: int | None
+    course_id: int | None = None
     source_type: str
     title: str
     page_ref: str | None
@@ -358,6 +654,9 @@ class TeacherKnowledgeDocumentOut(BaseModel):
     parse_status: str | None
     parse_error: str | None
     chunk_count: int | None
+    student_visible: bool = True
+    downloadable: bool = True
+    chapter_ids: list[int] = []
     created_at: str | None
 
 
@@ -394,6 +693,7 @@ class TeacherStudentOut(BaseModel):
     username: str
     student_no: str | None
     display_name: str | None
+    admin_class_or_dept: str | None = None
 
 
 class TeacherClassStudentsAssignIn(BaseModel):
@@ -430,17 +730,32 @@ async def _require_owned_chapter(db: AsyncSession, teacher_id: int, chapter_id: 
     return row[0], row[1]
 
 
-async def _require_owned_document(db: AsyncSession, teacher_id: int, doc_id: int) -> tuple[KnowledgeDocument, Chapter, Course]:
-    r = await db.execute(
-        select(KnowledgeDocument, Chapter, Course)
-        .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
-        .join(Course, Course.id == Chapter.course_id)
-        .where(KnowledgeDocument.id == doc_id, Course.owner_teacher_id == teacher_id)
-    )
-    row = r.first()
-    if not row:
-        raise HTTPException(status_code=404, detail="文档不存在或无权限")
-    return row[0], row[1], row[2]
+async def _require_owned_document(db: AsyncSession, teacher_id: int, doc_id: int) -> tuple[KnowledgeDocument, Chapter | None, Course]:
+    r = await db.execute(select(KnowledgeDocument).where(KnowledgeDocument.id == doc_id))
+    doc = r.scalar_one_or_none()
+    if not doc:
+        raise HTTPException(status_code=404, detail="文档不存在")
+    if doc.chapter_id is not None:
+        r2 = await db.execute(
+            select(Chapter, Course)
+            .join(Course, Course.id == Chapter.course_id)
+            .where(Chapter.id == doc.chapter_id, Course.owner_teacher_id == teacher_id)
+        )
+        row2 = r2.first()
+        if not row2:
+            raise HTTPException(status_code=404, detail="文档不存在或无权限")
+        return doc, row2[0], row2[1]
+    if doc.course_id is not None:
+        r3 = await db.execute(
+            select(Course).where(Course.id == doc.course_id, Course.owner_teacher_id == teacher_id)
+        )
+        course = r3.scalar_one_or_none()
+        if not course:
+            raise HTTPException(status_code=404, detail="文档不存在或无权限")
+        ch_result = await db.execute(select(Chapter).where(Chapter.course_id == doc.course_id).order_by(Chapter.order_index).limit(1))
+        first_ch = ch_result.scalar_one_or_none()
+        return doc, first_ch, course
+    raise HTTPException(status_code=404, detail="文档不存在或无权限")
 
 
 def _is_document_task_stale(task: DocumentProcessTask) -> bool:
@@ -604,6 +919,142 @@ def _normalize_difficulty(value: object) -> str:
     return "basic"
 
 
+def _normalize_question_bank_type(value: object) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"training", "train", "训练库"}:
+        return "training"
+    if s in {"exam", "考试用题库", "考试题库"}:
+        return "exam"
+    return "training"
+
+
+def _normalize_paper_bank_type(value: object) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"training", "train", "训练库"}:
+        return "training"
+    if s in {"formal", "exam", "正式题库", "正式库"}:
+        return "formal"
+    return "training"
+
+
+def _normalize_question_source(value: object) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"internet", "web", "online", "互联网", "联网"}:
+        return "internet"
+    return "local"
+
+
+def _normalize_paper_status(value: object) -> str:
+    s = str(value or "").strip().lower()
+    if s in {"reviewed", "已审核", "generated", "已生成"}:
+        return "reviewed"
+    if s in {"pending", "待审核", "partial", "未完全生成", "部分生成", "failed", "失败"}:
+        return "pending"
+    return "pending"
+
+
+def _normalize_difficulty_score(value: object, default: float = 0.8) -> float:
+    try:
+        x = float(value)
+    except Exception:
+        return float(default)
+    if x < 0:
+        x = 0.0
+    if x > 1:
+        x = 1.0
+    return round(float(x), 2)
+
+
+def _parse_question_options(options_raw: object) -> list[str]:
+    if options_raw is None:
+        return []
+    if isinstance(options_raw, list):
+        values = options_raw
+    else:
+        try:
+            parsed = json.loads(str(options_raw))
+            values = parsed if isinstance(parsed, list) else []
+        except Exception:
+            return []
+    out: list[str] = []
+    for item in values:
+        s = str(item or "").strip()
+        if not s:
+            continue
+        out.append(s)
+    return out
+
+
+def _strip_html_tags(text: str) -> str:
+    s = re.sub(r"<[^>]+>", " ", text or "")
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def _duckduckgo_search_snippets(query: str, max_items: int = 5, timeout_sec: float = 8.0) -> list[str]:
+    q = (query or "").strip()
+    if not q:
+        return []
+    url = f"https://duckduckgo.com/html/?q={quote_plus(q)}"
+    req = Request(
+        url=url,
+        headers={
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0 Safari/537.36"
+        },
+    )
+    try:
+        with urlopen(req, timeout=timeout_sec) as resp:
+            html = resp.read().decode("utf-8", errors="ignore")
+    except Exception:
+        return []
+    blocks = re.findall(r'<a[^>]*class="[^"]*result__a[^"]*"[^>]*>([\s\S]*?)</a>[\s\S]{0,1200}?<a[^>]*class="[^"]*result__snippet[^"]*"[^>]*>([\s\S]*?)</a>', html, flags=re.I)
+    out: list[str] = []
+    for title_html, snippet_html in blocks:
+        title = _strip_html_tags(title_html)
+        snippet = _strip_html_tags(snippet_html)
+        if not (title or snippet):
+            continue
+        merged = f"{title}：{snippet}".strip("：")
+        if merged:
+            out.append(merged[:300])
+        if len(out) >= max_items:
+            break
+    return out
+
+
+def _build_web_search_queries(course_name: str, chapter_title: str, kp_rows: list[tuple[int, str, str | None]]) -> list[str]:
+    queries: list[str] = []
+    base = f"{course_name} {chapter_title} 题目 习题"
+    queries.append(base.strip())
+    for _, kp_title, _ in kp_rows[:6]:
+        t = (kp_title or "").strip()
+        if not t:
+            continue
+        queries.append(f"{course_name} {chapter_title} {t} 练习题".strip())
+    seen: set[str] = set()
+    out: list[str] = []
+    for q in queries:
+        k = _normalize_text_key(q)
+        if not k or k in seen:
+            continue
+        seen.add(k)
+        out.append(q)
+    return out[:8]
+
+
+async def _build_online_search_context(course_name: str, chapter_title: str, kp_rows: list[tuple[int, str, str | None]]) -> str:
+    queries = _build_web_search_queries(course_name, chapter_title, kp_rows)
+    if not queries:
+        return ""
+    context_parts: list[str] = []
+    for q in queries:
+        snippets = await asyncio.to_thread(_duckduckgo_search_snippets, q, 4, 8.0)
+        if not snippets:
+            continue
+        context_parts.append(f"联网检索关键词：{q}\n" + "\n".join([f"- {x}" for x in snippets]))
+    return "\n\n".join(context_parts).strip()
+
+
 def _difficulty_limits(total: int) -> dict[str, int]:
     if total <= 0:
         return {"basic": 0, "applied": 0, "extended": 0}
@@ -753,6 +1204,12 @@ def _build_generate_questions_prompt(
     judge_max: int,
     qa_max: int,
     blank_max: int,
+    question_bank_type: str,
+    single_choice_difficulty_score: float,
+    multiple_choice_difficulty_score: float,
+    judge_difficulty_score: float,
+    qa_difficulty_score: float,
+    blank_difficulty_score: float,
     diff_basic_target: int,
     diff_applied_target: int,
     diff_extended_target: int,
@@ -766,6 +1223,13 @@ def _build_generate_questions_prompt(
 - judge(判断题)：最多 {judge_max} 题
 - qa(问答题)：最多 {qa_max} 题
 - blank(填空题)：最多 {blank_max} 题
+题库类型：{question_bank_type}
+各题型目标难度系数（0~1，越大越难）：
+- single_choice：{single_choice_difficulty_score}
+- multiple_choice：{multiple_choice_difficulty_score}
+- judge：{judge_difficulty_score}
+- qa：{qa_difficulty_score}
+- blank：{blank_difficulty_score}
 难度目标（尽量贴近）：
 - basic(基础)：约 {diff_basic_target} 题
 - applied(应用)：约 {diff_applied_target} 题
@@ -1099,6 +1563,9 @@ async def _ensure_each_kp_has_question(
     existing_keys: set[str],
     created_by_type: dict[str, int],
     created_by_diff: dict[str, int],
+    question_bank_type: str,
+    default_difficulty_score: float,
+    qa_limit: int | None = None,
 ) -> int:
     if not kp_rows:
         return 0
@@ -1113,6 +1580,8 @@ async def _ensure_each_kp_has_question(
 
     added = 0
     for kp_id, kp_title, kp_content in kp_rows:
+        if qa_limit is not None and int(created_by_type.get("qa", 0)) >= int(qa_limit):
+            break
         if int(kp_id) in covered_ids:
             continue
         base_q = f"【知识点专项】请简要说明“{kp_title}”的核心概念与应用。"
@@ -1123,10 +1592,13 @@ async def _ensure_each_kp_has_question(
             suffix += 1
         answer = _trim_text_for_answer(kp_content, 32) or _trim_text_for_answer(kp_title, 32) or "见课堂讲解"
         explanation = f"本题用于覆盖知识点：{kp_title}。"
+        now_ts = datetime.utcnow()
         db.add(
             Question(
                 course_id=course.id,
                 chapter_id=chapter.id,
+                question_bank_type=question_bank_type,
+                difficulty_score=default_difficulty_score,
                 difficulty="basic",
                 question_type="qa",
                 question_text=q_text,
@@ -1135,7 +1607,9 @@ async def _ensure_each_kp_has_question(
                 explanation=explanation,
                 knowledge_point_ids=str(int(kp_id)),
                 is_active=True,
-                is_approved=True,
+                is_approved=False,
+                generated_time=now_ts,
+                edited_time=now_ts,
             )
         )
         existing_keys.add(_normalize_text_key(q_text))
@@ -1679,6 +2153,254 @@ async def _parse_pdf_document_and_reindex(
         doc.parse_error = f"{doc.parse_error}；{tip}" if doc.parse_error else tip
 
 
+def _extract_docx_text(content: bytes) -> str:
+    try:
+        with zipfile.ZipFile(io.BytesIO(content)) as zf:
+            names = [n for n in ("word/document.xml", "word/footnotes.xml", "word/endnotes.xml") if n in zf.namelist()]
+            if not names:
+                return ""
+            parts: list[str] = []
+            for name in names:
+                xml = zf.read(name).decode("utf-8", errors="ignore")
+                xml = re.sub(r"</w:p\s*>", "\n", xml, flags=re.IGNORECASE)
+                xml = re.sub(r"<[^>]+>", "", xml)
+                txt = html.unescape(xml).strip()
+                if txt:
+                    parts.append(txt)
+            return "\n".join(parts).strip()
+    except Exception:
+        return ""
+
+
+def _extract_legacy_word_text(content: bytes) -> str:
+    for enc in ("utf-8", "gb18030", "gbk"):
+        try:
+            text = content.decode(enc, errors="ignore").strip()
+            if _looks_like_useful_text(text, prefer_chinese=True):
+                return text
+        except Exception:
+            continue
+    return ""
+
+
+def _build_import_questions_prompt(
+    question_context: str,
+    answer_context: str,
+    chapter_options_text: str,
+) -> str:
+    return f"""你是一名严谨的试题整理助手。请从“题目文档”和“答案文档”中提取题目，并尽量将题目与答案正确对应。
+
+要求：
+1) 只输出 JSON，不要输出 markdown 或解释。
+2) question_type 取值仅允许：single_choice | multiple_choice | judge | blank | qa。
+2.1) chapter_title 尽量从给定章节列表中选择最匹配的一项；无法判断可留空字符串。
+3) 如果是 single_choice / multiple_choice，options 最多 4 个，correct_answer 优先输出字母（A/B/C/D 或 A,C）。
+4) 如果是 judge，correct_answer 仅输出 A 或 B（A=正确，B=错误）。
+5) 题干尽量简洁完整，去掉无关前后缀。
+6) 若无法确认答案，可留空字符串，但尽量依据答案文档补全。
+7) explanation 可为空字符串。
+8) difficulty_score：难度系数，取值 0~1（0 最难，1 最简单）。根据题干与答案综合判断难度；无法判断时可省略该字段或留空。
+
+输出格式（严格）：
+{{
+  "questions": [
+    {{
+      "chapter_title": "章节名称（来自给定章节列表）",
+      "question_type": "single_choice|multiple_choice|judge|blank|qa",
+      "question_text": "题干",
+      "options": ["A选项", "B选项", "C选项", "D选项"],
+      "correct_answer": "A",
+      "explanation": "解析",
+      "difficulty_score": 0.8
+    }}
+  ]
+}}
+
+题目文档内容：
+{question_context}
+
+答案文档内容：
+{answer_context}
+
+可选章节列表（请优先从这里选择 chapter_title）：
+{chapter_options_text}
+"""
+
+
+def _pair_name_key(file_name: str, role: str) -> str:
+    stem = Path(file_name or "").stem
+    s = stem.lower()
+    # 统一分隔符，便于 key 对齐（中英文括号、横线、空格等）。
+    s = re.sub(r"[\s_\-\(\)\[\]【】（）]+", "", s)
+    answer_tokens = ["参考答案", "答案", "解析", "解答", "answer", "answers", "solution", "solutions"]
+    question_tokens = ["题目", "试题", "question", "questions"]
+    tokens = answer_tokens if role == "answer" else question_tokens
+    for t in tokens:
+        s = s.replace(t, "")
+    return s.strip()
+
+
+def _pair_documents_by_name(
+    docs: list[dict[str, object]],
+) -> tuple[list[tuple[dict[str, object], dict[str, object]]], list[dict[str, object]], list[dict[str, object]]]:
+    answer_docs = [d for d in docs if bool(d.get("is_answer"))]
+    question_docs = [d for d in docs if not bool(d.get("is_answer"))]
+    matched_pairs: list[tuple[dict[str, object], dict[str, object]]] = []
+    used_q_ids: set[int] = set()
+    used_a_ids: set[int] = set()
+
+    q_by_key: dict[str, list[dict[str, object]]] = {}
+    for q in question_docs:
+        key = _pair_name_key(str(q.get("file_name") or ""), "question")
+        q_by_key.setdefault(key, []).append(q)
+
+    # 第一轮：key 精确匹配
+    for a in answer_docs:
+        a_key = _pair_name_key(str(a.get("file_name") or ""), "answer")
+        if not a_key:
+            continue
+        cands = [q for q in q_by_key.get(a_key, []) if int(q["idx"]) not in used_q_ids]
+        if not cands:
+            continue
+        best_q = cands[0]
+        matched_pairs.append((best_q, a))
+        used_q_ids.add(int(best_q["idx"]))
+        used_a_ids.add(int(a["idx"]))
+
+    # 第二轮：模糊匹配（处理 A卷.docx ↔ A卷答案.docx 等）
+    for a in answer_docs:
+        if int(a["idx"]) in used_a_ids:
+            continue
+        a_key = _pair_name_key(str(a.get("file_name") or ""), "answer")
+        best_q: dict[str, object] | None = None
+        best_score = 0.0
+        for q in question_docs:
+            if int(q["idx"]) in used_q_ids:
+                continue
+            q_key = _pair_name_key(str(q.get("file_name") or ""), "question")
+            if not q_key and not a_key:
+                continue
+            score = difflib.SequenceMatcher(None, q_key, a_key).ratio()
+            if score > best_score:
+                best_score = score
+                best_q = q
+        if best_q is not None and best_score >= 0.55:
+            matched_pairs.append((best_q, a))
+            used_q_ids.add(int(best_q["idx"]))
+            used_a_ids.add(int(a["idx"]))
+
+    unmatched_questions = [q for q in question_docs if int(q["idx"]) not in used_q_ids]
+    unmatched_answers = [a for a in answer_docs if int(a["idx"]) not in used_a_ids]
+    return matched_pairs, unmatched_questions, unmatched_answers
+
+
+def _normalize_import_questions(
+    candidates: list[dict],
+    chapter_options: list[tuple[int, str]],
+) -> list[TeacherImportQuestionPreviewItemOut]:
+    chapter_title_map = {title: cid for cid, title in chapter_options}
+    chapter_norm_map = {re.sub(r"\s+", "", (title or "").lower()): (cid, title) for cid, title in chapter_options}
+
+    def _match_chapter(raw_title: object, q_text: str, explanation: str | None) -> tuple[int | None, str | None]:
+        t = str(raw_title or "").strip()
+        if t and t in chapter_title_map:
+            return chapter_title_map[t], t
+        t_norm = re.sub(r"\s+", "", t.lower())
+        if t_norm and t_norm in chapter_norm_map:
+            cid, title = chapter_norm_map[t_norm]
+            return cid, title
+        # 模糊匹配：章标题在题干/解析中命中
+        hay = f"{q_text}\n{explanation or ''}"
+        for cid, title in chapter_options:
+            if title and title in hay:
+                return cid, title
+        if len(chapter_options) == 1:
+            cid, title = chapter_options[0]
+            return cid, title
+        # 模糊字符串相似度兜底
+        if t:
+            best_cid: int | None = None
+            best_title: str | None = None
+            best_score = 0.0
+            for cid, title in chapter_options:
+                score = difflib.SequenceMatcher(None, t, title).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_cid = cid
+                    best_title = title
+            if best_cid is not None and best_score >= 0.55:
+                return best_cid, best_title
+        return None, None
+
+    def _fallback_answer_from_explanation(explanation: str) -> str:
+        text = (explanation or "").strip()
+        if not text:
+            return ""
+        m = re.search(r"(?:参考答案|答案|answer)\s*[:：]\s*(.+)", text, flags=re.IGNORECASE)
+        if m:
+            return _trim_answer(m.group(1), max_len=64)
+        # 兜底：取第一行作为答案
+        first_line = text.splitlines()[0].strip()
+        return _trim_answer(first_line, max_len=64)
+
+    out: list[TeacherImportQuestionPreviewItemOut] = []
+    for item in candidates:
+        q_type = _to_question_type(str(item.get("question_type") or item.get("type") or ""))
+        if not q_type:
+            continue
+        q_text = str(item.get("question_text") or "").strip()
+        if not q_text:
+            continue
+        options: list[str] = []
+        answer = ""
+        if q_type == "single_choice":
+            opts = _normalize_choice_options(item.get("options"))
+            ans = _normalize_choice_answer(item.get("correct_answer"), opts)
+            if len(opts) == 4:
+                options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
+            answer = ans or _trim_answer(item.get("correct_answer"), max_len=16)
+        elif q_type == "multiple_choice":
+            opts = _normalize_choice_options(item.get("options"))
+            ans = _normalize_multi_answer(item.get("correct_answer"))
+            if len(opts) == 4:
+                options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
+            answer = ans or _trim_answer(item.get("correct_answer"), max_len=16)
+        elif q_type == "judge":
+            options = ["A. 正确", "B. 错误"]
+            answer = _normalize_judge_answer(item.get("correct_answer")) or _trim_answer(item.get("correct_answer"), max_len=8)
+        else:
+            answer = _trim_answer(item.get("correct_answer"), max_len=64)
+        explanation = str(item.get("explanation") or "").strip() or None
+        if not answer and explanation:
+            # 部分模型会把答案写到 explanation 字段，这里做回填。
+            answer = _fallback_answer_from_explanation(explanation)
+        if not answer and q_type == "judge" and explanation:
+            j = _normalize_judge_answer(explanation)
+            if j:
+                answer = j
+        chapter_id, chapter_title = _match_chapter(item.get("chapter_title"), q_text, explanation)
+        raw_diff = item.get("difficulty_score")
+        try:
+            d = float(raw_diff) if raw_diff is not None and str(raw_diff).strip() != "" else None
+        except (TypeError, ValueError):
+            d = None
+        if d is not None and (d < 0 or d > 1):
+            d = None
+        out.append(
+            TeacherImportQuestionPreviewItemOut(
+                chapter_id=chapter_id,
+                chapter_title=chapter_title,
+                question_type=q_type,
+                question_text=q_text,
+                options=options,
+                correct_answer=answer,
+                explanation=explanation,
+                difficulty_score=round(d, 2) if d is not None else None,
+            )
+        )
+    return out
+
+
 @router.get("/courses", response_model=list[TeacherCourseOut])
 async def list_teacher_courses(
     db: AsyncSession = Depends(get_db),
@@ -1692,6 +2414,7 @@ async def list_teacher_courses(
             name=c.name,
             code=c.code,
             description=c.description,
+            remark=c.remark,
             is_active=c.is_active,
             owner_teacher_id=c.owner_teacher_id,
             created_at=c.created_at.isoformat() if c.created_at else None,
@@ -1710,10 +2433,12 @@ async def create_teacher_course(
         r = await db.execute(select(Course).where(Course.code == body.code.strip()))
         if r.scalar_one_or_none():
             raise HTTPException(status_code=400, detail="课程代码已存在")
+    remark_val = (body.remark or "").strip()[:128] if body.remark else None
     c = Course(
         name=body.name.strip(),
         code=body.code.strip() if body.code else None,
         description=body.description,
+        remark=remark_val or None,
         is_active=body.is_active,
         owner_teacher_id=user.id,
     )
@@ -1725,6 +2450,7 @@ async def create_teacher_course(
         name=c.name,
         code=c.code,
         description=c.description,
+        remark=c.remark,
         is_active=c.is_active,
         owner_teacher_id=c.owner_teacher_id,
         created_at=c.created_at.isoformat() if c.created_at else None,
@@ -1750,6 +2476,8 @@ async def update_teacher_course(
         c.code = code
     if body.description is not None:
         c.description = body.description
+    if body.remark is not None:
+        c.remark = (body.remark.strip()[:128] or None) if body.remark else None
     if body.is_active is not None:
         c.is_active = body.is_active
     await db.commit()
@@ -1759,6 +2487,7 @@ async def update_teacher_course(
         name=c.name,
         code=c.code,
         description=c.description,
+        remark=c.remark,
         is_active=c.is_active,
         owner_teacher_id=c.owner_teacher_id,
         created_at=c.created_at.isoformat() if c.created_at else None,
@@ -1793,6 +2522,27 @@ async def delete_teacher_course(
     await db.execute(update(Class).where(Class.course_id == course_id).values(course_id=None))
     await db.execute(update(QuestionAsked).where(QuestionAsked.course_id == course_id).values(course_id=None))
     await db.execute(delete(CourseReindexTask).where(CourseReindexTask.course_id == course_id))
+    # 课程级文档（无 chapter_id）：删除记录并删磁盘文件
+    r_kd = await db.execute(
+        select(KnowledgeDocument.file_path).where(
+            and_(KnowledgeDocument.course_id == course_id, KnowledgeDocument.chapter_id.is_(None))
+        )
+    )
+    course_level_paths = [row[0] for row in r_kd.all() if row[0]]
+    await db.execute(
+        delete(KnowledgeDocument).where(
+            and_(KnowledgeDocument.course_id == course_id, KnowledgeDocument.chapter_id.is_(None))
+        )
+    )
+    await db.flush()
+    root = Path(settings.upload_dir)
+    for rel in course_level_paths:
+        try:
+            path = root / rel
+            if path.exists() and path.is_file():
+                path.unlink()
+        except Exception as e:
+            logger.warning("delete_course_level_file_failed course_id=%s file=%s err=%s", course_id, rel, str(e))
     await db.delete(c)
     await db.commit()
     try:
@@ -1964,6 +2714,202 @@ async def create_teacher_chapter(
     await db.commit()
     await db.refresh(ch)
     return TeacherChapterOut(id=ch.id, course_id=ch.course_id, title=ch.title, order_index=ch.order_index, syllabus_ref=ch.syllabus_ref)
+
+
+@router.get("/courses/{course_id}/documents", response_model=list[TeacherKnowledgeDocumentOut])
+async def list_teacher_course_documents(
+    course_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_course(db, user.id, course_id)
+    ch_sub = select(Chapter.id).where(Chapter.course_id == course_id)
+    doc_ids_sub = select(DocumentChapter.doc_id).where(DocumentChapter.chapter_id.in_(ch_sub)).distinct()
+    r = await db.execute(
+        select(KnowledgeDocument)
+        .where(or_(KnowledgeDocument.course_id == course_id, KnowledgeDocument.id.in_(doc_ids_sub)))
+        .order_by(KnowledgeDocument.id.desc())
+    )
+    rows = r.scalars().all()
+    doc_ids = [d.id for d in rows]
+    chapter_ids_map = await _get_doc_chapter_ids(db, doc_ids)
+    return [
+        TeacherKnowledgeDocumentOut(
+            id=d.id,
+            chapter_id=d.chapter_id,
+            course_id=getattr(d, "course_id", None),
+            source_type=d.source_type,
+            title=d.title,
+            page_ref=d.page_ref,
+            file_name=d.file_name,
+            file_size=d.file_size,
+            parse_status=d.parse_status,
+            parse_error=d.parse_error,
+            chunk_count=d.chunk_count,
+            student_visible=getattr(d, "student_visible", True) if getattr(d, "student_visible", None) is not None else True,
+            downloadable=getattr(d, "downloadable", True) if getattr(d, "downloadable", None) is not None else True,
+            chapter_ids=chapter_ids_map.get(d.id, []),
+            created_at=d.created_at.isoformat() if d.created_at else None,
+        )
+        for d in rows
+    ]
+
+
+def _parse_chapter_ids_form(value: str) -> list[int]:
+    if not (value or "").strip():
+        return []
+    try:
+        raw = json.loads(value)
+        return [int(x) for x in raw if isinstance(x, (int, float)) and int(x) > 0]
+    except Exception:
+        return []
+
+
+@router.post("/courses/{course_id}/documents/upload", response_model=TeacherKnowledgeDocumentOut)
+async def upload_teacher_course_document(
+    course_id: int,
+    file: UploadFile = File(...),
+    chapter_ids_json: str = Form("[]", description="JSON 数组，关联章节 id；空或 [] 表示全部章节"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    course = await _require_owned_course(db, user.id, course_id)
+    if not file.filename or not file.filename.lower().endswith(".pdf"):
+        raise HTTPException(status_code=400, detail="请上传 PDF 文件")
+    binary = await file.read()
+    if not binary:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id).order_by(Chapter.order_index))
+    all_chapter_ids = [row[0] for row in r_ch.all()]
+    chapter_ids = _parse_chapter_ids_form(chapter_ids_json)
+    if not chapter_ids:
+        chapter_ids = all_chapter_ids
+    if not chapter_ids and all_chapter_ids:
+        chapter_ids = all_chapter_ids
+    for ch_id in chapter_ids:
+        await _require_owned_chapter(db, user.id, ch_id)
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    subdir = root / "knowledge"
+    subdir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_pdf_filename(file.filename)
+    saved_name = f"c{course_id}_{int(time.time())}_{safe_name}"
+    abs_path = subdir / saved_name
+    abs_path.write_bytes(binary)
+    rel_path = f"knowledge/{saved_name}"
+    doc = KnowledgeDocument(
+        course_id=course_id,
+        chapter_id=chapter_ids[0] if chapter_ids else None,
+        source_type="pdf_upload",
+        title=file.filename,
+        content="",
+        file_name=file.filename,
+        file_path=rel_path,
+        file_size=len(binary),
+        parse_status="uploaded",
+        parse_error=None,
+        chunk_count=None,
+        student_visible=False,
+        downloadable=False,
+    )
+    db.add(doc)
+    await db.flush()
+    for ch_id in chapter_ids:
+        db.add(DocumentChapter(doc_id=doc.id, chapter_id=ch_id))
+    await db.commit()
+    await db.refresh(doc)
+    chapter_ids_map = await _get_doc_chapter_ids(db, [doc.id])
+    return TeacherKnowledgeDocumentOut(
+        id=doc.id,
+        chapter_id=doc.chapter_id,
+        course_id=doc.course_id,
+        source_type=doc.source_type,
+        title=doc.title,
+        page_ref=doc.page_ref,
+        file_name=doc.file_name,
+        file_size=doc.file_size,
+        parse_status=doc.parse_status,
+        parse_error=doc.parse_error,
+        chunk_count=doc.chunk_count,
+        student_visible=doc.student_visible,
+        downloadable=doc.downloadable,
+        chapter_ids=chapter_ids_map.get(doc.id, []),
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+    )
+
+
+@router.post("/courses/{course_id}/videos/upload", response_model=TeacherKnowledgeDocumentOut)
+async def upload_teacher_course_video(
+    course_id: int,
+    file: UploadFile = File(...),
+    chapter_ids_json: str = Form("[]", description="JSON 数组，关联章节 id；空或 [] 表示全部章节"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    course = await _require_owned_course(db, user.id, course_id)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请上传视频文件")
+    ext = Path(file.filename).suffix.lower()
+    if ext not in {".mp4", ".webm", ".mkv", ".mov", ".m4v"}:
+        raise HTTPException(status_code=400, detail="仅支持 mp4/webm/mkv/mov/m4v 视频文件")
+    binary = await file.read()
+    if not binary:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id).order_by(Chapter.order_index))
+    all_chapter_ids = [row[0] for row in r_ch.all()]
+    chapter_ids = _parse_chapter_ids_form(chapter_ids_json)
+    if not chapter_ids:
+        chapter_ids = all_chapter_ids
+    for ch_id in chapter_ids:
+        await _require_owned_chapter(db, user.id, ch_id)
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    subdir = root / "preview_videos"
+    subdir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_upload_filename(file.filename)
+    saved_name = f"c{course_id}_{int(time.time())}_{safe_name}"
+    abs_path = subdir / saved_name
+    abs_path.write_bytes(binary)
+    rel_path = f"preview_videos/{saved_name}"
+    doc = KnowledgeDocument(
+        course_id=course_id,
+        chapter_id=chapter_ids[0] if chapter_ids else None,
+        source_type="preview_video",
+        title=file.filename,
+        content="",
+        file_name=file.filename,
+        file_path=rel_path,
+        file_size=len(binary),
+        parse_status="done",
+        parse_error=None,
+        chunk_count=0,
+        student_visible=False,
+        downloadable=False,
+    )
+    db.add(doc)
+    await db.flush()
+    for ch_id in chapter_ids:
+        db.add(DocumentChapter(doc_id=doc.id, chapter_id=ch_id))
+    await db.commit()
+    await db.refresh(doc)
+    chapter_ids_map = await _get_doc_chapter_ids(db, [doc.id])
+    return TeacherKnowledgeDocumentOut(
+        id=doc.id,
+        chapter_id=doc.chapter_id,
+        course_id=doc.course_id,
+        source_type=doc.source_type,
+        title=doc.title,
+        page_ref=doc.page_ref,
+        file_name=doc.file_name,
+        file_size=doc.file_size,
+        parse_status=doc.parse_status,
+        parse_error=doc.parse_error,
+        chunk_count=doc.chunk_count,
+        student_visible=doc.student_visible,
+        downloadable=doc.downloadable,
+        chapter_ids=chapter_ids_map.get(doc.id, []),
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
+    )
 
 
 @router.put("/chapters/{chapter_id}", response_model=TeacherChapterOut)
@@ -2141,6 +3087,14 @@ async def _generate_questions_for_chapter(
     course: Course,
     body: TeacherGenerateQuestionsIn,
 ) -> tuple[dict[str, int], int]:
+    question_bank_type = _normalize_question_bank_type(body.question_bank_type)
+    type_difficulty_score = {
+        "single_choice": _normalize_difficulty_score(body.single_choice_difficulty_score),
+        "multiple_choice": _normalize_difficulty_score(body.multiple_choice_difficulty_score),
+        "judge": _normalize_difficulty_score(body.judge_difficulty_score),
+        "qa": _normalize_difficulty_score(body.qa_difficulty_score),
+        "blank": _normalize_difficulty_score(body.blank_difficulty_score),
+    }
     r_docs = await db.execute(
         select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
         .where(KnowledgeDocument.chapter_id == chapter.id)
@@ -2148,8 +3102,30 @@ async def _generate_questions_for_chapter(
         .limit(30)
     )
     doc_rows = r_docs.all()
-    # 生成习题时自动生成知识点（数量由模型决定，最多 10 条），确保题目可稳定关联知识点。
-    kp_rows = await _auto_generate_and_save_kps_for_chapter(db, chapter, max_count=10)
+    selected_kp_ids = [int(x) for x in (body.knowledge_point_ids or []) if int(x) > 0]
+    # 若前端指定了知识点，则仅按所选知识点出题；未选时：章节已有知识点则用已有出题，否则再自动生成知识点后出题。
+    if selected_kp_ids:
+        r_kps = await db.execute(
+            select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.content)
+            .where(KnowledgePoint.chapter_id == chapter.id, KnowledgePoint.id.in_(selected_kp_ids))
+            .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+        )
+        kp_rows = [(int(row[0]), str(row[1] or ""), row[2]) for row in r_kps.all() if row[0] and row[1]]
+        if not kp_rows:
+            raise RuntimeError("所选知识点与当前章节不匹配，无法生成习题")
+    else:
+        # 先查该章节是否已有知识点
+        r_existing = await db.execute(
+            select(KnowledgePoint.id, KnowledgePoint.title, KnowledgePoint.content)
+            .where(KnowledgePoint.chapter_id == chapter.id)
+            .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+        )
+        existing_rows = [(int(row[0]), str(row[1] or ""), row[2]) for row in r_existing.all() if row[0] and row[1]]
+        if existing_rows:
+            kp_rows = existing_rows
+        else:
+            # 章节无知识点时再自动生成（最多 10 条），再根据知识点出题
+            kp_rows = await _auto_generate_and_save_kps_for_chapter(db, chapter, max_count=10)
     chapter_kp_matchers = _build_chapter_kp_matchers(kp_rows)
     context_parts: list[str] = []
     for title, content, page_ref in doc_rows:
@@ -2166,6 +3142,10 @@ async def _generate_questions_for_chapter(
         if not (t or c):
             continue
         context_parts.append(f"知识点：{t}\n{c}".strip())
+    # 联网检索补充上下文：根据课程/章节/知识点抓取公开网页摘要，提升题目覆盖与新颖度。
+    online_context = await _build_online_search_context(course.name or "", chapter.title or "", kp_rows)
+    if online_context:
+        context_parts.append(online_context)
     context = "\n\n---\n\n".join(context_parts).strip()
     if not context:
         raise RuntimeError("该章节暂无可用内容，请先上传或解析文档后再生成")
@@ -2186,6 +3166,12 @@ async def _generate_questions_for_chapter(
         judge_max=body.judge_max,
         qa_max=body.qa_max,
         blank_max=body.blank_max,
+        question_bank_type=question_bank_type,
+        single_choice_difficulty_score=type_difficulty_score["single_choice"],
+        multiple_choice_difficulty_score=type_difficulty_score["multiple_choice"],
+        judge_difficulty_score=type_difficulty_score["judge"],
+        qa_difficulty_score=type_difficulty_score["qa"],
+        blank_difficulty_score=type_difficulty_score["blank"],
         diff_basic_target=diff_limits["basic"],
         diff_applied_target=diff_limits["applied"],
         diff_extended_target=diff_limits["extended"],
@@ -2233,8 +3219,8 @@ async def _generate_questions_for_chapter(
             skipped += 1
             return False
 
-        explanation = str(item.get("explanation") or "").strip() or None
-        matched_kp_ids = _match_question_kp_ids(q_text, explanation, chapter_kp_matchers, limit=3)
+        pre_explanation = str(item.get("explanation") or "").strip() or None
+        matched_kp_ids = _match_question_kp_ids(q_text, pre_explanation, chapter_kp_matchers, limit=3)
         knowledge_point_ids = ",".join(str(x) for x in matched_kp_ids) if matched_kp_ids else None
         difficulty = _normalize_difficulty(item.get("difficulty"))
         if enforce_diff_limit and created_by_diff[difficulty] >= diff_limits[difficulty]:
@@ -2271,10 +3257,16 @@ async def _generate_questions_for_chapter(
                 return False
             correct_answer = ans
 
+        raw_explanation = str(item.get("explanation") or "").strip()
+        explanation = raw_explanation or f"参考答案：{correct_answer}"
+
+        now_ts = datetime.utcnow()
         db.add(
             Question(
                 course_id=course.id,
                 chapter_id=chapter.id,
+                question_bank_type=question_bank_type,
+                difficulty_score=type_difficulty_score[q_type],
                 difficulty=difficulty,
                 question_type=q_type,
                 question_text=q_text,
@@ -2283,7 +3275,9 @@ async def _generate_questions_for_chapter(
                 explanation=explanation,
                 knowledge_point_ids=knowledge_point_ids,
                 is_active=True,
-                is_approved=True,
+                is_approved=False,
+                generated_time=now_ts,
+                edited_time=now_ts,
             )
         )
         created_by_type[q_type] += 1
@@ -2312,6 +3306,9 @@ async def _generate_questions_for_chapter(
         existing_keys=existing_keys,
         created_by_type=created_by_type,
         created_by_diff=created_by_diff,
+        question_bank_type=question_bank_type,
+        default_difficulty_score=type_difficulty_score["qa"],
+        qa_limit=body.qa_max,
     )
     await db.commit()
     return created_by_type, skipped
@@ -2444,6 +3441,864 @@ async def list_generate_teacher_chapter_questions_active_tasks(
     ]
 
 
+def _build_generate_paper_prompt(
+    course_name: str,
+    chapter_titles: list[str],
+    paper_title: str,
+    overall_difficulty: float | None,
+    configs: list[dict],
+) -> str:
+    cfg_lines: list[str] = []
+    for row in configs:
+        cfg_lines.append(
+            f"- {row['type']}：数量 {row['count']}，难度系数 {_normalize_difficulty_score(row.get('difficulty'), 0.8)}，每题分数 {float(row.get('score') or 0)}"
+        )
+    overall_text = "未指定（按各题型难度）" if overall_difficulty is None else str(_normalize_difficulty_score(overall_difficulty))
+    chapter_text = "、".join([x for x in chapter_titles if x]) if chapter_titles else "未指定章节"
+    return f"""你是一名严谨的高校教师出卷助手。请基于联网检索公开可靠资料来生成试卷题目，题目应贴合课程与章节，避免无关内容。
+
+课程：{course_name}
+章节：{chapter_text}
+试卷标题：{paper_title}
+整卷难度系数：{overall_text}
+题型配置：
+{chr(10).join(cfg_lines)}
+
+要求：
+1) 仅输出 JSON，不要输出 Markdown。
+2) 输出字段：type, question_text, options, correct_answer, explanation, difficulty_score。
+3) 单选题/多选题给 4 个选项；判断题 options 固定为 ["A. 正确", "B. 错误"]。
+4) difficulty_score 在 0~1 之间，保留 2 位小数。
+5) 必须按题型数量输出足量题目，尽量不重复。
+
+JSON 格式：
+{{
+  "questions": [
+    {{
+      "type": "single_choice|multiple_choice|judge|blank|qa",
+      "question_text": "题干",
+      "options": ["A. ...","B. ...","C. ...","D. ..."],
+      "correct_answer": "A",
+      "explanation": "解析",
+      "difficulty_score": 0.8
+    }}
+  ]
+}}"""
+
+
+async def _pick_local_questions_for_paper(
+    db: AsyncSession,
+    course_id: int,
+    chapter_ids: list[int],
+    configs: list[dict],
+    overall_difficulty: float | None,
+) -> tuple[list[dict], list[dict]]:
+    selected_ids: set[int] = set()
+    preview_questions: list[dict] = []
+    insufficient_types: list[dict] = []
+
+    for row in configs:
+        q_type = row["type"]
+        count = int(row["count"])
+        if count <= 0:
+            continue
+        target_diff = _normalize_difficulty_score(overall_difficulty if overall_difficulty is not None else row.get("difficulty", 0.8))
+        r = await db.execute(
+            select(Question)
+            .where(
+                Question.course_id == course_id,
+                Question.chapter_id.in_(chapter_ids),
+                Question.question_bank_type == "exam",
+                Question.question_type == q_type,
+                Question.is_active == True,
+                Question.is_approved == True,
+            )
+            .order_by(Question.id.desc())
+        )
+        rows = [q for q in r.scalars().all() if q.id not in selected_ids]
+        rows.sort(key=lambda q: (abs(_normalize_difficulty_score(q.difficulty_score, 0.8) - target_diff), -int(q.id)))
+        picked = rows[:count]
+        if len(picked) < count:
+            insufficient_types.append(
+                {
+                    "question_type": q_type,
+                    "requested": count,
+                    "available": len(rows),
+                    "missing": count - len(picked),
+                }
+            )
+        for q in picked:
+            selected_ids.add(int(q.id))
+            preview_questions.append(
+                {
+                    "question_type": q_type,
+                    "question_text": q.question_text,
+                    "options": _parse_question_options(q.options),
+                    "correct_answer": q.correct_answer,
+                    "explanation": q.explanation,
+                    "difficulty_score": _normalize_difficulty_score(q.difficulty_score, target_diff),
+                    "score": float(row.get("score") or 0),
+                    "source": "local",
+                }
+            )
+    return preview_questions, insufficient_types
+
+
+async def _generate_internet_questions_for_paper(
+    course_name: str,
+    chapter_titles: list[str],
+    paper_title: str,
+    overall_difficulty: float | None,
+    configs: list[dict],
+) -> tuple[list[dict], list[dict]]:
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    prompt = _build_generate_paper_prompt(
+        course_name=course_name,
+        chapter_titles=chapter_titles,
+        paper_title=paper_title,
+        overall_difficulty=overall_difficulty,
+        configs=configs,
+    )
+    raw = await asyncio.to_thread(
+        llm.generate,
+        prompt,
+        max_tokens=max(2200, int(settings.llm_max_tokens or 512)),
+        temperature=0.2,
+    )
+    candidates = _extract_json_payload(raw)
+    if not candidates:
+        raise RuntimeError("互联网题库生成失败：模型返回结果无法解析")
+
+    grouped: dict[str, list[dict]] = {"single_choice": [], "multiple_choice": [], "judge": [], "blank": [], "qa": []}
+    for item in candidates:
+        q_type = _to_question_type(str(item.get("type") or ""))
+        if not q_type:
+            continue
+        grouped[q_type].append(item)
+
+    preview_questions: list[dict] = []
+    insufficient_types: list[dict] = []
+    for row in configs:
+        q_type = row["type"]
+        count = int(row["count"])
+        if count <= 0:
+            continue
+        pool = grouped.get(q_type, [])
+        picked = pool[:count]
+        if len(picked) < count:
+            insufficient_types.append(
+                {
+                    "question_type": q_type,
+                    "requested": count,
+                    "available": len(pool),
+                    "missing": count - len(picked),
+                }
+            )
+        target_diff = _normalize_difficulty_score(overall_difficulty if overall_difficulty is not None else row.get("difficulty", 0.8))
+        for item in picked:
+            q_text = str(item.get("question_text") or "").strip()
+            if not q_text:
+                continue
+            options: list[str] = []
+            answer = _trim_answer(item.get("correct_answer"), max_len=32)
+            if q_type == "single_choice":
+                opts = _normalize_choice_options(item.get("options"))
+                ans = _normalize_choice_answer(item.get("correct_answer"), opts)
+                if len(opts) != 4 or not ans:
+                    continue
+                options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
+                answer = ans
+            elif q_type == "multiple_choice":
+                opts = _normalize_choice_options(item.get("options"))
+                ans = _normalize_multi_answer(item.get("correct_answer"))
+                if len(opts) != 4 or len([x for x in ans.split(",") if x]) < 2:
+                    continue
+                options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
+                answer = ans
+            elif q_type == "judge":
+                ans = _normalize_judge_answer(item.get("correct_answer"))
+                if not ans:
+                    continue
+                options = ["A. 正确", "B. 错误"]
+                answer = ans
+
+            preview_questions.append(
+                {
+                    "question_type": q_type,
+                    "question_text": q_text,
+                    "options": options,
+                    "correct_answer": answer,
+                    "explanation": str(item.get("explanation") or "").strip() or None,
+                    "difficulty_score": _normalize_difficulty_score(item.get("difficulty_score"), target_diff),
+                    "score": float(row.get("score") or 0),
+                    "source": "internet",
+                }
+            )
+    return preview_questions, insufficient_types
+
+
+@router.post("/papers/generate", response_model=TeacherGeneratePaperOut)
+async def generate_teacher_paper(
+    body: TeacherGeneratePaperIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r_course = await db.execute(select(Course).where(Course.id == body.course_id, Course.owner_teacher_id == user.id))
+    course = r_course.scalar_one_or_none()
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+
+    chapter_ids = [int(x) for x in body.chapter_ids if int(x) > 0]
+    chapter_ids = list(dict.fromkeys(chapter_ids))
+    if not chapter_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个章节")
+
+    r_chapters = await db.execute(
+        select(Chapter.id, Chapter.title).where(
+            Chapter.course_id == course.id,
+            Chapter.id.in_(chapter_ids),
+        )
+    )
+    chapter_rows = r_chapters.all()
+    chapter_map = {int(r[0]): str(r[1]) for r in chapter_rows}
+    if len(chapter_map) != len(chapter_ids):
+        raise HTTPException(status_code=400, detail="章节数据无效或无权限")
+    chapter_titles = [chapter_map[cid] for cid in chapter_ids if cid in chapter_map]
+
+    normalized_configs: list[dict] = []
+    for row in body.configs:
+        q_type = _to_question_type(row.type)
+        if not q_type:
+            continue
+        normalized_configs.append(
+            {
+                "type": q_type,
+                "count": int(row.count),
+                "difficulty": _normalize_difficulty_score(row.difficulty if row.difficulty is not None else 0.8),
+                "score": float(row.score),
+            }
+        )
+    if not normalized_configs:
+        raise HTTPException(status_code=400, detail="题型配置不能为空")
+    if sum(int(x["count"]) for x in normalized_configs) <= 0:
+        raise HTTPException(status_code=400, detail="请至少设置一种题型数量大于 0")
+
+    paper_bank_type = _normalize_paper_bank_type(body.paper_bank_type)
+    question_source = _normalize_question_source(body.question_source)
+    target_overall_difficulty = _normalize_difficulty_score(body.overall_difficulty, 0.8) if body.overall_difficulty is not None else None
+
+    if question_source == "local":
+        preview_questions, insufficient_types = await _pick_local_questions_for_paper(
+            db=db,
+            course_id=course.id,
+            chapter_ids=chapter_ids,
+            configs=normalized_configs,
+            overall_difficulty=target_overall_difficulty,
+        )
+    else:
+        preview_questions, insufficient_types = await _generate_internet_questions_for_paper(
+            course_name=course.name,
+            chapter_titles=chapter_titles,
+            paper_title=body.paper_title.strip(),
+            overall_difficulty=target_overall_difficulty,
+            configs=normalized_configs,
+        )
+
+    is_partial = len(insufficient_types) > 0
+    total_score = round(sum(float(x.get("score") or 0) for x in preview_questions), 2)
+    weighted_difficulty_sum = sum(float(x.get("score") or 0) * _normalize_difficulty_score(x.get("difficulty_score"), 0.8) for x in preview_questions)
+    computed_overall_difficulty = round((weighted_difficulty_sum / total_score), 2) if total_score > 0 else 0.0
+    if is_partial and question_source == "local":
+        message = "题库里的习题数量不够生成试卷，请先生成习题"
+    elif is_partial:
+        message = "试卷未完全生成，已返回可预览内容"
+    else:
+        message = "试卷生成成功"
+
+    paper_id: int | None = None
+    if body.save_to_bank and (not is_partial):
+        paper = Paper(
+            course_id=course.id,
+            title=body.paper_title.strip(),
+            paper_type="electronic",
+            paper_bank_type=paper_bank_type,
+            question_source=question_source,
+            status="pending",
+            is_partial=False,
+            total_score=total_score,
+            request_payload=json.dumps(
+                {
+                    "course_id": course.id,
+                    "chapter_ids": chapter_ids,
+                    "paper_title": body.paper_title.strip(),
+                    "paper_bank_type": paper_bank_type,
+                    "question_source": question_source,
+                    "overall_difficulty": target_overall_difficulty,
+                    "configs": normalized_configs,
+                },
+                ensure_ascii=False,
+            ),
+            overall_difficulty=computed_overall_difficulty,
+            content_payload=json.dumps(
+                {
+                    "preview_questions": preview_questions,
+                    "insufficient_types": insufficient_types,
+                },
+                ensure_ascii=False,
+            ),
+            error_message=None,
+            created_by=user.id,
+        )
+        db.add(paper)
+        await db.flush()
+        paper_id = int(paper.id)
+
+    return TeacherGeneratePaperOut(
+        paper_id=paper_id,
+        status=("partial" if is_partial else "generated"),
+        is_partial=is_partial,
+        message=message,
+        insufficient_types=[TeacherPaperInsufficientOut(**x) for x in insufficient_types],
+        preview_questions=[TeacherPaperPreviewQuestionOut(**x) for x in preview_questions],
+        total_score=total_score,
+        overall_difficulty=computed_overall_difficulty,
+    )
+
+
+@router.get("/papers", response_model=list[TeacherPaperListItemOut])
+async def list_teacher_papers(
+    course_id: int | None = Query(default=None),
+    chapter_ids: list[int] = Query(default=[]),
+    title_kw: str | None = Query(default=None),
+    difficulty_min: float | None = Query(default=None, ge=0, le=1),
+    difficulty_max: float | None = Query(default=None, ge=0, le=1),
+    review_status: str | None = Query(default=None),
+    paper_bank_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    items = await _list_teacher_papers_filtered(
+        db=db,
+        teacher_id=user.id,
+        course_id=course_id,
+        chapter_ids=chapter_ids,
+        title_kw=title_kw,
+        difficulty_min=difficulty_min,
+        difficulty_max=difficulty_max,
+        review_status=review_status,
+        paper_bank_type=paper_bank_type,
+        status=status,
+    )
+    return items
+
+
+async def _list_teacher_papers_filtered(
+    db: AsyncSession,
+    teacher_id: int,
+    course_id: int | None = None,
+    chapter_ids: list[int] | None = None,
+    title_kw: str | None = None,
+    difficulty_min: float | None = None,
+    difficulty_max: float | None = None,
+    review_status: str | None = None,
+    paper_bank_type: str | None = None,
+    status: str | None = None,
+) -> list[TeacherPaperListItemOut]:
+    stmt = (
+        select(Paper, Course)
+        .join(Course, Course.id == Paper.course_id)
+        .where(Course.owner_teacher_id == teacher_id)
+        .order_by(Paper.id.desc())
+    )
+    if course_id is not None and course_id > 0:
+        stmt = stmt.where(Paper.course_id == course_id)
+    if (paper_bank_type or "").strip():
+        stmt = stmt.where(Paper.paper_bank_type == _normalize_paper_bank_type(paper_bank_type))
+    if (status or "").strip():
+        stmt = stmt.where(Paper.status == _normalize_paper_status(status))
+    if (title_kw or "").strip():
+        kw = f"%{(title_kw or '').strip()}%"
+        stmt = stmt.where(Paper.title.like(kw))
+    r = await db.execute(stmt)
+    rows = r.all()
+    chapter_filter = {int(x) for x in (chapter_ids or []) if int(x) > 0}
+    review_filter = (review_status or "").strip().lower()
+    if review_filter not in {"", "pending", "reviewed"}:
+        review_filter = ""
+    out: list[TeacherPaperListItemOut] = []
+    for p, c in rows:
+        req_payload: dict = {}
+        try:
+            req_payload = json.loads(p.request_payload or "{}")
+            if not isinstance(req_payload, dict):
+                req_payload = {}
+        except Exception:
+            req_payload = {}
+        paper_chapter_ids = [int(x) for x in (req_payload.get("chapter_ids") or []) if str(x).isdigit() and int(x) > 0]
+        overall_difficulty = float(p.overall_difficulty or 0)
+        if chapter_filter and not chapter_filter.intersection(set(paper_chapter_ids)):
+            continue
+        if difficulty_min is not None and overall_difficulty < float(difficulty_min):
+            continue
+        if difficulty_max is not None and overall_difficulty > float(difficulty_max):
+            continue
+        computed_review_status = _normalize_paper_status(p.status)
+        if review_filter and computed_review_status != review_filter:
+            continue
+        paper_type_val = getattr(p, "paper_type", None) or "electronic"
+        if paper_type_val not in ("electronic", "file"):
+            paper_type_val = "electronic"
+        out.append(
+            TeacherPaperListItemOut(
+                id=int(p.id),
+                course_id=int(c.id),
+                course_name=str(c.name),
+                title=p.title,
+                paper_type=paper_type_val,
+                paper_bank_type=_normalize_paper_bank_type(p.paper_bank_type),
+                question_source=_normalize_question_source(p.question_source),
+                status=_normalize_paper_status(p.status),
+                review_status=computed_review_status,
+                is_partial=bool(p.is_partial),
+                total_score=float(p.total_score or 0),
+                overall_difficulty=round(overall_difficulty, 2),
+                chapter_ids=paper_chapter_ids,
+                created_at=p.created_at.isoformat() if p.created_at else None,
+                updated_at=p.updated_at.isoformat() if p.updated_at else None,
+            )
+        )
+    return out
+
+
+@router.get("/papers/paged", response_model=TeacherPaperPageOut)
+async def list_teacher_papers_paged(
+    course_id: int | None = Query(default=None),
+    chapter_ids: list[int] = Query(default=[]),
+    title_kw: str | None = Query(default=None),
+    difficulty_min: float | None = Query(default=None, ge=0, le=1),
+    difficulty_max: float | None = Query(default=None, ge=0, le=1),
+    review_status: str | None = Query(default=None),
+    paper_bank_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    page: int = Query(default=1, ge=1),
+    page_size: int = Query(default=10, ge=1, le=100),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    items = await _list_teacher_papers_filtered(
+        db=db,
+        teacher_id=user.id,
+        course_id=course_id,
+        chapter_ids=chapter_ids,
+        title_kw=title_kw,
+        difficulty_min=difficulty_min,
+        difficulty_max=difficulty_max,
+        review_status=review_status,
+        paper_bank_type=paper_bank_type,
+        status=status,
+    )
+    total = len(items)
+    start = (page - 1) * page_size
+    end = start + page_size
+    return TeacherPaperPageOut(items=items[start:end], total=total, page=page, page_size=page_size)
+
+
+@router.post("/papers/batch-delete", response_model=TeacherPaperBatchDeleteOut)
+async def batch_delete_teacher_papers(
+    body: TeacherPaperBatchDeleteIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    ids = list({int(x) for x in body.paper_ids if int(x) > 0})
+    if not ids:
+        raise HTTPException(status_code=400, detail="paper_ids 不能为空")
+    r = await db.execute(
+        select(Paper)
+        .join(Course, Course.id == Paper.course_id)
+        .where(Paper.id.in_(ids), Course.owner_teacher_id == user.id)
+    )
+    rows = r.scalars().all()
+    deleted = 0
+    for p in rows:
+        await db.execute(delete(PaperFile).where(PaperFile.paper_id == p.id))
+        await db.delete(p)
+        deleted += 1
+    await db.flush()
+    return TeacherPaperBatchDeleteOut(deleted=deleted)
+
+
+async def _require_owned_file_paper(db: AsyncSession, teacher_id: int, paper_id: int) -> tuple[Paper, Course]:
+    r = await db.execute(
+        select(Paper, Course)
+        .join(Course, Course.id == Paper.course_id)
+        .where(Paper.id == paper_id, Course.owner_teacher_id == teacher_id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="试卷不存在或无权限")
+    p, c = row[0], row[1]
+    paper_type_val = getattr(p, "paper_type", None) or "electronic"
+    if paper_type_val != "file":
+        raise HTTPException(status_code=400, detail="该试卷不是文件试卷，无法管理附件")
+    return p, c
+
+
+@router.get("/papers/{paper_id}/files", response_model=list[TeacherPaperFileOut])
+async def list_teacher_paper_files(
+    paper_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_file_paper(db, user.id, paper_id)
+    r = await db.execute(select(PaperFile).where(PaperFile.paper_id == paper_id).order_by(PaperFile.id))
+    files = r.scalars().all()
+    return [
+        TeacherPaperFileOut(
+            id=int(f.id),
+            paper_id=int(f.paper_id),
+            file_name=f.file_name,
+            created_at=f.created_at.isoformat() if f.created_at else None,
+        )
+        for f in files
+    ]
+
+
+@router.post("/papers/{paper_id}/files", response_model=TeacherPaperFileOut)
+async def upload_teacher_paper_file(
+    paper_id: int,
+    file: UploadFile = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_file_paper(db, user.id, paper_id)
+    if not file.filename or not file.filename.strip():
+        raise HTTPException(status_code=400, detail="请选择文件")
+    allowed = (".pdf", ".doc", ".docx")
+    ext = (os.path.splitext(file.filename or "")[1] or "").lower()
+    if ext not in allowed:
+        raise HTTPException(status_code=400, detail="仅支持 .pdf、.doc、.docx 格式")
+    binary = await file.read()
+    if not binary:
+        raise HTTPException(status_code=400, detail="文件内容为空")
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    subdir = root / "paper_files"
+    subdir.mkdir(parents=True, exist_ok=True)
+    safe_name = _safe_upload_filename(file.filename)
+    saved_name = f"p{paper_id}_{int(time.time())}_{safe_name}"
+    abs_path = subdir / saved_name
+    abs_path.write_bytes(binary)
+    rel_path = f"paper_files/{saved_name}"
+    pf = PaperFile(paper_id=paper_id, file_name=file.filename.strip(), file_path=rel_path)
+    db.add(pf)
+    await db.flush()
+    await db.refresh(pf)
+    return TeacherPaperFileOut(
+        id=int(pf.id),
+        paper_id=int(pf.paper_id),
+        file_name=pf.file_name,
+        created_at=pf.created_at.isoformat() if pf.created_at else None,
+    )
+
+
+@router.get("/papers/{paper_id}/files/{file_id}/download")
+async def download_teacher_paper_file(
+    paper_id: int,
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_file_paper(db, user.id, paper_id)
+    r = await db.execute(select(PaperFile).where(PaperFile.id == file_id, PaperFile.paper_id == paper_id))
+    pf = r.scalars().one_or_none()
+    if not pf:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    abs_path = Path(settings.upload_dir) / pf.file_path
+    if not abs_path.is_file():
+        raise HTTPException(status_code=404, detail="文件已丢失")
+    return FileResponse(path=abs_path, filename=pf.file_name, media_type="application/octet-stream")
+
+
+@router.delete("/papers/{paper_id}/files/{file_id}")
+async def delete_teacher_paper_file(
+    paper_id: int,
+    file_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    await _require_owned_file_paper(db, user.id, paper_id)
+    r = await db.execute(select(PaperFile).where(PaperFile.id == file_id, PaperFile.paper_id == paper_id))
+    pf = r.scalars().one_or_none()
+    if not pf:
+        raise HTTPException(status_code=404, detail="文件不存在")
+    abs_path = Path(settings.upload_dir) / pf.file_path
+    if abs_path.is_file():
+        try:
+            abs_path.unlink()
+        except Exception:
+            pass
+    await db.delete(pf)
+    await db.flush()
+    return {"ok": True}
+
+
+class TeacherPaperImportOut(BaseModel):
+    paper_id: int
+    file_count: int
+
+
+@router.post("/papers/import", response_model=TeacherPaperImportOut)
+async def import_teacher_paper_files(
+    course_id: int = Form(...),
+    title: str = Form(..., min_length=1, max_length=128),
+    paper_bank_type: str = Form(default="training"),
+    chapter_ids: str = Form(default="[]"),
+    files: list[UploadFile] = File(default=[]),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """导入文件试卷：创建一张 paper_type=file 的试卷并上传多个文件。"""
+    course = (
+        await db.execute(select(Course).where(Course.id == course_id, Course.owner_teacher_id == user.id))
+    ).scalars().one_or_none()
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+    paper_bank_type = _normalize_paper_bank_type(paper_bank_type)
+    try:
+        chapter_ids_list = json.loads(chapter_ids)
+        if not isinstance(chapter_ids_list, list):
+            chapter_ids_list = []
+        chapter_ids_list = [int(x) for x in chapter_ids_list if isinstance(x, (int, float)) and int(x) > 0]
+    except Exception:
+        chapter_ids_list = []
+    allowed = (".pdf", ".doc", ".docx")
+    paper = Paper(
+        course_id=course.id,
+        title=title.strip()[:128],
+        paper_type="file",
+        paper_bank_type=paper_bank_type,
+        question_source="local",
+        status="pending",
+        is_partial=False,
+        total_score=0,
+        overall_difficulty=0,
+        request_payload=json.dumps({"chapter_ids": chapter_ids_list}, ensure_ascii=False),
+        content_payload=None,
+        created_by=user.id,
+    )
+    db.add(paper)
+    await db.flush()
+    paper_id = int(paper.id)
+    root = Path(settings.upload_dir)
+    root.mkdir(parents=True, exist_ok=True)
+    subdir = root / "paper_files"
+    subdir.mkdir(parents=True, exist_ok=True)
+    count = 0
+    for f in files or []:
+        if not f.filename or not (f.filename or "").strip():
+            continue
+        ext = (os.path.splitext(f.filename or "")[1] or "").lower()
+        if ext not in allowed:
+            continue
+        binary = await f.read()
+        if not binary:
+            continue
+        safe_name = _safe_upload_filename(f.filename)
+        saved_name = f"p{paper_id}_{int(time.time())}_{count}_{safe_name}"
+        abs_path = subdir / saved_name
+        abs_path.write_bytes(binary)
+        rel_path = f"paper_files/{saved_name}"
+        pf = PaperFile(paper_id=paper_id, file_name=(f.filename or "").strip(), file_path=rel_path)
+        db.add(pf)
+        count += 1
+    await db.flush()
+    return TeacherPaperImportOut(paper_id=paper_id, file_count=count)
+
+
+@router.get("/papers/export/csv")
+async def export_teacher_papers_csv(
+    course_id: int | None = Query(default=None),
+    chapter_ids: list[int] = Query(default=[]),
+    title_kw: str | None = Query(default=None),
+    difficulty_min: float | None = Query(default=None, ge=0, le=1),
+    difficulty_max: float | None = Query(default=None, ge=0, le=1),
+    review_status: str | None = Query(default=None),
+    paper_bank_type: str | None = Query(default=None),
+    status: str | None = Query(default=None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    rows = await _list_teacher_papers_filtered(
+        db=db,
+        teacher_id=user.id,
+        course_id=course_id,
+        chapter_ids=chapter_ids,
+        title_kw=title_kw,
+        difficulty_min=difficulty_min,
+        difficulty_max=difficulty_max,
+        review_status=review_status,
+        paper_bank_type=paper_bank_type,
+        status=status,
+    )
+    output = io.StringIO()
+    writer = csv.writer(output)
+    writer.writerow(["ID", "试卷标题", "课程", "试卷库类型", "来源", "状态", "整卷难度", "总分", "更新时间"])
+    for x in rows:
+        writer.writerow([
+            x.id,
+            x.title,
+            x.course_name,
+            "训练库" if x.paper_bank_type == "training" else "正式题库",
+            "本地题库" if x.question_source == "local" else "互联网",
+            "待审核" if x.review_status == "pending" else "已审核",
+            f"{x.overall_difficulty:.2f}",
+            x.total_score,
+            x.updated_at or "",
+        ])
+    content = output.getvalue()
+    output.close()
+    timestamp = datetime.now().strftime("%Y%m%d%H%M%S")
+    headers = {"Content-Disposition": f'attachment; filename="papers_{timestamp}.csv"'}
+    return StreamingResponse(iter([content]), media_type="text/csv; charset=utf-8", headers=headers)
+
+
+@router.get("/papers/{paper_id}", response_model=TeacherPaperDetailOut)
+async def get_teacher_paper_detail(
+    paper_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(Paper, Course)
+        .join(Course, Course.id == Paper.course_id)
+        .where(Paper.id == paper_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="试卷不存在或无权限")
+    p, c = row[0], row[1]
+    req_payload: dict = {}
+    content_payload: dict | None = None
+    try:
+        req_payload = json.loads(p.request_payload or "{}")
+        if not isinstance(req_payload, dict):
+            req_payload = {}
+    except Exception:
+        req_payload = {}
+    try:
+        content_payload = json.loads(p.content_payload) if p.content_payload else None
+        if content_payload is not None and not isinstance(content_payload, dict):
+            content_payload = None
+    except Exception:
+        content_payload = None
+    paper_type_val = getattr(p, "paper_type", None) or "electronic"
+    if paper_type_val not in ("electronic", "file"):
+        paper_type_val = "electronic"
+    return TeacherPaperDetailOut(
+        id=int(p.id),
+        course_id=int(c.id),
+        course_name=str(c.name),
+        title=p.title,
+        paper_type=paper_type_val,
+        paper_bank_type=_normalize_paper_bank_type(p.paper_bank_type),
+        question_source=_normalize_question_source(p.question_source),
+        status=_normalize_paper_status(p.status),
+        review_status=_normalize_paper_status(p.status),
+        is_partial=bool(p.is_partial),
+        total_score=float(p.total_score or 0),
+        overall_difficulty=round(float(p.overall_difficulty or 0), 2),
+        chapter_ids=[int(x) for x in (req_payload.get("chapter_ids") or []) if str(x).isdigit() and int(x) > 0],
+        request_payload=req_payload,
+        content_payload=content_payload,
+        error_message=p.error_message,
+        created_at=p.created_at.isoformat() if p.created_at else None,
+        updated_at=p.updated_at.isoformat() if p.updated_at else None,
+    )
+
+
+@router.put("/papers/{paper_id}", response_model=TeacherPaperDetailOut)
+async def update_teacher_paper(
+    paper_id: int,
+    body: TeacherPaperUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r = await db.execute(
+        select(Paper, Course)
+        .join(Course, Course.id == Paper.course_id)
+        .where(Paper.id == paper_id, Course.owner_teacher_id == user.id)
+    )
+    row = r.first()
+    if not row:
+        raise HTTPException(status_code=404, detail="试卷不存在或无权限")
+    p, c = row[0], row[1]
+    if body.title is not None:
+        t = body.title.strip()
+        if not t:
+            raise HTTPException(status_code=400, detail="试卷标题不能为空")
+        p.title = t[:128]
+    if body.status is not None:
+        p.status = _normalize_paper_status(body.status)
+        p.is_partial = False
+    if body.paper_bank_type is not None:
+        p.paper_bank_type = _normalize_paper_bank_type(body.paper_bank_type)
+    if body.question_source is not None:
+        p.question_source = _normalize_question_source(body.question_source)
+    if body.total_score is not None:
+        p.total_score = float(body.total_score)
+    if body.overall_difficulty is not None:
+        p.overall_difficulty = _normalize_difficulty_score(body.overall_difficulty, 0.0)
+    if body.request_payload is not None:
+        p.request_payload = json.dumps(body.request_payload, ensure_ascii=False)
+    if body.content_payload is not None:
+        p.content_payload = json.dumps(body.content_payload, ensure_ascii=False)
+    if body.error_message is not None:
+        p.error_message = (body.error_message or "").strip() or None
+    await db.flush()
+    req_payload: dict = {}
+    content_payload: dict | None = None
+    try:
+        req_payload = json.loads(p.request_payload or "{}")
+        if not isinstance(req_payload, dict):
+            req_payload = {}
+    except Exception:
+        req_payload = {}
+    try:
+        content_payload = json.loads(p.content_payload) if p.content_payload else None
+        if content_payload is not None and not isinstance(content_payload, dict):
+            content_payload = None
+    except Exception:
+        content_payload = None
+    paper_type_val = getattr(p, "paper_type", None) or "electronic"
+    if paper_type_val not in ("electronic", "file"):
+        paper_type_val = "electronic"
+    return TeacherPaperDetailOut(
+        id=int(p.id),
+        course_id=int(c.id),
+        course_name=str(c.name),
+        title=p.title,
+        paper_type=paper_type_val,
+        paper_bank_type=_normalize_paper_bank_type(p.paper_bank_type),
+        question_source=_normalize_question_source(p.question_source),
+        status=_normalize_paper_status(p.status),
+        review_status=_normalize_paper_status(p.status),
+        is_partial=bool(p.is_partial),
+        total_score=float(p.total_score or 0),
+        overall_difficulty=round(float(p.overall_difficulty or 0), 2),
+        chapter_ids=[int(x) for x in (req_payload.get("chapter_ids") or []) if str(x).isdigit() and int(x) > 0],
+        request_payload=req_payload,
+        content_payload=content_payload,
+        error_message=p.error_message,
+        created_at=p.created_at.isoformat() if p.created_at else None,
+        updated_at=p.updated_at.isoformat() if p.updated_at else None,
+    )
+
+
 def _is_document_task_cancelled(task_id: int) -> bool:
     return task_id in _document_task_cancelled
 
@@ -2473,25 +4328,45 @@ async def _run_document_process_task(task_id: int):
         await db.commit()
         _document_task_running.add(task_id)
 
-        r_doc = await db.execute(
-            select(KnowledgeDocument, Chapter, Course)
-            .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
-            .join(Course, Course.id == Chapter.course_id)
-            .where(
-                KnowledgeDocument.id == task.doc_id,
-                Chapter.id == task.chapter_id,
-                Course.id == task.course_id,
-                Course.owner_teacher_id == task.teacher_id,
+        if task.chapter_id is not None:
+            r_doc = await db.execute(
+                select(KnowledgeDocument, Chapter, Course)
+                .join(Chapter, Chapter.id == KnowledgeDocument.chapter_id)
+                .join(Course, Course.id == Chapter.course_id)
+                .where(
+                    KnowledgeDocument.id == task.doc_id,
+                    Chapter.id == task.chapter_id,
+                    Course.id == task.course_id,
+                    Course.owner_teacher_id == task.teacher_id,
+                )
             )
-        )
-        row = r_doc.first()
-        if not row:
-            task.status = "failed"
-            task.error_message = "文档不存在或无权限"
-            await db.commit()
-            _document_task_running.discard(task_id)
-            return
-        doc, chapter, course = row[0], row[1], row[2]
+            row = r_doc.first()
+            if not row:
+                task.status = "failed"
+                task.error_message = "文档不存在或无权限"
+                await db.commit()
+                _document_task_running.discard(task_id)
+                return
+            doc, chapter, course = row[0], row[1], row[2]
+        else:
+            r_doc = await db.execute(
+                select(KnowledgeDocument, Course)
+                .join(Course, Course.id == KnowledgeDocument.course_id)
+                .where(
+                    KnowledgeDocument.id == task.doc_id,
+                    Course.id == task.course_id,
+                    Course.owner_teacher_id == task.teacher_id,
+                )
+            )
+            row = r_doc.first()
+            if not row:
+                task.status = "failed"
+                task.error_message = "文档不存在或无权限"
+                await db.commit()
+                _document_task_running.discard(task_id)
+                return
+            doc, course = row[0], row[1]
+            chapter = None
         logger.info("doc_task_loaded task_id=%s doc_id=%s file=%s", task.id, doc.id, doc.file_name)
         if doc.source_type != "pdf_upload":
             task.status = "failed"
@@ -2607,6 +4482,26 @@ async def _run_document_process_task(task_id: int):
                 logger.exception("doc_reindex_failed file=%s course_id=%s doc_id=%s", file_name, course_id, doc_id)
                 tip = f"索引失败: {str(idx_err)[:240]}"
                 doc.parse_error = f"{doc.parse_error}；{tip}" if doc.parse_error else tip
+            # 仅当文档关联单独一个章节时，自动提取解析内容生成知识点并写入该章节
+            r_dc = await db.execute(
+                select(DocumentChapter.chapter_id).where(DocumentChapter.doc_id == doc.id)
+            )
+            doc_chapter_ids = [row[0] for row in r_dc.all()]
+            if len(doc_chapter_ids) == 1:
+                r_ch = await db.execute(select(Chapter).where(Chapter.id == doc_chapter_ids[0]))
+                chapter = r_ch.scalar_one_or_none()
+                if chapter:
+                    try:
+                        await _auto_generate_and_save_kps_for_chapter(db, chapter, max_count=10)
+                        logger.info(
+                            "doc_task_auto_kp task_id=%s doc_id=%s chapter_id=%s",
+                            task_id, doc_id, chapter.id,
+                        )
+                    except Exception as kp_err:
+                        logger.warning(
+                            "doc_task_auto_kp_failed task_id=%s doc_id=%s chapter_id=%s err=%s",
+                            task_id, doc_id, chapter.id, str(kp_err)[:200],
+                        )
             r = await db.execute(select(DocumentProcessTask).where(DocumentProcessTask.id == task_id))
             t = r.scalar_one_or_none()
             if t:
@@ -2658,6 +4553,192 @@ def _parse_numeric_id_csv(value: str | None) -> list[int]:
     return out
 
 
+@router.post("/questions/import/preview", response_model=TeacherImportQuestionsPreviewOut)
+async def preview_import_teacher_questions(
+    course_id: int = Form(...),
+    chapter_ids: str = Form(...),
+    question_bank_type: str = Form("training"),
+    files: list[UploadFile] = File(...),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    r_course = await db.execute(select(Course).where(Course.id == course_id, Course.owner_teacher_id == user.id))
+    course = r_course.scalar_one_or_none()
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+    try:
+        parsed_ids = json.loads(chapter_ids)
+        target_chapter_ids = sorted({int(x) for x in parsed_ids if int(x) > 0})
+    except Exception:
+        raise HTTPException(status_code=400, detail="chapter_ids 格式错误")
+    if not target_chapter_ids:
+        raise HTTPException(status_code=400, detail="请至少选择一个章节")
+    r_ch = await db.execute(
+        select(Chapter.id, Chapter.title)
+        .where(Chapter.course_id == course.id, Chapter.id.in_(target_chapter_ids))
+        .order_by(Chapter.id)
+    )
+    ch_rows = [(int(row[0]), str(row[1] or "")) for row in r_ch.all() if row[0] is not None]
+    owned_ids = sorted({cid for cid, _ in ch_rows})
+    if owned_ids != target_chapter_ids:
+        raise HTTPException(status_code=400, detail="存在不属于当前课程的章节")
+    chapter_options = [(cid, title) for cid, title in ch_rows if title]
+    chapter_options_text = "\n".join([f"- {title}" for _, title in chapter_options]) or "（无）"
+    normalized_bank_type = _normalize_question_bank_type(question_bank_type)
+    if not files:
+        raise HTTPException(status_code=400, detail="请上传文件")
+
+    extracted_docs: list[dict[str, object]] = []
+    for f in files:
+        file_name = (f.filename or "").strip()
+        if not file_name:
+            continue
+        ext = Path(file_name).suffix.lower()
+        binary = await f.read()
+        if not binary:
+            continue
+        text = ""
+        if ext == ".pdf":
+            try:
+                text, _ = _extract_pdf_text(binary, file_name)
+            except Exception:
+                text = ""
+        elif ext == ".docx":
+            text = _extract_docx_text(binary)
+        elif ext == ".doc":
+            text = _extract_legacy_word_text(binary)
+        else:
+            raise HTTPException(status_code=400, detail=f"不支持的文件格式: {file_name}")
+        if not text.strip():
+            continue
+        body = text.strip()
+        if len(body) > 16000:
+            body = body[:16000]
+        extracted_docs.append(
+            {
+                "idx": len(extracted_docs),
+                "file_name": file_name,
+                "text": body,
+                "is_answer": bool(re.search(r"(答案|解析|answer|solution)", file_name, flags=re.IGNORECASE)),
+            }
+        )
+
+    if not extracted_docs:
+        raise HTTPException(status_code=400, detail="未从上传文件提取到可用文本")
+    matched_pairs, unmatched_questions, unmatched_answers = _pair_documents_by_name(extracted_docs)
+
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    parse_jobs: list[tuple[str, str]] = []
+    for q_doc, a_doc in matched_pairs:
+        q_ctx = f"【文件：{q_doc['file_name']}】\n{q_doc['text']}"
+        a_ctx = f"【文件：{a_doc['file_name']}】\n{a_doc['text']}"
+        parse_jobs.append((q_ctx, a_ctx))
+    for q_doc in unmatched_questions:
+        q_ctx = f"【文件：{q_doc['file_name']}】\n{q_doc['text']}"
+        parse_jobs.append((q_ctx, "（未单独提供答案文档）"))
+    # 对未配对答案文档做兜底：按“单文档含题目+答案”场景解析，避免丢题。
+    for a_doc in unmatched_answers:
+        q_ctx = f"【文件：{a_doc['file_name']}】\n{a_doc['text']}"
+        a_ctx = f"【文件：{a_doc['file_name']}】\n{a_doc['text']}"
+        parse_jobs.append((q_ctx, a_ctx))
+    if not parse_jobs:
+        raise HTTPException(status_code=400, detail="未形成可解析的题目-答案文档配对")
+
+    parsed_items: list[TeacherImportQuestionPreviewItemOut] = []
+    for q_ctx, a_ctx in parse_jobs:
+        prompt = _build_import_questions_prompt(
+            question_context=q_ctx,
+            answer_context=a_ctx,
+            chapter_options_text=chapter_options_text,
+        )
+        raw = await asyncio.to_thread(
+            llm.generate,
+            prompt,
+            max_tokens=max(1600, int(settings.llm_max_tokens or 512)),
+            temperature=0.1,
+        )
+        candidates = _extract_json_payload(raw)
+        parsed_items.extend(_normalize_import_questions(candidates, chapter_options=chapter_options))
+
+    # 去重：按题干键合并，保留首次识别结果。
+    dedup_items: list[TeacherImportQuestionPreviewItemOut] = []
+    seen_keys: set[str] = set()
+    for item in parsed_items:
+        key = _normalize_text_key(item.question_text)
+        if not key or key in seen_keys:
+            continue
+        seen_keys.add(key)
+        dedup_items.append(item)
+    items = dedup_items
+    if not items:
+        raise HTTPException(status_code=400, detail="未识别到有效题目，请检查文档内容或重试")
+    return TeacherImportQuestionsPreviewOut(
+        course_id=course.id,
+        chapter_ids=target_chapter_ids,
+        question_bank_type=normalized_bank_type,
+        parsed_count=len(items),
+        items=items,
+    )
+
+
+@router.post("/questions/import/confirm", response_model=TeacherImportConfirmOut)
+async def confirm_import_teacher_questions(
+    body: TeacherImportConfirmIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """将导入预览表格中的题目写入习题库，状态默认为待审核。"""
+    r_course = await db.execute(select(Course).where(Course.id == body.course_id, Course.owner_teacher_id == user.id))
+    course = r_course.scalar_one_or_none()
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+    if not body.items:
+        raise HTTPException(status_code=400, detail="预览表格为空，请先上传并解析题目")
+    chapter_ids = sorted({item.chapter_id for item in body.items})
+    r_ch = await db.execute(
+        select(Chapter.id).where(Chapter.course_id == course.id, Chapter.id.in_(chapter_ids))
+    )
+    owned_ch_ids = {int(row[0]) for row in r_ch.all() if row[0] is not None}
+    if owned_ch_ids != set(chapter_ids):
+        raise HTTPException(status_code=400, detail="存在不属于当前课程的章节")
+    normalized_bank_type = _normalize_question_bank_type(body.question_bank_type)
+    imported = 0
+    for item in body.items:
+        q_text = (item.question_text or "").strip()
+        if not q_text:
+            continue
+        q_type = (item.question_type or "single_choice").strip() or "single_choice"
+        if q_type not in ("single_choice", "multiple_choice", "judge", "blank", "qa"):
+            q_type = "qa"
+        options_json = json.dumps(item.options or [], ensure_ascii=False) if (item.options or []) else None
+        diff_score = 0.8
+        if item.difficulty_score is not None and 0 <= item.difficulty_score <= 1:
+            diff_score = round(item.difficulty_score, 2)
+        db.add(
+            Question(
+                course_id=course.id,
+                chapter_id=item.chapter_id,
+                question_bank_type=normalized_bank_type,
+                difficulty_score=diff_score,
+                difficulty=difficulty_from_score(diff_score),
+                question_type=q_type,
+                question_text=q_text,
+                options=options_json,
+                correct_answer=(item.correct_answer or "").strip() or "-",
+                explanation=(item.explanation or "").strip() or None,
+                is_active=True,
+                is_approved=False,
+            )
+        )
+        imported += 1
+    await db.commit()
+    return TeacherImportConfirmOut(imported_count=imported, message=f"已导入 {imported} 道题目到习题库，状态为待审核。")
+
+
 @router.get("/chapters/{chapter_id}/questions", response_model=list[TeacherQuestionOut])
 async def list_teacher_chapter_questions(
     chapter_id: int,
@@ -2700,11 +4781,17 @@ async def list_teacher_chapter_questions(
             chapter_id=ch.id,
             chapter_title=ch.title,
             question_type=(q.question_type or "single_choice"),
+            question_bank_type=_normalize_question_bank_type(q.question_bank_type),
             difficulty=q.difficulty,
+            difficulty_score=_normalize_difficulty_score(q.difficulty_score),
             question_text=q.question_text,
             options=q.options,
             correct_answer=q.correct_answer,
             explanation=q.explanation,
+            remark=q.remark,
+            is_approved=bool(q.is_approved),
+            generated_time=q.generated_time.isoformat() if q.generated_time else None,
+            edited_time=q.edited_time.isoformat() if q.edited_time else None,
             knowledge_point_ids=q.knowledge_point_ids,
             knowledge_points=[kp_title_map[kid] for kid in q_kp_map.get(int(q.id), []) if kid in kp_title_map],
             created_at=q.created_at.isoformat() if q.created_at else None,
@@ -2732,6 +4819,10 @@ async def update_teacher_question(
     q, ch, c = row[0], row[1], row[2]
     if body.difficulty is not None:
         q.difficulty = _normalize_difficulty(body.difficulty)
+    if body.question_bank_type is not None:
+        q.question_bank_type = _normalize_question_bank_type(body.question_bank_type)
+    if body.difficulty_score is not None:
+        q.difficulty_score = _normalize_difficulty_score(body.difficulty_score)
     if body.question_text is not None:
         text = body.question_text.strip()
         if not text:
@@ -2749,9 +4840,34 @@ async def update_teacher_question(
         q.correct_answer = ans
     if body.explanation is not None:
         q.explanation = body.explanation.strip() or None
+    if body.remark is not None:
+        q.remark = body.remark.strip()[:128] or None
+    if body.is_approved is not None:
+        q.is_approved = bool(body.is_approved)
+    if body.knowledge_point_ids is not None:
+        incoming_ids = sorted({int(x) for x in body.knowledge_point_ids if int(x) > 0})
+        if incoming_ids:
+            r_kp = await db.execute(
+                select(KnowledgePoint.id).where(
+                    KnowledgePoint.chapter_id == q.chapter_id,
+                    KnowledgePoint.id.in_(incoming_ids),
+                )
+            )
+            valid_ids = sorted({int(row[0]) for row in r_kp.all() if row[0] is not None})
+            if len(valid_ids) != len(incoming_ids):
+                raise HTTPException(status_code=400, detail="存在不属于当前章节的知识点")
+            q.knowledge_point_ids = ",".join(str(x) for x in valid_ids)
+        else:
+            q.knowledge_point_ids = None
+    q.edited_time = datetime.utcnow()
     q.course_id = c.id
     await db.commit()
     await db.refresh(q)
+    kp_title_map: dict[int, str] = {}
+    kp_ids = _parse_numeric_id_csv(q.knowledge_point_ids)
+    if kp_ids:
+        r_kp_titles = await db.execute(select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_ids)))
+        kp_title_map = {int(row[0]): str(row[1]) for row in r_kp_titles.all() if row[0] and row[1]}
     return TeacherQuestionOut(
         id=q.id,
         course_id=q.course_id,
@@ -2759,13 +4875,19 @@ async def update_teacher_question(
         chapter_id=ch.id,
         chapter_title=ch.title,
         question_type=(q.question_type or "single_choice"),
+        question_bank_type=_normalize_question_bank_type(q.question_bank_type),
         difficulty=q.difficulty,
+        difficulty_score=_normalize_difficulty_score(q.difficulty_score),
         question_text=q.question_text,
         options=q.options,
         correct_answer=q.correct_answer,
         explanation=q.explanation,
+        remark=q.remark,
+        is_approved=bool(q.is_approved),
+        generated_time=q.generated_time.isoformat() if q.generated_time else None,
+        edited_time=q.edited_time.isoformat() if q.edited_time else None,
         knowledge_point_ids=q.knowledge_point_ids,
-        knowledge_points=[],
+        knowledge_points=[kp_title_map[kid] for kid in kp_ids if kid in kp_title_map],
         created_at=q.created_at.isoformat() if q.created_at else None,
     )
 
@@ -2794,6 +4916,20 @@ async def delete_teacher_question(
     return {"ok": True}
 
 
+async def _get_doc_chapter_ids(db: AsyncSession, doc_ids: list[int]) -> dict[int, list[int]]:
+    if not doc_ids:
+        return {}
+    r = await db.execute(
+        select(DocumentChapter.doc_id, DocumentChapter.chapter_id).where(DocumentChapter.doc_id.in_(doc_ids))
+    )
+    out: dict[int, list[int]] = {i: [] for i in doc_ids}
+    for doc_id, ch_id in r.all():
+        out.setdefault(doc_id, []).append(ch_id)
+    for k in out:
+        out[k] = sorted(out[k])
+    return out
+
+
 @router.get("/chapters/{chapter_id}/documents", response_model=list[TeacherKnowledgeDocumentOut])
 async def list_teacher_chapter_documents(
     chapter_id: int,
@@ -2802,12 +4938,15 @@ async def list_teacher_chapter_documents(
 ):
     await _require_owned_chapter(db, user.id, chapter_id)
     active_task_doc_ids = await _reconcile_document_process_tasks(db, user.id, chapter_id=chapter_id)
+    dc_sub = select(DocumentChapter.doc_id).where(DocumentChapter.chapter_id == chapter_id).distinct()
     r = await db.execute(
         select(KnowledgeDocument)
-        .where(KnowledgeDocument.chapter_id == chapter_id)
+        .where(or_(KnowledgeDocument.id.in_(dc_sub), KnowledgeDocument.chapter_id == chapter_id))
         .order_by(KnowledgeDocument.id.desc())
     )
     rows = r.scalars().all()
+    doc_ids = [d.id for d in rows]
+    chapter_ids_map = await _get_doc_chapter_ids(db, doc_ids)
     orphan_fixed = False
     for d in rows:
         if d.parse_status == "processing" and d.id not in active_task_doc_ids:
@@ -2822,6 +4961,7 @@ async def list_teacher_chapter_documents(
         TeacherKnowledgeDocumentOut(
             id=d.id,
             chapter_id=d.chapter_id,
+            course_id=getattr(d, "course_id", None),
             source_type=d.source_type,
             title=d.title,
             page_ref=d.page_ref,
@@ -2830,6 +4970,9 @@ async def list_teacher_chapter_documents(
             parse_status="processing" if d.id in active_task_doc_ids else d.parse_status,
             parse_error=None if d.id in active_task_doc_ids else d.parse_error,
             chunk_count=d.chunk_count,
+            student_visible=getattr(d, "student_visible", True) if getattr(d, "student_visible", None) is not None else True,
+            downloadable=getattr(d, "downloadable", True) if getattr(d, "downloadable", None) is not None else True,
+            chapter_ids=chapter_ids_map.get(d.id, []),
             created_at=d.created_at.isoformat() if d.created_at else None,
         )
         for d in rows
@@ -2860,6 +5003,7 @@ async def upload_teacher_chapter_document(
     rel_path = f"knowledge/{saved_name}"
 
     doc = KnowledgeDocument(
+        course_id=chapter.course_id,
         chapter_id=chapter.id,
         source_type="pdf_upload",
         title=file.filename,
@@ -2870,14 +5014,19 @@ async def upload_teacher_chapter_document(
         parse_status="uploaded",
         parse_error=None,
         chunk_count=None,
+        student_visible=False,
+        downloadable=False,
     )
     db.add(doc)
+    await db.flush()
+    db.add(DocumentChapter(doc_id=doc.id, chapter_id=chapter.id))
 
     await db.commit()
     await db.refresh(doc)
     return TeacherKnowledgeDocumentOut(
         id=doc.id,
         chapter_id=doc.chapter_id,
+        course_id=doc.course_id,
         source_type=doc.source_type,
         title=doc.title,
         page_ref=doc.page_ref,
@@ -2886,6 +5035,9 @@ async def upload_teacher_chapter_document(
         parse_status=doc.parse_status,
         parse_error=doc.parse_error,
         chunk_count=doc.chunk_count,
+        student_visible=doc.student_visible,
+        downloadable=doc.downloadable,
+        chapter_ids=[chapter.id],
         created_at=doc.created_at.isoformat() if doc.created_at else None,
     )
 
@@ -2917,6 +5069,7 @@ async def upload_teacher_chapter_video(
     abs_path.write_bytes(binary)
     rel_path = f"preview_videos/{saved_name}"
     doc = KnowledgeDocument(
+        course_id=chapter.course_id,
         chapter_id=chapter.id,
         source_type="preview_video",
         title=file.filename,
@@ -2927,13 +5080,18 @@ async def upload_teacher_chapter_video(
         parse_status="done",
         parse_error=None,
         chunk_count=0,
+        student_visible=False,
+        downloadable=False,
     )
     db.add(doc)
+    await db.flush()
+    db.add(DocumentChapter(doc_id=doc.id, chapter_id=chapter.id))
     await db.commit()
     await db.refresh(doc)
     return TeacherKnowledgeDocumentOut(
         id=doc.id,
         chapter_id=doc.chapter_id,
+        course_id=doc.course_id,
         source_type=doc.source_type,
         title=doc.title,
         page_ref=doc.page_ref,
@@ -2942,6 +5100,9 @@ async def upload_teacher_chapter_video(
         parse_status=doc.parse_status,
         parse_error=doc.parse_error,
         chunk_count=doc.chunk_count,
+        student_visible=doc.student_visible,
+        downloadable=doc.downloadable,
+        chapter_ids=[chapter.id],
         created_at=doc.created_at.isoformat() if doc.created_at else None,
     )
 
@@ -2953,6 +5114,8 @@ async def get_teacher_document_detail(
     user: User = Depends(require_teacher),
 ):
     doc, chapter, course = await _require_owned_document(db, user.id, doc_id)
+    chapter_ids_map = await _get_doc_chapter_ids(db, [doc.id])
+    doc_chapter_ids = chapter_ids_map.get(doc.id, [])
     active_task_doc_ids = await _reconcile_document_process_tasks(db, user.id, doc_id=doc.id)
     if doc.parse_status == "processing" and doc.id not in active_task_doc_ids:
         doc.parse_status = "failed"
@@ -2964,11 +5127,12 @@ async def get_teacher_document_detail(
     effective_status = "processing" if active_task else doc.parse_status
     effective_error = None if active_task else doc.parse_error
     chunks_out: list[TeacherDocumentChunkOut] = []
-    if doc.content and doc.parse_status == "done":
+    ch_id = (chapter.id if chapter else None) or doc.chapter_id or (doc_chapter_ids[0] if doc_chapter_ids else None)
+    if doc.content and doc.parse_status == "done" and course and ch_id:
         from ..rag import ChunkDocument
         from ..rag.chunking import chunk_documents
         chunks = chunk_documents(
-            [ChunkDocument(text=(doc.content or "").strip(), course_id=course.id, chapter_id=chapter.id, title=doc.title, source_id=f"doc_{doc.id}")]
+            [ChunkDocument(text=(doc.content or "").strip(), course_id=course.id, chapter_id=ch_id, title=doc.title, source_id=f"doc_{doc.id}")]
         )
         chunks_out = [TeacherDocumentChunkOut(index=i + 1, text=chunk[0]) for i, chunk in enumerate(chunks[:50])]
     preview = (doc.content or "").strip()
@@ -2977,6 +5141,7 @@ async def get_teacher_document_detail(
     return TeacherKnowledgeDocumentDetailOut(
         id=doc.id,
         chapter_id=doc.chapter_id,
+        course_id=getattr(doc, "course_id", None),
         source_type=doc.source_type,
         title=doc.title,
         page_ref=doc.page_ref,
@@ -2985,9 +5150,60 @@ async def get_teacher_document_detail(
         parse_status=effective_status,
         parse_error=effective_error,
         chunk_count=doc.chunk_count,
+        student_visible=getattr(doc, "student_visible", True) if getattr(doc, "student_visible", None) is not None else True,
+        downloadable=getattr(doc, "downloadable", True) if getattr(doc, "downloadable", None) is not None else True,
+        chapter_ids=doc_chapter_ids,
         created_at=doc.created_at.isoformat() if doc.created_at else None,
         content_preview=preview,
         chunks=chunks_out,
+    )
+
+
+class TeacherDocumentPatchIn(BaseModel):
+    student_visible: bool | None = None
+    downloadable: bool | None = None
+    chapter_ids: list[int] | None = None
+
+
+@router.patch("/documents/{doc_id}", response_model=TeacherKnowledgeDocumentOut)
+async def patch_teacher_document(
+    doc_id: int,
+    body: TeacherDocumentPatchIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    doc, chapter, course = await _require_owned_document(db, user.id, doc_id)
+    if body.student_visible is not None:
+        doc.student_visible = body.student_visible
+    if body.downloadable is not None:
+        doc.downloadable = body.downloadable
+    if body.chapter_ids is not None:
+        await db.execute(delete(DocumentChapter).where(DocumentChapter.doc_id == doc.id))
+        for ch_id in body.chapter_ids:
+            await _require_owned_chapter(db, user.id, ch_id)
+            db.add(DocumentChapter(doc_id=doc.id, chapter_id=ch_id))
+        doc.chapter_id = body.chapter_ids[0] if body.chapter_ids else None
+        if course and body.chapter_ids:
+            doc.course_id = course.id
+    await db.commit()
+    await db.refresh(doc)
+    chapter_ids_map = await _get_doc_chapter_ids(db, [doc.id])
+    return TeacherKnowledgeDocumentOut(
+        id=doc.id,
+        chapter_id=doc.chapter_id,
+        course_id=getattr(doc, "course_id", None),
+        source_type=doc.source_type,
+        title=doc.title,
+        page_ref=doc.page_ref,
+        file_name=doc.file_name,
+        file_size=doc.file_size,
+        parse_status=doc.parse_status,
+        parse_error=doc.parse_error,
+        chunk_count=doc.chunk_count,
+        student_visible=getattr(doc, "student_visible", True) if getattr(doc, "student_visible", None) is not None else True,
+        downloadable=getattr(doc, "downloadable", True) if getattr(doc, "downloadable", None) is not None else True,
+        chapter_ids=chapter_ids_map.get(doc.id, []),
+        created_at=doc.created_at.isoformat() if doc.created_at else None,
     )
 
 
@@ -3027,6 +5243,8 @@ async def reprocess_teacher_document(
     doc, chapter, course = await _require_owned_document(db, user.id, doc_id)
     if doc.source_type != "pdf_upload":
         raise HTTPException(status_code=400, detail="仅 PDF 讲义支持重新识别与切片")
+    r_dc = await db.execute(select(DocumentChapter.chapter_id).where(DocumentChapter.doc_id == doc.id))
+    dc_chapter_ids = [row[0] for row in r_dc.all()]
     if not doc.file_path:
         raise HTTPException(status_code=400, detail="文档原文件不存在，无法重新识别")
     abs_path = Path(settings.upload_dir) / doc.file_path
@@ -3055,9 +5273,17 @@ async def reprocess_teacher_document(
     doc.parse_status = "processing"
     doc.parse_error = None
     doc.chunk_count = None
+    ch_id = (chapter.id if chapter else None) or doc.chapter_id
+    if not ch_id and dc_chapter_ids:
+        ch_id = dc_chapter_ids[0]
+    if not course:
+        raise HTTPException(status_code=400, detail="文档未关联课程，无法处理")
+    if doc.chapter_id is None and ch_id:
+        doc.chapter_id = ch_id
+        await db.flush()
     task = DocumentProcessTask(
         course_id=course.id,
-        chapter_id=chapter.id,
+        chapter_id=ch_id,  # 无章节时为 None，按课程维度解析
         doc_id=doc.id,
         teacher_id=user.id,
         status="pending",
@@ -3066,7 +5292,7 @@ async def reprocess_teacher_document(
     db.add(task)
     await db.commit()
     await db.refresh(task)
-    logger.info("doc_task_created task_id=%s doc_id=%s chapter_id=%s", task.id, doc.id, chapter.id)
+    logger.info("doc_task_created task_id=%s doc_id=%s chapter_id=%s", task.id, doc.id, ch_id)
     background_tasks.add_task(_run_document_process_task_thread, task.id)
     return TeacherDocumentProcessTaskOut(task_id=task.id, status=task.status)
 
@@ -3303,6 +5529,24 @@ async def delete_teacher_class(
     return {"ok": True}
 
 
+# 批量导入学生模版文件（放在 app/static 下，表头：学号，姓名，学号不能为空）
+_STUDENT_IMPORT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "static" / "学生导入模版.csv"
+
+
+@router.get("/classes/students/import-template")
+async def download_student_import_template(
+    user: User = Depends(require_teacher),
+):
+    """下载批量导入学生用的电子表格模版文件，表头：学号，姓名。学号不能为空。"""
+    if not _STUDENT_IMPORT_TEMPLATE_PATH.is_file():
+        raise HTTPException(status_code=500, detail="模版文件不存在")
+    return FileResponse(
+        path=str(_STUDENT_IMPORT_TEMPLATE_PATH),
+        filename="学生导入模版.csv",
+        media_type="text/csv; charset=utf-8",
+    )
+
+
 @router.get("/classes/{class_id}/students", response_model=list[TeacherStudentOut])
 async def list_teacher_class_students(
     class_id: int,
@@ -3328,7 +5572,13 @@ async def list_teacher_class_students(
         keyword = f"%{name.strip()}%"
         qry = qry.where((User.display_name.ilike(keyword)) | (User.username.ilike(keyword)))
     r = await db.execute(qry)
-    return [TeacherStudentOut(id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name) for s in r.scalars().all()]
+    return [
+        TeacherStudentOut(
+            id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name,
+            admin_class_or_dept=getattr(s, "admin_class_or_dept", None),
+        )
+        for s in r.scalars().all()
+    ]
 
 
 @router.post("/classes/{class_id}/students/assign")
@@ -3370,6 +5620,82 @@ async def assign_students_to_teacher_class(
     return {"ok": True, "assigned": assigned}
 
 
+@router.post("/classes/{class_id}/students/import")
+async def import_students_to_teacher_class(
+    class_id: int,
+    file: UploadFile = File(..., description="CSV 或 Excel 表格，表头含学号、姓名，学号不能为空"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """通过上传填好的模版文件，按学号匹配用户表，将学生批量加入班级。匹配不到学号的行不导入。"""
+    await _require_owned_class(db, user.id, class_id)
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请选择文件")
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("gbk").strip()
+        except Exception:
+            raise HTTPException(status_code=400, detail="文件编码不支持，请使用 UTF-8 或 GBK 保存的 CSV")
+    if not text:
+        raise HTTPException(status_code=400, detail="文件为空")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(status_code=400, detail="文件无有效行")
+    # 首行表头，支持中英文
+    header = [str(c).strip() for c in rows[0]]
+    col_no = col_name = None
+    for i, h in enumerate(header):
+        if h in ("学号", "student_no", "学号 ", "student_no "):
+            col_no = i
+        if h in ("姓名", "name", "姓名 ", "name "):
+            col_name = i
+    if col_no is None:
+        raise HTTPException(status_code=400, detail="表头需包含「学号」列")
+    data_rows = rows[1:]
+    student_nos = []
+    for r in data_rows:
+        if len(r) > col_no and r[col_no] is not None and str(r[col_no]).strip():
+            student_nos.append(str(r[col_no]).strip())
+    if not student_nos:
+        return {"ok": True, "imported": 0, "skipped": 0, "not_found": [], "message": "文件中无有效学号（学号不能为空）"}
+    # 按学号查用户表（学生角色）
+    qry = select(User).where(
+        User.role == UserRole.student.value,
+        User.student_no.in_(student_nos),
+    )
+    r = await db.execute(qry)
+    users_by_no = {u.student_no: u for u in r.scalars().all() if u.student_no}
+    # 已有成员
+    r_m = await db.execute(
+        select(StudentClassMembership.student_id).where(StudentClassMembership.class_id == class_id)
+    )
+    existing_ids = {row[0] for row in r_m.all()}
+    imported = 0
+    not_found = []
+    for no in student_nos:
+        u = users_by_no.get(no)
+        if not u:
+            not_found.append(no)
+            continue
+        if u.id in existing_ids:
+            continue
+        db.add(StudentClassMembership(student_id=u.id, class_id=class_id))
+        existing_ids.add(u.id)
+        imported += 1
+    await db.commit()
+    return {
+        "ok": True,
+        "imported": imported,
+        "skipped": len(student_nos) - imported - len(not_found),
+        "not_found": not_found,
+        "message": f"成功导入 {imported} 人" + (f"，以下学号在系统中未找到：{', '.join(not_found[:20])}" + (" …" if len(not_found) > 20 else "") if not_found else ""),
+    }
+
+
 @router.delete("/classes/{class_id}/students/{student_id}")
 async def remove_student_from_teacher_class(
     class_id: int,
@@ -3397,6 +5723,7 @@ async def list_students_for_teacher(
     q: str | None = Query(None),
     student_no: str | None = Query(None),
     name: str | None = Query(None),
+    admin_class_or_dept: str | None = Query(None, description="按行政班级筛选，学生角色的 admin_class_or_dept"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
@@ -3409,8 +5736,32 @@ async def list_students_for_teacher(
     if name and name.strip():
         keyword = f"%{name.strip()}%"
         qry = qry.where((User.display_name.ilike(keyword)) | (User.username.ilike(keyword)))
+    if admin_class_or_dept is not None and admin_class_or_dept.strip():
+        qry = qry.where(User.admin_class_or_dept == admin_class_or_dept.strip())
     r = await db.execute(qry)
-    return [TeacherStudentOut(id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name) for s in r.scalars().all()]
+    return [
+        TeacherStudentOut(
+            id=s.id, username=s.username, student_no=s.student_no, display_name=s.display_name,
+            admin_class_or_dept=getattr(s, "admin_class_or_dept", None),
+        )
+        for s in r.scalars().all()
+    ]
+
+
+@router.get("/students/admin-classes", response_model=list[str])
+async def list_student_admin_classes(
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """返回学生角色用户中「行政班级/部门」去重后的非空列表，供添加学生时按行政班级筛选。"""
+    qry = (
+        select(User.admin_class_or_dept)
+        .where(User.role == UserRole.student.value, User.admin_class_or_dept.isnot(None), User.admin_class_or_dept != "")
+        .distinct()
+        .order_by(User.admin_class_or_dept)
+    )
+    r = await db.execute(qry)
+    return [row[0].strip() for row in r.all() if row[0] and row[0].strip()]
 
 
 async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
@@ -3419,6 +5770,33 @@ async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
         return None
     r = await db.execute(select(StudentClassMembership.student_id).where(StudentClassMembership.class_id == class_id))
     return [row[0] for row in r.all()]
+
+
+async def _student_count_in_scope(
+    db: AsyncSession,
+    class_id: int | None,
+    user_ids: list[int] | None,
+    scoped_course_ids: set[int] | None,
+    teacher_id: int | None,
+) -> int:
+    """统计当前筛选范围内「选课学生总数」：选该班级或选该课程（或章节所属课程）的学生去重人数。"""
+    if class_id is not None and user_ids is not None:
+        return len(user_ids)
+    if scoped_course_ids is None or not scoped_course_ids:
+        return 0
+    q_class = select(Class.id).where(Class.course_id.in_(scoped_course_ids))
+    if teacher_id is not None:
+        q_class = q_class.where(Class.owner_teacher_id == teacher_id)
+    r_class = await db.execute(q_class)
+    class_ids = [row[0] for row in r_class.all()]
+    if not class_ids:
+        return 0
+    r = await db.execute(
+        select(func.count(func.distinct(StudentClassMembership.student_id))).where(
+            StudentClassMembership.class_id.in_(class_ids)
+        )
+    )
+    return r.scalar() or 0
 
 
 AUTO_SYNONYM_REFRESH_HOURS = 24
@@ -3652,7 +6030,8 @@ def _merge_similar_questions(rows: list[tuple[str, int, int | None]], course_syn
         question = (question_text or "").strip()
         if not question:
             continue
-        aliases = course_synonym_maps.get(course_id or -1, {})
+        cid = course_id if course_id is not None else -1
+        aliases = course_synonym_maps.get(cid, {})
         key = _normalize_question_text(question, aliases) or question
         hit = None
         for c in clusters:
@@ -3664,17 +6043,25 @@ def _merge_similar_questions(rows: list[tuple[str, int, int | None]], course_syn
                 "key": key,
                 "question": question,
                 "count": int(count or 0),
+                "course_counts": {cid: int(count or 0)} if cid >= 0 else {},
             })
             continue
         hit["count"] += int(count or 0)
+        if cid >= 0:
+            hit["course_counts"][cid] = hit["course_counts"].get(cid, 0) + int(count or 0)
         if len(question) < len(hit["question"]):
             hit["question"] = question
         if len(key) < len(hit["key"]):
             hit["key"] = key
-    merged = sorted(
-        [{"question": c["question"], "count": c["count"]} for c in clusters],
-        key=lambda x: (-x["count"], x["question"]),
-    )
+    merged = []
+    for c in clusters:
+        rep_course_id: int | None = None
+        if c.get("course_counts"):
+            rep_course_id = max(c["course_counts"], key=c["course_counts"].get)
+            if rep_course_id == -1:
+                rep_course_id = None
+        merged.append({"question": c["question"], "count": c["count"], "course_id": rep_course_id})
+    merged = sorted(merged, key=lambda x: (-x["count"], x["question"]))
     return merged[:limit]
 
 
@@ -3726,17 +6113,17 @@ async def stats_overview(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
-    if class_id is not None and user.role == UserRole.teacher.value:
+    if class_id is not None and _is_teacher_scoped(user):
         await _require_owned_class(db, user.id, class_id)
     user_ids = await _user_ids_by_class(db, class_id)
-    teacher_course_ids = await _teacher_course_ids(db, user.id) if user.role == UserRole.teacher.value else set()
-    if user.role == UserRole.teacher.value and course_id is not None and course_id not in teacher_course_ids:
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if _is_teacher_scoped(user) else set()
+    if _is_teacher_scoped(user) and course_id is not None and course_id not in teacher_course_ids:
         raise HTTPException(status_code=404, detail="课程不存在或无权限")
 
     scoped_course_ids: set[int] | None = None
     if course_id is not None:
         scoped_course_ids = {course_id}
-    elif user.role == UserRole.teacher.value:
+    elif _is_teacher_scoped(user):
         scoped_course_ids = teacher_course_ids
 
     chapter_obj = None
@@ -3760,20 +6147,30 @@ async def stats_overview(
             scoped_chapter_ids = [row[0] for row in r_ch.all()]
         else:
             scoped_chapter_ids = []
-    # 预习完成率（可选按班级）
-    q_pr = select(func.count(PreviewRecord.id))
-    q_pr_done = select(func.count(PreviewRecord.id)).where(PreviewRecord.completed == True)
+    # 预习完成率 = 完成预习的学生数 / 选该课或该章节的学生总数（按班级/课程/章节筛选）
+    total_students_in_scope = await _student_count_in_scope(
+        db, class_id, user_ids, scoped_course_ids, user.id if _is_teacher_scoped(user) else None
+    )
+    # 分子：至少有一条 completed=true 的预习记录的去重学生数
+    q_done_preview_students = select(func.count(func.distinct(PreviewRecord.user_id))).where(
+        PreviewRecord.completed == True
+    )
     if scoped_chapter_ids is not None:
-        q_pr = q_pr.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
-        q_pr_done = q_pr_done.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
+        q_done_preview_students = q_done_preview_students.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
-        q_pr = q_pr.where(PreviewRecord.user_id.in_(user_ids))
-        q_pr_done = q_pr_done.where(PreviewRecord.user_id.in_(user_ids))
-    total_preview = await db.execute(q_pr)
-    completed_preview = await db.execute(q_pr_done)
-    pr_total = total_preview.scalar() or 0
-    pr_done = completed_preview.scalar() or 0
-    preview_rate = (pr_done / pr_total * 100) if pr_total else 0.0
+        q_done_preview_students = q_done_preview_students.where(PreviewRecord.user_id.in_(user_ids))
+    r_done_preview = await db.execute(q_done_preview_students)
+    done_preview_student_count = r_done_preview.scalar() or 0
+    preview_rate = (done_preview_student_count / total_students_in_scope * 100) if total_students_in_scope else 0.0
+
+    # 预习学生数：有预习记录的去重用户数（与展示一致，表示「有做过预习的学生数」）
+    q_preview_students = select(func.count(func.distinct(PreviewRecord.user_id)))
+    if scoped_chapter_ids is not None:
+        q_preview_students = q_preview_students.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
+    if user_ids is not None:
+        q_preview_students = q_preview_students.where(PreviewRecord.user_id.in_(user_ids))
+    r_preview_students = await db.execute(q_preview_students)
+    preview_student_count = r_preview_students.scalar() or 0
 
     # 高频问题
     top_q_stmt = (
@@ -3784,7 +6181,7 @@ async def stats_overview(
         )
         .group_by(QuestionAsked.course_id, QuestionAsked.question_text)
     )
-    if user.role == UserRole.teacher.value:
+    if _is_teacher_scoped(user):
         # 高频提问固定按课程口径，不随章节筛选变化。
         top_q_stmt = _apply_teacher_qa_scope(top_q_stmt, scoped_course_ids, None)
     else:
@@ -3820,6 +6217,38 @@ async def stats_overview(
     ans_total = total_answers.scalar() or 0
     ans_ok = correct_answers.scalar() or 0
     accuracy = (ans_ok / ans_total * 100) if ans_total else 0.0
+    completed_question_count = ans_total
+
+    # 反馈问题数：按课程( course_id )、班级( user_ids )筛选
+    q_feedback = select(func.count(StudentFeedback.id))
+    if scoped_course_ids is not None and scoped_course_ids:
+        q_feedback = q_feedback.where(StudentFeedback.course_id.in_(scoped_course_ids))
+    if user_ids is not None:
+        q_feedback = q_feedback.where(StudentFeedback.user_id.in_(user_ids))
+    r_feedback = await db.execute(q_feedback)
+    feedback_question_count = r_feedback.scalar() or 0
+
+    # AI无关问题数：按表字段 course_irrelevant 统计（大模型在知识库未命中时判断为与课程无关的提问）
+    q_irrelevant = select(func.count(QuestionAsked.id)).where(
+        QuestionAsked.course_irrelevant == True
+    )
+    if _is_teacher_scoped(user):
+        if scoped_course_ids is not None:
+            if not scoped_course_ids:
+                q_irrelevant = q_irrelevant.where(QuestionAsked.id == -1)
+            else:
+                q_irrelevant = q_irrelevant.where(QuestionAsked.course_id.in_(scoped_course_ids))
+        if scoped_chapter_ids is not None and scoped_chapter_ids:
+            q_irrelevant = q_irrelevant.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+    else:
+        if scoped_course_ids is not None:
+            q_irrelevant = q_irrelevant.where(QuestionAsked.course_id.in_(scoped_course_ids))
+        if scoped_chapter_ids is not None:
+            q_irrelevant = q_irrelevant.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+    if user_ids is not None:
+        q_irrelevant = q_irrelevant.where(QuestionAsked.user_id.in_(user_ids))
+    r_irrelevant = await db.execute(q_irrelevant)
+    ai_irrelevant_count = r_irrelevant.scalar() or 0
 
     # 薄弱知识点（Top 5）：按错题次数累计到知识点，再取频次最高的 5 个标题
     wrong_q_ids = (
@@ -3838,24 +6267,34 @@ async def stats_overview(
     r_wrong = await db.execute(wrong_q_ids)
     wrong_rows = [(int(row[0]), int(row[1] or 0)) for row in r_wrong.all() if row[0] is not None]
     weak_titles: list[str] = []
+    weak_course_ids: list[int | None] = []
+    weak_wrong_counts: list[int] = []
     if wrong_rows:
         wqids = [qid for qid, _ in wrong_rows]
         wrong_count_by_qid = {qid: cnt for qid, cnt in wrong_rows}
         r_questions = await db.execute(select(Question).where(Question.id.in_(wqids)))
         questions = r_questions.scalars().all()
-        kp_wrong_counts: dict[int, int] = {}
+        # (kp_id, course_id) -> wrong_count，用于“全部”时每条薄弱知识点显示所属课程
+        kp_course_counts: dict[tuple[int, int], int] = {}
         for q in questions:
             q_wrong = int(wrong_count_by_qid.get(int(q.id), 0))
             if q_wrong <= 0:
                 continue
+            cid = int(q.course_id) if q.course_id is not None else -1
             if q.knowledge_point_ids:
                 for x in str(q.knowledge_point_ids).split(","):
                     x = x.strip()
                     if x.isdigit():
                         kp_id = int(x)
-                        kp_wrong_counts[kp_id] = kp_wrong_counts.get(kp_id, 0) + q_wrong
-        if kp_wrong_counts:
-            kp_stmt = select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_wrong_counts.keys()))
+                        if cid >= 0:
+                            key = (kp_id, cid)
+                            kp_course_counts[key] = kp_course_counts.get(key, 0) + q_wrong
+        # 按 kp_id 汇总总错题数，再按总错题数排序取 top5；每条取贡献最大的 course_id
+        kp_total: dict[int, int] = {}
+        for (kid, cid), cnt in kp_course_counts.items():
+            kp_total[kid] = kp_total.get(kid, 0) + cnt
+        if kp_total:
+            kp_stmt = select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_total.keys()))
             if scoped_chapter_ids is not None:
                 kp_stmt = kp_stmt.where(KnowledgePoint.chapter_id.in_(scoped_chapter_ids))
             elif scoped_course_ids is not None:
@@ -3863,18 +6302,690 @@ async def stats_overview(
             r_kp = await db.execute(kp_stmt)
             kp_title_map = {int(row[0]): row[1] for row in r_kp.all() if row[1]}
             ranked = sorted(
-                [(kp_title_map[kid], cnt) for kid, cnt in kp_wrong_counts.items() if kid in kp_title_map],
-                key=lambda x: (-x[1], x[0]),
+                [(kid, kp_title_map[kid], kp_total[kid]) for kid in kp_total if kid in kp_title_map],
+                key=lambda x: (-x[2], x[1]),
             )
-            weak_titles = [title for title, _ in ranked[:5]]
+            for kid, title, wrong_cnt in ranked[:5]:
+                weak_titles.append(title)
+                weak_wrong_counts.append(wrong_cnt)
+                best_cid: int | None = None
+                best_count = 0
+                for (k, c), cnt in kp_course_counts.items():
+                    if k == kid and cnt > best_count:
+                        best_count = cnt
+                        best_cid = c
+                weak_course_ids.append(best_cid)
     if not weak_titles and ans_total:
-        weak_titles = []  # 无错题时留空，不再写死
+        weak_titles = []
+        weak_course_ids = []
+        weak_wrong_counts = []
 
     return StatsOverviewOut(
         preview_completion_rate=round(preview_rate, 1),
+        preview_student_count=int(preview_student_count),
+        completed_question_count=int(completed_question_count),
+        feedback_question_count=int(feedback_question_count),
         top_asked=top_asked,
         answer_accuracy_rate=round(accuracy, 1),
+        ai_irrelevant_count=int(ai_irrelevant_count),
         weak_knowledge_points=weak_titles,
+        weak_knowledge_point_course_ids=weak_course_ids,
+        weak_knowledge_point_wrong_counts=weak_wrong_counts,
+    )
+
+
+@router.get("/stats/by-course-student", response_model=list[StatsByCourseStudentRowOut])
+async def stats_by_course_student(
+    course_id: int | None = Query(None),
+    class_id: int | None = Query(None),
+    student_id: int | None = Query(None),
+    start_date: str | None = Query(None, description="统计周期起日 YYYY-MM-DD"),
+    end_date: str | None = Query(None, description="统计周期止日 YYYY-MM-DD"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """学情课程统计详细表：按「课程+学生」维度返回真实统计。班级名称来自教师管理且关联该课程、该学生为其成员的班级（与 /teacher/classes 一致）。可选 start_date/end_date 按时间区间过滤。"""
+    if class_id is not None and _is_teacher_scoped(user):
+        await _require_owned_class(db, user.id, class_id)
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if _is_teacher_scoped(user) else set()
+    scoped_course_ids: set[int] = set()
+    if course_id is not None:
+        if _is_teacher_scoped(user) and course_id not in teacher_course_ids:
+            raise HTTPException(status_code=404, detail="课程不存在或无权限")
+        scoped_course_ids = {course_id}
+    else:
+        scoped_course_ids = teacher_course_ids or set()
+    if not scoped_course_ids:
+        return []
+
+    # (course_id, student_id) -> (class_name, course_name, student_no, student_name)
+    q_pairs = (
+        select(
+            Class.course_id,
+            StudentClassMembership.student_id,
+            Class.name.label("class_name"),
+        )
+        .select_from(Class)
+        .join(StudentClassMembership, StudentClassMembership.class_id == Class.id)
+        .where(Class.course_id.in_(scoped_course_ids))
+    )
+    if _is_teacher_scoped(user):
+        q_pairs = q_pairs.where(Class.owner_teacher_id == user.id)
+    if class_id is not None:
+        q_pairs = q_pairs.where(Class.id == class_id)
+    if student_id is not None:
+        q_pairs = q_pairs.where(StudentClassMembership.student_id == student_id)
+    r_pairs = await db.execute(q_pairs)
+    rows_pairs = r_pairs.all()
+    if not rows_pairs:
+        return []
+
+    # 每个 (course_id, student_id) 只保留一个班级名（取第一个）
+    pair_to_class: dict[tuple[int, int], str] = {}
+    for r in rows_pairs:
+        key = (int(r.course_id), int(r.student_id))
+        if key not in pair_to_class:
+            pair_to_class[key] = r.class_name or "—"
+
+    return await _compute_stats_by_course_student(db, pair_to_class, start_date=start_date, end_date=end_date)
+
+
+async def _compute_stats_by_course_student(
+    db: AsyncSession,
+    pair_to_class: dict[tuple[int, int], str],
+    start_date: str | None = None,
+    end_date: str | None = None,
+) -> list["StatsByCourseStudentRowOut"]:
+    """按 (course_id, student_id) 对计算学情统计，供教师端与学生端复用。可选 start_date/end_date（YYYY-MM-DD）按时间区间过滤。"""
+    if not pair_to_class:
+        return []
+    time_filter = False
+    start_dt = None
+    end_dt = None
+    if start_date and end_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)  # 左闭右开
+            time_filter = True
+        except ValueError:
+            pass
+
+    course_ids = list({k[0] for k in pair_to_class})
+    student_ids = list({k[1] for k in pair_to_class})
+    r_courses = await db.execute(select(Course.id, Course.name).where(Course.id.in_(course_ids)))
+    course_map = {row[0]: row[1] for row in r_courses.all()}
+    r_users = await db.execute(
+        select(User.id, User.student_no, User.display_name, User.username).where(User.id.in_(student_ids))
+    )
+    user_map = {row[0]: (row[1], row[2], row[3]) for row in r_users.all()}
+
+    # 课程 -> 章节 id 列表（用于预习、习题范围）
+    r_ch = await db.execute(select(Chapter.id, Chapter.course_id).where(Chapter.course_id.in_(course_ids)))
+    chapters_by_course: dict[int, list[int]] = {}
+    for row in r_ch.all():
+        cid = int(row[1]) if row[1] is not None else 0
+        if cid not in chapters_by_course:
+            chapters_by_course[cid] = []
+        chapters_by_course[cid].append(int(row[0]))
+    for cid in course_ids:
+        if cid not in chapters_by_course:
+            chapters_by_course[cid] = []
+
+    # 预习完成率：按 (course_id, user_id) 统计该课程下章节的 completed 比例
+    preview_done: dict[tuple[int, int], int] = {}
+    for cid, ch_ids in chapters_by_course.items():
+        if not ch_ids:
+            continue
+        q_preview = (
+            select(PreviewRecord.user_id, func.count(func.distinct(PreviewRecord.chapter_id)))
+            .where(
+                PreviewRecord.completed == True,
+                PreviewRecord.chapter_id.in_(ch_ids),
+                PreviewRecord.user_id.in_(student_ids),
+            )
+        )
+        if time_filter and start_dt is not None and end_dt is not None:
+            q_preview = q_preview.where(
+                PreviewRecord.created_at >= start_dt,
+                PreviewRecord.created_at < end_dt,
+            )
+        q_preview = q_preview.group_by(PreviewRecord.user_id)
+        r_preview = await db.execute(q_preview)
+        for row in r_preview.all():
+            key = (cid, int(row[0]))
+            if key in pair_to_class:
+                preview_done[key] = int(row[1] or 0)
+    total_chapters_per_course = {cid: len(ch_ids) for cid, ch_ids in chapters_by_course.items()}
+
+    # 该学生在该课程下已完成预习的章节 id 列表（学情章节表按「本章是否完成」显示 100% 或 0%）
+    preview_completed_chapter_ids_by_pair: dict[tuple[int, int], list[int]] = {}
+    q_preview_chapters = (
+        select(Chapter.course_id, PreviewRecord.user_id, PreviewRecord.chapter_id)
+        .select_from(PreviewRecord)
+        .join(Chapter, Chapter.id == PreviewRecord.chapter_id)
+        .where(
+            PreviewRecord.completed == True,
+            PreviewRecord.user_id.in_(student_ids),
+            Chapter.course_id.in_(course_ids),
+        )
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_preview_chapters = q_preview_chapters.where(
+            PreviewRecord.created_at >= start_dt,
+            PreviewRecord.created_at < end_dt,
+        )
+    r_preview_ch = await db.execute(q_preview_chapters)
+    for row in r_preview_ch.all():
+        cid, uid, ch_id = int(row[0]), int(row[1]), int(row[2])
+        if (cid, uid) not in pair_to_class:
+            continue
+        key = (cid, uid)
+        if key not in preview_completed_chapter_ids_by_pair:
+            preview_completed_chapter_ids_by_pair[key] = []
+        preview_completed_chapter_ids_by_pair[key].append(ch_id)
+
+    # 作答数、正确数：(course_id, user_id)
+    q_ans = (
+        select(
+            Question.course_id,
+            AnswerRecord.user_id,
+            func.count(AnswerRecord.id).label("total"),
+            func.count(AnswerRecord.id).filter(AnswerRecord.is_correct == True).label("ok"),
+        )
+        .select_from(AnswerRecord)
+        .join(Question, Question.id == AnswerRecord.question_id)
+        .where(Question.course_id.in_(course_ids), AnswerRecord.user_id.in_(student_ids))
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_ans = q_ans.where(
+            AnswerRecord.created_at >= start_dt,
+            AnswerRecord.created_at < end_dt,
+        )
+    q_ans = q_ans.group_by(Question.course_id, AnswerRecord.user_id)
+    r_ans = await db.execute(q_ans)
+    ans_stats: dict[tuple[int, int], tuple[int, int]] = {}
+    for row in r_ans.all():
+        key = (int(row[0]), int(row[1]))
+        ans_stats[key] = (int(row[2] or 0), int(row[3] or 0))
+
+    # 按 (course_id, chapter_id, user_id) 的完成习题数，供学情章节表每行显示真实 per-student per-chapter 数量
+    q_ans_by_ch = (
+        select(
+            Question.course_id,
+            Question.chapter_id,
+            AnswerRecord.user_id,
+            func.count(AnswerRecord.id).label("cnt"),
+        )
+        .select_from(AnswerRecord)
+        .join(Question, Question.id == AnswerRecord.question_id)
+        .where(Question.course_id.in_(course_ids), AnswerRecord.user_id.in_(student_ids))
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_ans_by_ch = q_ans_by_ch.where(
+            AnswerRecord.created_at >= start_dt,
+            AnswerRecord.created_at < end_dt,
+        )
+    q_ans_by_ch = q_ans_by_ch.group_by(Question.course_id, Question.chapter_id, AnswerRecord.user_id)
+    r_ans_ch = await db.execute(q_ans_by_ch)
+    ans_by_ch: dict[tuple[int, int, int], int] = {}
+    for row in r_ans_ch.all():
+        key = (int(row[0]), int(row[1]), int(row[2]))
+        ans_by_ch[key] = int(row[3] or 0)
+
+    # 按 (course_id, chapter_id, user_id) 的正确习题数，供学情章节表显示每章正确率
+    q_ans_ok_by_ch = (
+        select(
+            Question.course_id,
+            Question.chapter_id,
+            AnswerRecord.user_id,
+            func.count(AnswerRecord.id).label("cnt"),
+        )
+        .select_from(AnswerRecord)
+        .join(Question, Question.id == AnswerRecord.question_id)
+        .where(
+            Question.course_id.in_(course_ids),
+            AnswerRecord.user_id.in_(student_ids),
+            AnswerRecord.is_correct == True,
+        )
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_ans_ok_by_ch = q_ans_ok_by_ch.where(
+            AnswerRecord.created_at >= start_dt,
+            AnswerRecord.created_at < end_dt,
+        )
+    q_ans_ok_by_ch = q_ans_ok_by_ch.group_by(Question.course_id, Question.chapter_id, AnswerRecord.user_id)
+    r_ans_ok_ch = await db.execute(q_ans_ok_by_ch)
+    ans_ok_by_ch: dict[tuple[int, int, int], int] = {}
+    for row in r_ans_ok_ch.all():
+        key = (int(row[0]), int(row[1]), int(row[2]))
+        ans_ok_by_ch[key] = int(row[3] or 0)
+
+    # 反馈数
+    q_fb = (
+        select(StudentFeedback.course_id, StudentFeedback.user_id, func.count(StudentFeedback.id))
+        .where(StudentFeedback.course_id.in_(course_ids), StudentFeedback.user_id.in_(student_ids))
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_fb = q_fb.where(
+            StudentFeedback.created_at >= start_dt,
+            StudentFeedback.created_at < end_dt,
+        )
+    q_fb = q_fb.group_by(StudentFeedback.course_id, StudentFeedback.user_id)
+    r_fb = await db.execute(q_fb)
+    feedback_count: dict[tuple[int, int], int] = {(int(row[0]), int(row[1])): int(row[2]) for row in r_fb.all()}
+
+    # AI 提问数、无关数
+    q_qa = (
+        select(
+            QuestionAsked.course_id,
+            QuestionAsked.user_id,
+            func.count(QuestionAsked.id).label("ask_count"),
+            func.count(QuestionAsked.id).filter(QuestionAsked.course_irrelevant == True).label("irr_count"),
+        )
+        .where(QuestionAsked.course_id.in_(course_ids), QuestionAsked.user_id.in_(student_ids))
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_qa = q_qa.where(
+            QuestionAsked.created_at >= start_dt,
+            QuestionAsked.created_at < end_dt,
+        )
+    q_qa = q_qa.group_by(QuestionAsked.course_id, QuestionAsked.user_id)
+    r_qa = await db.execute(q_qa)
+    qa_stats: dict[tuple[int, int], tuple[int, int]] = {}
+    for row in r_qa.all():
+        key = (int(row[0]), int(row[1]))
+        qa_stats[key] = (int(row[2] or 0), int(row[3] or 0))
+
+    # 薄弱知识点：按 (course_id, user_id) 取错题关联知识点 Top5，学情课程表用
+    weak_by_pair: dict[tuple[int, int], list[str]] = {}
+    # 按 (course_id, chapter_id, user_id) 取错题关联知识点 Top5，学情章节表用
+    weak_by_course_chapter_student: dict[tuple[int, int, int], list[str]] = {}
+    wrong_q = (
+        select(AnswerRecord.question_id, AnswerRecord.user_id, func.count(AnswerRecord.id).label("wrong_count"))
+        .where(AnswerRecord.is_correct == False, AnswerRecord.user_id.in_(student_ids))
+    )
+    if time_filter and start_dt is not None and end_dt is not None:
+        wrong_q = wrong_q.where(
+            AnswerRecord.created_at >= start_dt,
+            AnswerRecord.created_at < end_dt,
+        )
+    wrong_q = wrong_q.group_by(AnswerRecord.question_id, AnswerRecord.user_id)
+    r_wrong = await db.execute(wrong_q)
+    wrong_rows = [(int(row[0]), int(row[1]), int(row[2] or 0)) for row in r_wrong.all()]
+    if wrong_rows:
+        qids = list({r[0] for r in wrong_rows})
+        r_q = await db.execute(
+            select(Question.id, Question.course_id, Question.chapter_id, Question.knowledge_point_ids).where(Question.id.in_(qids))
+        )
+        q_course_chapter_kp: dict[int, tuple[int, int, str]] = {}
+        for qrow in r_q.all():
+            q_course_chapter_kp[int(qrow[0])] = (
+                int(qrow[1]) if qrow[1] else 0,
+                int(qrow[2]) if qrow[2] else 0,
+                (qrow[3] or "").strip(),
+            )
+        kp_ids_set: set[int] = set()
+        for qid, uid, wcnt in wrong_rows:
+            cinfo = q_course_chapter_kp.get(qid)
+            if not cinfo:
+                continue
+            cid, ch_id, kp_ids_str = cinfo
+            if (cid, uid) not in pair_to_class:
+                continue
+            for x in kp_ids_str.split(",") if kp_ids_str else []:
+                x = x.strip()
+                if x.isdigit():
+                    kp_ids_set.add(int(x))
+        if kp_ids_set:
+            r_kp = await db.execute(select(KnowledgePoint.id, KnowledgePoint.title).where(KnowledgePoint.id.in_(kp_ids_set)))
+            kp_title = {int(row[0]): (row[1] or "").strip() for row in r_kp.all()}
+            kp_wrong_by_pair: dict[tuple[int, int], dict[int, int]] = {}
+            kp_wrong_by_triple: dict[tuple[int, int, int], dict[int, int]] = {}
+            for qid, uid, wcnt in wrong_rows:
+                cinfo = q_course_chapter_kp.get(qid)
+                if not cinfo:
+                    continue
+                cid, ch_id, kp_ids_str = cinfo
+                if (cid, uid) not in pair_to_class:
+                    continue
+                key2 = (cid, uid)
+                if key2 not in kp_wrong_by_pair:
+                    kp_wrong_by_pair[key2] = {}
+                key3 = (cid, ch_id, uid)
+                if key3 not in kp_wrong_by_triple:
+                    kp_wrong_by_triple[key3] = {}
+                for x in kp_ids_str.split(",") if kp_ids_str else []:
+                    x = x.strip()
+                    if x.isdigit():
+                        kid = int(x)
+                        kp_wrong_by_pair[key2][kid] = kp_wrong_by_pair[key2].get(kid, 0) + wcnt
+                        kp_wrong_by_triple[key3][kid] = kp_wrong_by_triple[key3].get(kid, 0) + wcnt
+            for key, kp_counts in kp_wrong_by_pair.items():
+                ranked = sorted(kp_counts.items(), key=lambda t: -t[1])[:5]
+                weak_by_pair[key] = [kp_title.get(kid, "") or f"知识点{kid}" for kid, _ in ranked if kp_title.get(kid)]
+            for key, kp_counts in kp_wrong_by_triple.items():
+                ranked = sorted(kp_counts.items(), key=lambda t: -t[1])[:5]
+                weak_by_course_chapter_student[key] = [kp_title.get(kid, "") or f"知识点{kid}" for kid, _ in ranked if kp_title.get(kid)]
+
+    out: list[StatsByCourseStudentRowOut] = []
+    for (cid, uid) in sorted(pair_to_class.keys()):
+        class_name = pair_to_class[(cid, uid)]
+        course_name = course_map.get(cid, "—")
+        u = user_map.get(uid)
+        student_no = "—"
+        student_name = "—"
+        if u:
+            student_no = (u[0] or u[2] or "—").strip() or "—"
+            student_name = (u[1] or u[2] or "—").strip() or "—"
+
+        total_ch = total_chapters_per_course.get(cid, 0)
+        done_ch = preview_done.get((cid, uid), 0)
+        preview_rate = f"{(done_ch / total_ch * 100):.1f}%" if total_ch else "—"
+
+        total_a, ok_a = ans_stats.get((cid, uid), (0, 0))
+        accuracy_rate = f"{(ok_a / total_a * 100):.1f}%" if total_a else "—"
+
+        fb_count = feedback_count.get((cid, uid), 0)
+        ask_count, irr_count = qa_stats.get((cid, uid), (0, 0))
+        weak_list = weak_by_pair.get((cid, uid), []) if total_a > 0 else []
+        weak_str = "; ".join(weak_list) if weak_list else "—"
+        completed_ch_ids = preview_completed_chapter_ids_by_pair.get((cid, uid), [])
+        count_by_ch = [
+            {"chapter_id": ch_id, "count": cnt}
+            for (c, ch_id, u), cnt in ans_by_ch.items()
+            if (c, u) == (cid, uid)
+        ]
+        correct_count_by_ch = [
+            {"chapter_id": ch_id, "count": cnt}
+            for (c, ch_id, u), cnt in ans_ok_by_ch.items()
+            if (c, u) == (cid, uid)
+        ]
+        weak_by_chapter = [
+            {"chapter_id": ch_id, "weak_knowledge_points": "; ".join(titles) if titles else "—"}
+            for (c, ch_id, u), titles in weak_by_course_chapter_student.items()
+            if (c, u) == (cid, uid)
+        ]
+
+        out.append(
+            StatsByCourseStudentRowOut(
+                course_id=cid,
+                course_name=course_name,
+                student_id=uid,
+                student_no=student_no,
+                student_name=student_name,
+                class_name=class_name,
+                preview_rate=preview_rate,
+                preview_completed_chapter_ids=completed_ch_ids,
+                completed_question_count=total_a,
+                completed_question_count_by_chapter=count_by_ch,
+                correct_question_count_by_chapter=correct_count_by_ch,
+                accuracy_rate=accuracy_rate,
+                feedback_question_count=fb_count,
+                ai_ask_count=ask_count,
+                ai_irrelevant_count=irr_count,
+                weak_knowledge_points=weak_str,
+                weak_knowledge_points_by_chapter=weak_by_chapter,
+            )
+        )
+    return out
+
+
+class FeedbackListRowOut(BaseModel):
+    """学情页「问题反馈列表」一行"""
+    id: int
+    course_name: str
+    feedback_text: str
+    student_no: str
+    student_name: str
+    class_name: str
+    created_at: str  # 反馈时间 ISO
+    reply_text: str = "—"
+    status: str = "待处理"
+    processed_at: str | None = None  # 处理回复时间 ISO，可选
+
+
+@router.get("/feedback/list", response_model=list[FeedbackListRowOut])
+async def list_feedback(
+    course_id: int | None = Query(None),
+    class_id: int | None = Query(None),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """学情页「问题反馈列表」：按课程/班级筛选，仅返回教师有权限的课程下的反馈。班级列与学情课程统计一致：按「该反馈的课程 + 提交学生」从教师管理且关联该课程的班级中解析。"""
+    if class_id is not None and _is_teacher_scoped(user):
+        await _require_owned_class(db, user.id, class_id)
+    user_ids = await _user_ids_by_class(db, class_id)
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if _is_teacher_scoped(user) else set()
+    if _is_teacher_scoped(user) and course_id is not None and course_id not in teacher_course_ids:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+    scoped_course_ids: set[int] | None = {course_id} if course_id is not None else (teacher_course_ids if _is_teacher_scoped(user) else None)
+    q = (
+        select(
+            StudentFeedback.id,
+            StudentFeedback.course_id,
+            StudentFeedback.user_id,
+            Course.name.label("course_name"),
+            StudentFeedback.content.label("feedback_text"),
+            User.student_no,
+            User.display_name,
+            User.username,
+            StudentFeedback.created_at,
+            StudentFeedback.reply_text,
+            StudentFeedback.status,
+            StudentFeedback.processed_at,
+        )
+        .select_from(StudentFeedback)
+        .outerjoin(Course, Course.id == StudentFeedback.course_id)
+        .outerjoin(User, User.id == StudentFeedback.user_id)
+        .order_by(StudentFeedback.created_at.desc())
+    )
+    if scoped_course_ids is not None:
+        if not scoped_course_ids:
+            return []
+        q = q.where(StudentFeedback.course_id.in_(scoped_course_ids))
+    if user_ids is not None:
+        q = q.where(StudentFeedback.user_id.in_(user_ids))
+    r = await db.execute(q.limit(500))
+    rows = r.all()
+
+    # 班级名称与学情课程统计一致：按 (course_id, user_id) 从教师管理且关联该课程的班级解析，不再用 User.class_id
+    pair_to_class: dict[tuple[int, int], str] = {}
+    if rows and scoped_course_ids:
+        feedback_course_ids = list({int(row.course_id) for row in rows if row.course_id is not None})
+        feedback_user_ids = list({int(row.user_id) for row in rows if row.user_id is not None})
+        if feedback_course_ids and feedback_user_ids:
+            q_pairs = (
+                select(
+                    Class.course_id,
+                    StudentClassMembership.student_id,
+                    Class.name.label("class_name"),
+                )
+                .select_from(Class)
+                .join(StudentClassMembership, StudentClassMembership.class_id == Class.id)
+                .where(Class.course_id.in_(feedback_course_ids), StudentClassMembership.student_id.in_(feedback_user_ids))
+            )
+            if _is_teacher_scoped(user):
+                q_pairs = q_pairs.where(Class.owner_teacher_id == user.id)
+            r_pairs = await db.execute(q_pairs)
+            for rp in r_pairs.all():
+                key = (int(rp.course_id), int(rp.student_id))
+                if key not in pair_to_class:
+                    pair_to_class[key] = rp.class_name or "—"
+
+    out = []
+    for row in rows:
+        cid = int(row.course_id) if row.course_id is not None else None
+        uid = int(row.user_id) if row.user_id is not None else None
+        class_name = pair_to_class.get((cid, uid), "—") if (cid is not None and uid is not None) else "—"
+        out.append(
+            FeedbackListRowOut(
+                id=row.id,
+                course_name=row.course_name or "—",
+                feedback_text=row.feedback_text or "",
+                student_no=row.student_no or "—",
+                student_name=(row.display_name or row.username) or "—",
+                class_name=class_name,
+                created_at=row.created_at.isoformat() if row.created_at else "",
+                reply_text=row.reply_text if row.reply_text is not None else "—",
+                status=row.status if row.status is not None else "待处理",
+                processed_at=row.processed_at.isoformat() if row.processed_at else None,
+            )
+        )
+    return out
+
+
+class FeedbackDetailOut(BaseModel):
+    """单条反馈详情（查看/编辑用）"""
+    id: int
+    course_name: str
+    feedback_text: str
+    student_no: str
+    student_name: str
+    class_name: str
+    created_at: str
+    reply_text: str | None
+    status: str | None
+    processed_at: str | None
+
+
+async def _feedback_class_name_for_pair(
+    db: AsyncSession, course_id: int | None, user_id: int | None, teacher_id: int | None, is_teacher_scoped: bool
+) -> str:
+    """按 (course_id, user_id) 从教师管理且关联该课程的班级解析班级名，与学情课程统计一致。"""
+    if course_id is None or user_id is None:
+        return "—"
+    q_pairs = (
+        select(Class.name)
+        .select_from(Class)
+        .join(StudentClassMembership, StudentClassMembership.class_id == Class.id)
+        .where(Class.course_id == course_id, StudentClassMembership.student_id == user_id)
+    )
+    if is_teacher_scoped and teacher_id is not None:
+        q_pairs = q_pairs.where(Class.owner_teacher_id == teacher_id)
+    r_pairs = await db.execute(q_pairs.limit(1))
+    row = r_pairs.first()
+    return (row[0] or "—") if row else "—"
+
+
+@router.get("/feedback/{feedback_id}", response_model=FeedbackDetailOut)
+async def get_feedback(
+    feedback_id: int,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """获取单条反馈详情（教师有权限的课程下的反馈）。班级名与问题反馈列表一致。"""
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if _is_teacher_scoped(user) else None
+    q = (
+        select(
+            StudentFeedback.id,
+            Course.name.label("course_name"),
+            StudentFeedback.content.label("feedback_text"),
+            User.student_no,
+            User.display_name,
+            User.username,
+            StudentFeedback.created_at,
+            StudentFeedback.reply_text,
+            StudentFeedback.status,
+            StudentFeedback.processed_at,
+            StudentFeedback.course_id,
+            StudentFeedback.user_id,
+        )
+        .select_from(StudentFeedback)
+        .outerjoin(Course, Course.id == StudentFeedback.course_id)
+        .outerjoin(User, User.id == StudentFeedback.user_id)
+        .where(StudentFeedback.id == feedback_id)
+    )
+    r = await db.execute(q)
+    row = r.one_or_none()
+    if not row:
+        raise HTTPException(status_code=404, detail="反馈不存在")
+    if teacher_course_ids is not None and (row.course_id is None or row.course_id not in teacher_course_ids):
+        raise HTTPException(status_code=404, detail="无权限查看该反馈")
+    class_name = await _feedback_class_name_for_pair(
+        db, row.course_id, row.user_id, user.id if _is_teacher_scoped(user) else None, _is_teacher_scoped(user)
+    )
+    return FeedbackDetailOut(
+        id=row.id,
+        course_name=row.course_name or "—",
+        feedback_text=row.feedback_text or "",
+        student_no=row.student_no or "—",
+        student_name=(row.display_name or row.username) or "—",
+        class_name=class_name,
+        created_at=row.created_at.isoformat() if row.created_at else "",
+        reply_text=row.reply_text,
+        status=row.status,
+        processed_at=row.processed_at.isoformat() if row.processed_at else None,
+    )
+
+
+class FeedbackUpdateIn(BaseModel):
+    reply_text: str | None = None
+    status: str | None = None  # 待处理 | 处理中 | 已处理
+
+
+@router.put("/feedback/{feedback_id}", response_model=FeedbackDetailOut)
+async def update_feedback(
+    feedback_id: int,
+    body: FeedbackUpdateIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """更新反馈的回复与状态；状态变化时更新 processed_at"""
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if _is_teacher_scoped(user) else None
+    r = await db.execute(
+        select(StudentFeedback).where(StudentFeedback.id == feedback_id)
+    )
+    fb = r.scalar_one_or_none()
+    if not fb:
+        raise HTTPException(status_code=404, detail="反馈不存在")
+    if teacher_course_ids is not None and (fb.course_id is None or fb.course_id not in teacher_course_ids):
+        raise HTTPException(status_code=404, detail="无权限编辑该反馈")
+    old_status = fb.status
+    if body.reply_text is not None:
+        fb.reply_text = body.reply_text
+    if body.status is not None:
+        fb.status = body.status
+        if body.status != old_status:
+            fb.processed_at = datetime.utcnow()
+    await db.flush()
+    # 返回最新详情（班级名与列表一致，按课程+学生从教师管理班级解析）
+    r2 = await db.execute(
+        select(
+            StudentFeedback.id,
+            Course.name.label("course_name"),
+            StudentFeedback.content.label("feedback_text"),
+            User.student_no,
+            User.display_name,
+            User.username,
+            StudentFeedback.created_at,
+            StudentFeedback.reply_text,
+            StudentFeedback.status,
+            StudentFeedback.processed_at,
+            StudentFeedback.course_id,
+            StudentFeedback.user_id,
+        )
+        .select_from(StudentFeedback)
+        .outerjoin(Course, Course.id == StudentFeedback.course_id)
+        .outerjoin(User, User.id == StudentFeedback.user_id)
+        .where(StudentFeedback.id == feedback_id)
+    )
+    row = r2.one()
+    if teacher_course_ids is not None and (row.course_id is None or row.course_id not in teacher_course_ids):
+        raise HTTPException(status_code=404, detail="无权限")
+    class_name = await _feedback_class_name_for_pair(
+        db, row.course_id, row.user_id, user.id if _is_teacher_scoped(user) else None, _is_teacher_scoped(user)
+    )
+    return FeedbackDetailOut(
+        id=row.id,
+        course_name=row.course_name or "—",
+        feedback_text=row.feedback_text or "",
+        student_no=row.student_no or "—",
+        student_name=(row.display_name or row.username) or "—",
+        class_name=class_name,
+        created_at=row.created_at.isoformat() if row.created_at else "",
+        reply_text=row.reply_text,
+        status=row.status,
+        processed_at=row.processed_at.isoformat() if row.processed_at else None,
     )
 
 
@@ -3922,17 +7033,17 @@ async def export_csv(
     """导出学情数据为 CSV"""
     output = io.StringIO()
     writer = csv.writer(output)
-    if class_id is not None and user.role == UserRole.teacher.value:
+    if class_id is not None and _is_teacher_scoped(user):
         await _require_owned_class(db, user.id, class_id)
     user_ids = await _user_ids_by_class(db, class_id)
-    teacher_course_ids = await _teacher_course_ids(db, user.id) if user.role == UserRole.teacher.value else set()
-    if user.role == UserRole.teacher.value and course_id is not None and course_id not in teacher_course_ids:
+    teacher_course_ids = await _teacher_course_ids(db, user.id) if _is_teacher_scoped(user) else set()
+    if _is_teacher_scoped(user) and course_id is not None and course_id not in teacher_course_ids:
         raise HTTPException(status_code=404, detail="课程不存在或无权限")
 
     scoped_course_ids: set[int] | None = None
     if course_id is not None:
         scoped_course_ids = {course_id}
-    elif user.role == UserRole.teacher.value:
+    elif _is_teacher_scoped(user):
         scoped_course_ids = teacher_course_ids
 
     chapter_obj = None
@@ -3982,7 +7093,7 @@ async def export_csv(
     elif report == "qa":
         writer.writerow(["user_id", "chapter_id", "question_text", "answer_text", "created_at"])
         qry = select(QuestionAsked)
-        if user.role == UserRole.teacher.value:
+        if _is_teacher_scoped(user):
             # 提问记录导出固定按课程口径，不随章节筛选变化。
             qry = _apply_teacher_qa_scope(qry, scoped_course_ids, None)
         else:

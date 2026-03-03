@@ -1,12 +1,15 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../../api/client";
 import { toast } from "../../utils/toast";
+
+const PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100] as const;
 
 type CourseItem = {
   id: number;
   name: string;
   code: string | null;
   description: string | null;
+  remark: string | null;
   is_active: boolean;
   created_at: string | null;
 };
@@ -123,9 +126,16 @@ const removeCachedReindexTask = (taskId: number) => {
 export default function TeacherCourses() {
   const [list, setList] = useState<CourseItem[]>([]);
   const [loading, setLoading] = useState(true);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [pageSize, setPageSize] = useState(10);
+  const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+  const pagedList = useMemo(
+    () => list.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [list, currentPage, pageSize]
+  );
   const [modal, setModal] = useState<"create" | "edit" | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
-  const [form, setForm] = useState({ name: "", code: "", description: "", is_active: true });
+  const [form, setForm] = useState({ name: "", code: "", description: "", remark: "", is_active: true });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [expandCourseId, setExpandCourseId] = useState<number | null>(null);
@@ -147,6 +157,12 @@ export default function TeacherCourses() {
     judge_max: 3,
     qa_max: 2,
     blank_max: 2,
+    question_bank_type: "training" as const,
+    single_choice_difficulty_score: 0.8,
+    multiple_choice_difficulty_score: 0.8,
+    judge_difficulty_score: 0.8,
+    qa_difficulty_score: 0.8,
+    blank_difficulty_score: 0.8,
   });
   const pollingReindexTaskIdsRef = useRef<Set<number>>(new Set());
   const notifiedReindexTaskIdsRef = useRef<Set<number>>(new Set());
@@ -480,13 +496,13 @@ export default function TeacherCourses() {
   }, [expandCourseId]);
 
   const openCreate = () => {
-    setForm({ name: "", code: "", description: "", is_active: true });
+    setForm({ name: "", code: "", description: "", remark: "", is_active: true });
     setModal("create");
     setError("");
   };
   const openEdit = (c: CourseItem) => {
     setEditId(c.id);
-    setForm({ name: c.name, code: c.code || "", description: c.description || "", is_active: c.is_active });
+    setForm({ name: c.name, code: c.code || "", description: c.description || "", remark: c.remark || "", is_active: c.is_active });
     setModal("edit");
     setError("");
   };
@@ -499,6 +515,7 @@ export default function TeacherCourses() {
         name: form.name.trim(),
         code: form.code.trim() || undefined,
         description: form.description.trim() || undefined,
+        remark: form.remark.trim().slice(0, 128) || undefined,
         is_active: form.is_active,
       })
       .then(() => {
@@ -518,6 +535,7 @@ export default function TeacherCourses() {
         name: form.name.trim(),
         code: form.code.trim() || undefined,
         description: form.description.trim() || undefined,
+        remark: form.remark.trim().slice(0, 128) || undefined,
         is_active: form.is_active,
       })
       .then(() => {
@@ -673,7 +691,19 @@ export default function TeacherCourses() {
 
   const openGenerateQuestionsModal = (ch: ChapterItem) => {
     setQuestionGenModalChapter(ch);
-    setQuestionGenForm({ single_choice_max: 5, multiple_choice_max: 2, judge_max: 3, qa_max: 2, blank_max: 2 });
+    setQuestionGenForm({
+      single_choice_max: 5,
+      multiple_choice_max: 2,
+      judge_max: 3,
+      qa_max: 2,
+      blank_max: 2,
+      question_bank_type: "training",
+      single_choice_difficulty_score: 0.8,
+      multiple_choice_difficulty_score: 0.8,
+      judge_difficulty_score: 0.8,
+      qa_difficulty_score: 0.8,
+      blank_difficulty_score: 0.8,
+    });
   };
 
   const pollQuestionTask = async (chapterId: number, taskId: number, courseId: number | null) => {
@@ -784,7 +814,7 @@ export default function TeacherCourses() {
               </tr>
             </thead>
             <tbody>
-              {list.map((c) => (
+              {pagedList.map((c) => (
                 <React.Fragment key={c.id}>
                   <tr style={{ borderBottom: "1px solid var(--border)" }}>
                     <td style={{ padding: "10px 12px" }}>{c.id}</td>
@@ -807,6 +837,21 @@ export default function TeacherCourses() {
                         type="button"
                         className="btn-ghost"
                         style={{ marginRight: 8 }}
+                        onClick={() =>
+                          window.open(
+                            `/teacher/course-materials?courseId=${c.id}&courseName=${encodeURIComponent(c.name)}`,
+                            "_blank",
+                            "noopener,noreferrer"
+                          )
+                        }
+                      >
+                        课程资料
+                      </button>
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        style={{ marginRight: 8 }}
+                        title="只重建索引，不删除课程下的文件和知识库内容"
                         onClick={() => doReindex(c.id, c.name)}
                         disabled={!!reindexTaskByCourse[c.id] || clearingId !== null}
                       >
@@ -816,6 +861,7 @@ export default function TeacherCourses() {
                         type="button"
                         className="btn-ghost"
                         style={{ marginRight: 8, color: "var(--danger, #c00)" }}
+                        title="删除课程下的所有文件并清空知识库"
                         onClick={() => doClearKnowledge(c.id, c.name)}
                         disabled={clearingId !== null}
                       >
@@ -871,15 +917,6 @@ export default function TeacherCourses() {
                                 <button type="button" className="btn-ghost" style={{ fontSize: 13 }} onClick={() => openEditChapter(ch)}>
                                   编辑
                                 </button>
-                                <button
-                                  type="button"
-                                  className="btn-ghost"
-                                  style={{ fontSize: 13 }}
-                                  onClick={() => openGenerateQuestionsModal(ch)}
-                                  disabled={questionTaskByChapter[ch.id]?.status === "running" || questionTaskByChapter[ch.id]?.status === "pending"}
-                                >
-                                  {questionTaskByChapter[ch.id]?.status === "running" || questionTaskByChapter[ch.id]?.status === "pending" ? "生成中…" : "生成习题"}
-                                </button>
                                 {(ch.question_count > 0 || questionTaskByChapter[ch.id]?.status === "success") && (
                                   <button
                                     type="button"
@@ -905,6 +942,31 @@ export default function TeacherCourses() {
               ))}
             </tbody>
           </table>
+          <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>每页显示</span>
+            <select
+              value={String(pageSize)}
+              onChange={(e) => {
+                const n = Math.max(1, Math.min(100, Number(e.target.value || 10)));
+                setPageSize(n);
+                setCurrentPage(1);
+              }}
+              style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6 }}
+            >
+              {PAGE_SIZE_OPTIONS.map((n) => (
+                <option key={n} value={n}>{n}</option>
+              ))}
+            </select>
+            <button type="button" className="btn-secondary" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage <= 1}>
+              上一页
+            </button>
+            <button type="button" className="btn-secondary" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage >= totalPages}>
+              下一页
+            </button>
+            <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+              第 {currentPage} / {totalPages} 页，共 {list.length} 条
+            </span>
+          </div>
         </div>
       )}
 
@@ -929,6 +991,20 @@ export default function TeacherCourses() {
                 <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>简介（可选）</span>
                 <textarea value={form.description} onChange={(e) => setForm((f) => ({ ...f, description: e.target.value }))} rows={3} style={{ width: "100%" }} />
               </label>
+              <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>备注（可选）</span>
+                <input
+                  type="text"
+                  maxLength={128}
+                  value={form.remark}
+                  onChange={(e) => setForm((f) => ({ ...f, remark: e.target.value }))}
+                  style={{ width: "100%" }}
+                  placeholder="选填，最多 128 个字符"
+                />
+                {form.remark.length > 0 && (
+                  <span style={{ fontSize: 12, color: "var(--text-muted)" }}>{form.remark.length}/128</span>
+                )}
+              </label>
               <label style={{ display: "flex", alignItems: "center", gap: 8 }}>
                 <input type="checkbox" checked={form.is_active} onChange={(e) => setForm((f) => ({ ...f, is_active: e.target.checked }))} />
                 <span style={{ fontSize: 14 }}>启用</span>
@@ -951,7 +1027,7 @@ export default function TeacherCourses() {
           style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.4)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 120 }}
           onClick={() => !chapterSaving && setChapterEditModal(false)}
         >
-          <div className="card" style={{ minWidth: 360 }} onClick={(e) => e.stopPropagation()}>
+          <div className="card" style={{ minWidth: 720, width: "min(720px, 92vw)" }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginBottom: 16 }}>编辑章节</h3>
             <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
               <label>
@@ -982,12 +1058,35 @@ export default function TeacherCourses() {
                 />
               </label>
               <div style={{ borderTop: "1px solid var(--border)", paddingTop: 12 }}>
-                <div style={{ fontWeight: 600, marginBottom: 8 }}>知识点</div>
-                <div style={{ maxHeight: 320, overflowY: "auto", paddingRight: 4 }}>
+                <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                  <span style={{ fontWeight: 600 }}>知识点</span>
+                  <button
+                    type="button"
+                    className="btn-ghost"
+                    style={{ fontSize: 13 }}
+                    onClick={() =>
+                      setChapterKnowledgePoints((prev) => [
+                        ...prev,
+                        { title: "", content: "", ppt_slide_ref: "", order_index: prev.length + 1 },
+                      ])
+                    }
+                    disabled={chapterSaving}
+                  >
+                    添加知识点
+                  </button>
+                </div>
+                <div style={{ maxHeight: 320, overflowY: "scroll", paddingRight: 4 }}>
                   {chapterKnowledgePoints.map((kp, idx) => (
                     <div key={idx} style={{ border: "1px solid var(--border)", borderRadius: 8, padding: 10, marginBottom: 8 }}>
                       <div style={{ marginBottom: 8, display: "flex", justifyContent: "space-between", gap: 8, alignItems: "center" }}>
-                        <div style={{ fontSize: 13, fontWeight: 600 }}>知识点 {idx + 1}：{kp.title}</div>
+                        <span style={{ fontSize: 13, fontWeight: 600, color: "var(--text-muted)", minWidth: 56 }}>知识点 {idx + 1}</span>
+                        <input
+                          type="text"
+                          placeholder="标题"
+                          value={kp.title}
+                          onChange={(e) => updateKnowledgePoint(idx, { title: e.target.value })}
+                          style={{ flex: 1, fontSize: 13, fontWeight: 600 }}
+                        />
                         <button
                           type="button"
                           className="btn-ghost"
@@ -995,7 +1094,7 @@ export default function TeacherCourses() {
                           onClick={() => removeKnowledgePoint(idx)}
                           disabled={chapterSaving}
                         >
-                          删除知识点
+                          删除
                         </button>
                       </div>
                       <textarea
@@ -1007,7 +1106,9 @@ export default function TeacherCourses() {
                       />
                     </div>
                   ))}
-                  {chapterKnowledgePoints.length === 0 && <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无知识点。生成习题时会自动生成（每章最多 10 条）。</p>}
+                  {chapterKnowledgePoints.length === 0 && (
+                    <p style={{ color: "var(--text-muted)", margin: 0 }}>暂无知识点。可点击「添加知识点」手动添加，或解析章节资料文件时会自动生成（自动生成时，每章最多 10 条，手动添加无条数限制）。</p>
+                  )}
                 </div>
               </div>
             </div>
@@ -1032,7 +1133,7 @@ export default function TeacherCourses() {
             <h3 style={{ marginBottom: 8 }}>生成习题</h3>
             <p style={{ marginTop: 0, marginBottom: 14, color: "var(--text-muted)", fontSize: 14 }}>{questionGenModalChapter.title}</p>
             <p style={{ marginTop: 0, marginBottom: 14, color: "var(--text-muted)", fontSize: 13 }}>
-              开始生成后会先自动生成该章节知识点（由模型决定数量，每章最多 10 条），再按知识点生成习题。
+              开始生成后会先自动生成该章节知识点（由模型决定数量，每章最多 10 条），并结合联网检索结果按知识点生成习题。
             </p>
             <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
               <label>

@@ -38,7 +38,11 @@ export default function AdminTeachings() {
   useEffect(() => {
     api.admin.courses.list().then((r) => setCourses(r));
     api.admin.classes.list().then((r) => setClasses(r));
-    api.admin.users.list({ role: "teacher" }).then((r) => setTeachers(r));
+    api.admin.users.list().then((r) => {
+        const teacherOrLeader = r.filter((u) => u.role === "teacher" || u.role === "teaching_leader");
+        teacherOrLeader.sort((a, b) => (a.role === "teacher" ? 0 : 1) - (b.role === "teacher" ? 0 : 1) || (a.display_name || a.username || "").localeCompare(b.display_name || b.username || ""));
+        setTeachers(teacherOrLeader);
+      });
   }, []);
 
   const openCreate = () => {

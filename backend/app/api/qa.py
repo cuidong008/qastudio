@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
-from ..db.models import User, QuestionAsked, KnowledgeDocument, KnowledgePoint, Chapter
+from ..db.models import User, QuestionAsked, KnowledgeDocument, KnowledgePoint, Chapter, Course
 from ..api.auth import get_current_user
 from ..services.qa_engine import answer_from_documents, answer_question, QAResponse
 from ..rag.generator import distill_answer_if_raw
@@ -22,7 +22,7 @@ logger = logging.getLogger(__name__)
 
 class AskIn(BaseModel):
     question: str
-    course_id: int  # 课程级提问，不接收章节 id
+    course_id: int | None = None  # 课程级提问；教师可传 null 表示「全部课程」
 
 
 class AskOut(BaseModel):
@@ -130,6 +130,34 @@ def _build_doc_tuples(docs: list, points: list | None = None) -> list[tuple[str,
     return out
 
 
+def _judge_course_relevance(question: str, course_name: str | None, answer: str) -> bool:
+    """大模型判断该问题是否与当前课程无关。返回 True=无关，False=有关。异常时返回 False。"""
+    course_label = (course_name or "未指定课程").strip() or "未指定课程"
+    prompt = (
+        "你负责判断：用户下面提的问题是否与「当前课程」内容相关。\n"
+        "当前课程名：" + course_label + "\n"
+        "用户问题：" + (question or "").strip() + "\n"
+        "若问题明显与课程知识点、教材、课堂内容无关（如闲聊、其他学科、无关话题），请仅回复一个字：否。\n"
+        "若与课程有关或难以判断，请仅回复一个字：是。\n"
+        "只输出「是」或「否」，不要其他内容。"
+    )
+    try:
+        from ..rag.config import get_rag_settings
+        from ..rag.llm import get_llm
+        settings = get_rag_settings()
+        out = get_llm(settings).generate(
+            prompt,
+            max_tokens=10,
+            temperature=0.1,
+        )
+        text = (out or "").strip()
+        if "否" in text and "是" not in text:
+            return True
+        return False
+    except Exception:
+        return False
+
+
 def _build_knowledge_miss_answer(question: str) -> str:
     prompt = (
         "你是一名大学计算机课程助教。当前用户问题在课程知识库中没有命中。"
@@ -202,15 +230,28 @@ async def ask(
     question = (body.question or "").strip()
     course_id = body.course_id
     chapter_ids_by_course: list[int] = []
-    r_ids = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id))
-    chapter_ids_by_course = [row[0] for row in r_ids.all()]
 
-    # RAG 开关：以数据库配置（后管台）为准；不再受环境变量 RAG_ENABLED 额外门控
+    if course_id is not None:
+        r_ids = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id))
+        chapter_ids_by_course = [row[0] for row in r_ids.all()]
+    else:
+        # 教师「全部课程」：仅允许教师，且在其名下全部课程的章节内检索
+        if not user or getattr(user, "role", None) not in ("teacher", "teaching_leader"):
+            raise HTTPException(status_code=400, detail="请选择课程")
+        r_courses = await db.execute(select(Course.id).where(Course.owner_teacher_id == user.id))
+        teacher_course_ids = [row[0] for row in r_courses.all()]
+        if not teacher_course_ids:
+            chapter_ids_by_course = []
+        else:
+            r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(teacher_course_ids)))
+            chapter_ids_by_course = [row[0] for row in r_ch.all()]
+
+    # RAG 开关：以数据库配置（后管台）为准；仅单课程时走 RAG
     try:
         from ..rag import get_rag_settings, rag_ask
 
         settings = get_rag_settings()
-        if settings.enabled:
+        if settings.enabled and course_id is not None:
             answer, ppt_ref, knowledge_point, in_scope, rag_reference_doc_id, rag_reference_page = rag_ask(
                 question, course_id, chapter_id=None
             )
@@ -227,7 +268,16 @@ async def ask(
                 ppt_ref = "当前问题在知识库中没有参考答案"
                 knowledge_point = None
                 in_scope = False
+                # 大模型判断该问题是否与当前课程无关，供学情统计「AI无关问题数」
+                course_name_for_judge = None
+                if course_id is not None:
+                    r_course = await db.execute(select(Course.name).where(Course.id == course_id))
+                    row = r_course.one_or_none()
+                    if row:
+                        course_name_for_judge = row[0]
+                course_irrelevant = _judge_course_relevance(question, course_name_for_judge, answer or "")
             else:
+                course_irrelevant = None
                 logger.warning(
                     "[RAG-TRACE] qa_api_rag_hit q=%r course_id=%s ref=%r kp=%r in_scope=%s",
                     question,
@@ -254,6 +304,7 @@ async def ask(
                     answer_text=answer,
                     ppt_ref=ppt_ref,
                     rag_hit=rag_hit,
+                    course_irrelevant=course_irrelevant if "当前问题在知识库中没有参考答案" in (ppt_ref or "") else False,
                 )
                 db.add(record)
                 await db.flush()
@@ -313,6 +364,13 @@ async def ask(
     if not docs and not points and question:
         fallback_answer = _build_knowledge_miss_answer(question)
         no_ref_msg = "当前问题在知识库中没有参考答案"
+        course_name_for_judge = None
+        if course_id is not None:
+            r_course = await db.execute(select(Course.name).where(Course.id == course_id))
+            row = r_course.one_or_none()
+            if row:
+                course_name_for_judge = row[0]
+        course_irrelevant_fallback = _judge_course_relevance(question, course_name_for_judge, fallback_answer)
         question_asked_id: int | None = None
         if user:
             record = QuestionAsked(
@@ -323,6 +381,7 @@ async def ask(
                 answer_text=fallback_answer,
                 ppt_ref=no_ref_msg,
                 rag_hit=False,
+                course_irrelevant=course_irrelevant_fallback,
             )
             db.add(record)
             await db.flush()
@@ -385,6 +444,7 @@ async def ask(
             answer_text=resp.answer,
             ppt_ref=resp.ppt_ref,
             rag_hit=fallback_rag_hit,
+            course_irrelevant=False,
         )
         db.add(record)
         await db.flush()

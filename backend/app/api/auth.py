@@ -37,6 +37,7 @@ class UserOut(BaseModel):
     display_name: str | None
     student_no: str | None
     avatar_url: str | None
+    username_changed_at: datetime | None
 
     class Config:
         from_attributes = True
@@ -45,6 +46,7 @@ class UserOut(BaseModel):
 class ProfileUpdateIn(BaseModel):
     display_name: str | None = None
     avatar_url: str | None = None
+    username: str | None = None  # 非管理员仅可修改一次
 
 
 class PasswordChangeIn(BaseModel):
@@ -74,7 +76,7 @@ async def get_current_user(
 
 
 async def require_teacher(user: User | None = Depends(get_current_user)) -> User:
-    if not user or user.role not in (UserRole.teacher.value, UserRole.admin.value):
+    if not user or user.role not in (UserRole.teacher.value, UserRole.teaching_leader.value, UserRole.admin.value):
         raise HTTPException(status_code=403, detail="需要教师权限")
     return user
 
@@ -128,13 +130,35 @@ async def me(user: User | None = Depends(get_current_user)):
         display_name=user.display_name,
         student_no=user.student_no,
         avatar_url=user.avatar_url,
+        username_changed_at=getattr(user, "username_changed_at", None),
     )
 
 
 @router.put("/profile", response_model=UserOut)
-async def update_profile(payload: ProfileUpdateIn, user: User | None = Depends(get_current_user)):
+async def update_profile(
+    payload: ProfileUpdateIn,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     if not user:
         raise HTTPException(status_code=401, detail="请先登录")
+
+    if payload.username is not None:
+        new_username = (payload.username or "").strip()
+        if user.role == UserRole.admin.value:
+            raise HTTPException(status_code=403, detail="管理员不可修改登录用户名")
+        if getattr(user, "username_changed_at", None) is not None:
+            raise HTTPException(status_code=400, detail="登录用户名仅可修改一次，您已修改过")
+        if not new_username or len(new_username) > 64:
+            raise HTTPException(status_code=400, detail="用户名长度 1～64 位")
+        # 查重：排除当前用户，仅当其他用户已占用该用户名时拒绝
+        r = await db.execute(
+            select(User).where(User.username == new_username, User.id != user.id)
+        )
+        if r.scalar_one_or_none() is not None:
+            raise HTTPException(status_code=400, detail="该用户名已被使用")
+        user.username = new_username
+        user.username_changed_at = datetime.utcnow()
 
     if payload.display_name is not None:
         display_name = payload.display_name.strip()
@@ -148,6 +172,8 @@ async def update_profile(payload: ProfileUpdateIn, user: User | None = Depends(g
             raise HTTPException(status_code=400, detail="头像内容过大，请上传不超过 1.5MB 的图片")
         user.avatar_url = avatar or None
 
+    await db.commit()
+    await db.refresh(user)
     return UserOut(
         id=user.id,
         username=user.username,
@@ -155,6 +181,7 @@ async def update_profile(payload: ProfileUpdateIn, user: User | None = Depends(g
         display_name=user.display_name,
         student_no=user.student_no,
         avatar_url=user.avatar_url,
+        username_changed_at=getattr(user, "username_changed_at", None),
     )
 
 

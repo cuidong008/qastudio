@@ -14,6 +14,7 @@ class Difficulty(str, enum.Enum):
 class UserRole(str, enum.Enum):
     student = "student"
     teacher = "teacher"
+    teaching_leader = "teaching_leader"  # 教研组长，权限同教师
     admin = "admin"
 
 
@@ -29,7 +30,9 @@ class User(Base):
     role = Column(String(20), default=UserRole.student.value, nullable=False)
     display_name = Column(String(64), nullable=True)
     avatar_url = Column(Text, nullable=True)
+    username_changed_at = Column(DateTime, nullable=True)  # 非管理员仅可修改一次登录名，修改后记录时间
     class_id = Column(Integer, ForeignKey("classes.id"), nullable=True)  # 学生所属班级
+    admin_class_or_dept = Column(String(128), nullable=True)  # 学生：行政班级；教师：部门；可为空
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -61,6 +64,7 @@ class Course(Base):
     name = Column(String(128), nullable=False)
     code = Column(String(32), unique=True, nullable=True, index=True)
     description = Column(Text, nullable=True)
+    remark = Column(String(128), nullable=True)  # 备注，可选，最多 128 字符
     is_active = Column(Boolean, default=True)
     owner_teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 课程归属教师
     created_at = Column(DateTime, default=datetime.utcnow)
@@ -101,11 +105,21 @@ class KnowledgePoint(Base):
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
+class DocumentChapter(Base):
+    """文档与章节多对多：一个资料可对应多个章节或整门课程（全部）"""
+    __tablename__ = "document_chapters"
+    __table_args__ = (UniqueConstraint("doc_id", "chapter_id", name="uq_document_chapter"),)
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    doc_id = Column(Integer, ForeignKey("knowledge_documents.id", ondelete="CASCADE"), nullable=False, index=True)
+    chapter_id = Column(Integer, ForeignKey("chapters.id", ondelete="CASCADE"), nullable=False, index=True)
+
+
 class KnowledgeDocument(Base):
     """知识库文档：教材摘录、PPT 解析文本、电商案例"""
     __tablename__ = "knowledge_documents"
     id = Column(Integer, primary_key=True, autoincrement=True)
-    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)  # 课程（课程级资料或用于列表）
+    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=True)  # 主章节（兼容/展示用，实际关联以 document_chapters 为准）
     source_type = Column(String(32), nullable=False)  # textbook | ppt | ecommerce_case
     title = Column(String(256), nullable=False)
     content = Column(Text, nullable=False)
@@ -117,6 +131,8 @@ class KnowledgeDocument(Base):
     parse_error = Column(String(512), nullable=True)
     chunk_count = Column(Integer, nullable=True)
     reviewed_at = Column(DateTime, nullable=True)  # 内容审核：复核通过后写入，先审后发
+    student_visible = Column(Boolean, default=True)  # 在学生对话窗口、预习页中是否可见
+    downloadable = Column(Boolean, default=True)  # 在学生对话窗口、预习页中是否可下载
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -127,15 +143,20 @@ class Question(Base):
     course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)
     chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False)
     knowledge_point_ids = Column(String(256), nullable=True)  # 逗号分隔考点 id
+    question_bank_type = Column(String(20), nullable=False, default="training")  # training | exam
+    difficulty_score = Column(Float, nullable=False, default=0.8)  # (0,1)
     difficulty = Column(String(20), default=Difficulty.basic.value)
     question_type = Column(String(24), default="single_choice", nullable=False)  # single_choice | multiple_choice | judge | qa | blank
     question_text = Column(Text, nullable=False)
     options = Column(Text, nullable=True)  # JSON: ["A选项","B选项",...]
     correct_answer = Column(String(32), nullable=False)  # 选项键或简答要点
     explanation = Column(Text, nullable=True)
+    remark = Column(String(128), nullable=True)
     ppt_ref = Column(String(128), nullable=True)
     is_active = Column(Boolean, default=True)
     is_approved = Column(Boolean, default=True)  # 内容审核：教师复核后为 True，先审后发
+    generated_time = Column(DateTime, default=datetime.utcnow)
+    edited_time = Column(DateTime, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
@@ -158,7 +179,7 @@ class DocumentProcessTask(Base):
     __tablename__ = "document_process_tasks"
     id = Column(Integer, primary_key=True, autoincrement=True)
     course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
-    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=False, index=True)
+    chapter_id = Column(Integer, ForeignKey("chapters.id"), nullable=True, index=True)  # 无章节时按课程解析
     doc_id = Column(Integer, ForeignKey("knowledge_documents.id"), nullable=False, index=True)
     teacher_id = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
     status = Column(String(24), nullable=False, default="pending")  # pending | running | success | failed
@@ -181,6 +202,36 @@ class CourseReindexTask(Base):
     error_message = Column(Text, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class Paper(Base):
+    __tablename__ = "papers"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=False, index=True)
+    title = Column(String(128), nullable=False)
+    paper_type = Column(String(20), nullable=False, default="electronic")  # electronic | file
+    paper_bank_type = Column(String(20), nullable=False, default="training")  # training | formal
+    question_source = Column(String(20), nullable=False, default="local")  # local | internet
+    status = Column(String(24), nullable=False, default="pending")  # pending | reviewed
+    is_partial = Column(Boolean, nullable=False, default=False)
+    total_score = Column(Float, nullable=False, default=0)
+    overall_difficulty = Column(Float, nullable=False, default=0)  # 0~1，值越大越简单
+    request_payload = Column(Text, nullable=False, default="{}")
+    content_payload = Column(Text, nullable=True)  # 试卷预览内容（JSON）
+    error_message = Column(Text, nullable=True)
+    created_by = Column(Integer, ForeignKey("users.id"), nullable=False, index=True)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
+class PaperFile(Base):
+    """文件试卷下的附件（支持多文件：题目与材料可能分布在多个文件中）"""
+    __tablename__ = "paper_files"
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    paper_id = Column(Integer, ForeignKey("papers.id"), nullable=False, index=True)
+    file_name = Column(String(256), nullable=False)  # 原始文件名
+    file_path = Column(String(512), nullable=False)  # 相对 upload_dir 的路径
+    created_at = Column(DateTime, default=datetime.utcnow)
 
 
 # ---------- PPT 元数据（联动检索） ----------
@@ -260,6 +311,8 @@ class QuestionAsked(Base):
     answer_text = Column(Text, nullable=True)
     ppt_ref = Column(String(128), nullable=True)
     rag_hit = Column(Boolean, nullable=False, default=False)
+    # 仅当本地知识库未命中、由大模型回答后，由大模型判断：True=与课程无关，False=与课程有关，None=未判断（如 RAG 命中）
+    course_irrelevant = Column(Boolean, nullable=True)
     created_at = Column(DateTime, default=datetime.utcnow)
 
 
@@ -291,6 +344,10 @@ class StudentFeedback(Base):
     __tablename__ = "student_feedbacks"
     id = Column(Integer, primary_key=True, autoincrement=True)
     user_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 可选，匿名化时用内部 id 替代展示
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)  # 关联课程（课中提交时带当前课程）
     content = Column(Text, nullable=False)
     source = Column(String(32), default="form")  # form | dialogue
-    created_at = Column(DateTime, default=datetime.utcnow)
+    reply_text = Column(Text, nullable=True)  # 教师/管理员回复内容
+    status = Column(String(32), nullable=True, default="待处理")  # 待处理 | 处理中 | 已处理
+    created_at = Column(DateTime, default=datetime.utcnow)  # 反馈时间
+    processed_at = Column(DateTime, nullable=True)  # 处理回复时间：状态变更时更新

@@ -14,6 +14,8 @@ type ChapterDocItem = {
   parse_status: string | null;
   parse_error: string | null;
   chunk_count: number | null;
+  student_visible: boolean;
+  downloadable: boolean;
   created_at: string | null;
 };
 
@@ -22,12 +24,22 @@ type ChapterDocDetail = ChapterDocItem & {
   chunks: { index: number; text: string }[];
 };
 
-export default function TeacherChapterMaterials() {
+export type TeacherChapterMaterialsProps = {
+  courseId?: number;
+  courseName?: string;
+  chapterId?: number;
+  chapterTitle?: string;
+  embedInCourseMaterials?: boolean;
+};
+
+export default function TeacherChapterMaterials(props: TeacherChapterMaterialsProps = {}) {
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
-  const chapterId = Number(searchParams.get("chapterId") || 0);
-  const chapterTitle = searchParams.get("chapterTitle") || "章节";
-  const courseName = searchParams.get("courseName") || "课程";
+  const chapterId = props.chapterId ?? (Number(searchParams.get("chapterId") || 0));
+  const chapterTitle = props.chapterTitle ?? (searchParams.get("chapterTitle") || "章节");
+  const courseName = props.courseName ?? (searchParams.get("courseName") || "课程");
+  const embedInCourseMaterials = props.embedInCourseMaterials === true;
+  const courseId = props.courseId;
 
   const [chapterDocs, setChapterDocs] = useState<ChapterDocItem[]>([]);
   const [docsLoading, setDocsLoading] = useState(false);
@@ -39,6 +51,8 @@ export default function TeacherChapterMaterials() {
   const [docDetailLoading, setDocDetailLoading] = useState(false);
   const [docActionId, setDocActionId] = useState<number | null>(null);
   const [errorLogModal, setErrorLogModal] = useState<string | null>(null);
+  const [editDocId, setEditDocId] = useState<number | null>(null);
+  const [editForm, setEditForm] = useState<{ student_visible: boolean; downloadable: boolean }>({ student_visible: true, downloadable: true });
   const [docTaskByDoc, setDocTaskByDoc] = useState<Record<number, { taskId: number; status: string }>>({});
   const [docTaskErrorByDoc, setDocTaskErrorByDoc] = useState<Record<number, string>>({});
   const [statusPollingDocIds, setStatusPollingDocIds] = useState<Record<number, boolean>>({});
@@ -118,7 +132,9 @@ export default function TeacherChapterMaterials() {
         setVideoUploadFile(null);
         loadChapterDocuments(chapterId);
         setSelectedDocId(doc.id);
+        return api.teacher.courses.documentDetail(doc.id);
       })
+      .then(setDocDetail)
       .catch((e) => alert(e?.message || "视频上传失败"))
       .finally(() => setDocUploading(false));
   };
@@ -167,6 +183,21 @@ export default function TeacherChapterMaterials() {
       alert(e?.message || "删除失败");
     } finally {
       setDocActionId(null);
+    }
+  };
+
+  const patchDocumentVisibility = async (docId: number, student_visible: boolean, downloadable: boolean) => {
+    try {
+      await api.teacher.courses.patchDocument(docId, { student_visible, downloadable });
+      const next = chapterDocs.map((d) => (d.id === docId ? { ...d, student_visible, downloadable } : d));
+      setChapterDocs(next);
+      if (selectedDocId === docId && docDetail) {
+        setDocDetail({ ...docDetail, student_visible, downloadable });
+      }
+      setEditDocId(null);
+      toast("已更新");
+    } catch (e: any) {
+      toast(e?.message || "更新失败", "error");
     }
   };
 
@@ -303,54 +334,131 @@ export default function TeacherChapterMaterials() {
     <div>
       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 12, gap: 8, flexWrap: "wrap" }}>
         <h1 style={{ margin: 0, fontSize: 24, fontWeight: 600 }}>{title}</h1>
-        <button type="button" className="btn-ghost" onClick={() => navigate("/teacher/courses")}>返回课程页</button>
+        <button
+          type="button"
+          className="btn-ghost"
+          onClick={() =>
+            navigate(
+              embedInCourseMaterials && courseId != null
+                ? `/teacher/course-materials?courseId=${courseId}&courseName=${encodeURIComponent(courseName)}`
+                : "/teacher/courses"
+            )
+          }
+        >
+          {embedInCourseMaterials ? "返回课程资料" : "返回课程页"}
+        </button>
       </div>
-      <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>资料上传只负责上传；讲义的重新识别/切片/重建索引在下方独立按钮执行。</p>
-      <div className="card" style={{ width: "100%", minHeight: "calc(100vh - 170px)", display: "grid", gridTemplateColumns: "360px 1fr", gap: 12 }}>
+      <p style={{ color: "var(--text-muted)", marginBottom: 16 }}>上传仅保存文件；PDF 讲义的解析（识别/切片/存入知识库）请在列表中点击该行的「解析」按钮执行。</p>
+      <div className="card" style={{ width: "100%", minHeight: "calc(100vh - 170px)", display: "grid", gridTemplateColumns: "minmax(260px, 34%) 1fr", gap: 12 }}>
         <div style={{ borderRight: "1px solid var(--border)", paddingRight: 12, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-            <input type="file" accept="application/pdf,.pdf" onChange={(e) => setDocUploadFile(e.target.files?.[0] || null)} style={{ flex: 1 }} />
-            <button type="button" className="btn-primary" onClick={uploadDocumentToChapter} disabled={docUploading || !docUploadFile}>
-              {docUploading ? "上传中…" : "上传PDF"}
-            </button>
+          <div style={{ marginBottom: 10 }}>
+            <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 6 }}>
+              <input type="file" accept="application/pdf,.pdf" onChange={(e) => setDocUploadFile(e.target.files?.[0] || null)} style={{ flex: "1 1 120px", minWidth: 0 }} />
+              <button type="button" className="btn-primary" onClick={uploadDocumentToChapter} disabled={docUploading || !docUploadFile}>
+                {docUploading ? "上传中…" : "上传 PDF"}
+              </button>
+            </div>
+            <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+              <input type="file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.webm,.mov,.mkv,.m4v" onChange={(e) => setVideoUploadFile(e.target.files?.[0] || null)} style={{ flex: "1 1 120px", minWidth: 0 }} />
+              <button type="button" className="btn-primary" onClick={uploadVideoToChapter} disabled={docUploading || !videoUploadFile}>
+                {docUploading ? "上传中…" : "上传视频"}
+              </button>
+            </div>
           </div>
-          <div style={{ display: "flex", gap: 8, alignItems: "center", marginBottom: 10 }}>
-            <input type="file" accept="video/mp4,video/webm,video/quicktime,video/x-matroska,.mp4,.webm,.mov,.mkv,.m4v" onChange={(e) => setVideoUploadFile(e.target.files?.[0] || null)} style={{ flex: 1 }} />
-            <button type="button" className="btn-primary" onClick={uploadVideoToChapter} disabled={docUploading || !videoUploadFile}>
-              {docUploading ? "上传中…" : "上传教学视频"}
-            </button>
-          </div>
-          <div style={{ overflowY: "auto", border: "1px solid var(--border)", borderRadius: 8, padding: 8, flex: 1 }}>
-            {docsLoading && <p style={{ color: "var(--text-muted)" }}>加载中…</p>}
-            {!docsLoading && chapterDocs.length === 0 && <p style={{ color: "var(--text-muted)" }}>暂无文档</p>}
-            {!docsLoading &&
-              chapterDocs.map((doc) => (
-                <button
-                  key={doc.id}
-                  type="button"
-                  onClick={() => openDocDetail(doc.id)}
-                  style={{
-                    width: "100%",
-                    textAlign: "left",
-                    border: selectedDocId === doc.id ? "1px solid var(--primary)" : "1px solid var(--border)",
-                    background: selectedDocId === doc.id ? "rgba(59,130,246,0.08)" : "transparent",
-                    borderRadius: 8,
-                    padding: 8,
-                    marginBottom: 8,
-                    cursor: "pointer",
-                  }}
-                >
-                  <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{doc.file_name || doc.title}</div>
-                  <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
-                    类型：{doc.source_type === "preview_video" ? "预习视频" : "文档"} · 状态：{doc.parse_status || "unknown"} · 切片：{doc.chunk_count ?? "—"} · 大小：{formatFileSize(doc.file_size)}
-                  </div>
-                  {doc.parse_error && <div style={{ color: "var(--danger, #c00)", fontSize: 12, marginTop: 4 }}>{doc.parse_error}</div>}
-                </button>
-              ))}
+          <div style={{ overflow: "auto", border: "1px solid var(--border)", borderRadius: 8, flex: 1, minHeight: 0 }}>
+            {docsLoading && <p style={{ padding: 8, color: "var(--text-muted)" }}>加载中…</p>}
+            {!docsLoading && chapterDocs.length === 0 && <p style={{ padding: 8, color: "var(--text-muted)" }}>暂无资料，请先上传</p>}
+            {!docsLoading && chapterDocs.length > 0 && (
+              <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 13 }}>
+                <thead>
+                  <tr style={{ borderBottom: "1px solid var(--border)", background: "var(--bg-muted, #f5f5f5)" }}>
+                    <th style={{ textAlign: "left", padding: "6px 8px", fontWeight: 600 }}>文件</th>
+                    <th style={{ textAlign: "left", padding: "6px 10px 6px 4px", fontWeight: 600, width: 88 }}>操作</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {chapterDocs.map((doc) => {
+                    const isSelected = selectedDocId === doc.id;
+                    const isProcessing =
+                      doc.parse_status === "processing" ||
+                      docTaskByDoc[doc.id]?.status === "pending" ||
+                      docTaskByDoc[doc.id]?.status === "running";
+                    const singleChapter = (doc.chapter_ids?.length ?? 0) === 1;
+                    const canParse = doc.source_type === "pdf_upload" && !isProcessing;
+                    return (
+                      <tr
+                        key={doc.id}
+                        onClick={() => openDocDetail(doc.id)}
+                        style={{
+                          cursor: "pointer",
+                          borderBottom: "1px solid var(--border)",
+                          background: isSelected ? "rgba(59,130,246,0.08)" : undefined,
+                        }}
+                      >
+                        <td style={{ padding: 6, verticalAlign: "top" }}>
+                          <div style={{ fontWeight: 600, fontSize: 14, marginBottom: 4 }}>{doc.file_name || doc.title || "—"}</div>
+                          <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                            类型：{doc.source_type === "preview_video" ? "视频" : "文档"} · 状态：{doc.parse_status || "—"} · 大小：{formatFileSize(doc.file_size)} · 学生可见：{doc.student_visible ? "是" : "否"} · 可下载：{doc.downloadable ? "是" : "否"}
+                          </div>
+                          {doc.parse_error && <div style={{ color: "var(--danger, #c00)", fontSize: 12, marginTop: 4 }}>{doc.parse_error}</div>}
+                        </td>
+                        <td style={{ padding: "6px 10px 6px 4px", verticalAlign: "middle" }} onClick={(e) => e.stopPropagation()}>
+                          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 2, width: 76 }}>
+                            <button type="button" className="btn-ghost" style={{ padding: "2px 4px", fontSize: 11 }} onClick={() => openDocFile(doc.id)}>
+                              查看
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ padding: "2px 4px", fontSize: 11 }}
+                              onClick={() => {
+                                setEditDocId(doc.id);
+                                setEditForm({ student_visible: doc.student_visible, downloadable: doc.downloadable });
+                              }}
+                            >
+                              编辑
+                            </button>
+                            {doc.source_type === "pdf_upload" ? (
+                              <button
+                                type="button"
+                                className="btn-ghost"
+                                style={{ padding: "2px 4px", fontSize: 11 }}
+                                disabled={!canParse}
+                                title={
+                                  singleChapter
+                                    ? "解析后将自动提取知识点并填入该章节"
+                                    : "解析后不会自动填写知识点（仅单章节时会自动填入）"
+                                }
+                                onClick={() => reprocessDocument(doc.id)}
+                              >
+                                {isProcessing ? "…" : "解析"}
+                              </button>
+                            ) : (
+                              <span />
+                            )}
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ padding: "2px 4px", fontSize: 11, color: "var(--danger, #c00)" }}
+                              disabled={docActionId === doc.id}
+                              onClick={() => deleteDocument(doc.id)}
+                            >
+                              {docActionId === doc.id ? "…" : "删除"}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            )}
           </div>
         </div>
         <div style={{ display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <h3 style={{ marginTop: 0, marginBottom: 8 }}>文档解析情况</h3>
+          <div style={{ minHeight: 95, marginBottom: 8, display: "flex", alignItems: "center" }}>
+            <h3 style={{ margin: 0 }}>文档解析情况</h3>
+          </div>
           {docDetailLoading && <p style={{ color: "var(--text-muted)" }}>解析信息加载中…</p>}
           {!docDetailLoading && !docDetail && <p style={{ color: "var(--text-muted)" }}>点击左侧文档查看解析详情</p>}
           {!docDetailLoading && docDetail && (
@@ -364,44 +472,21 @@ export default function TeacherChapterMaterials() {
                     <>
                 <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
                   <strong>{docDetail.file_name || docDetail.title}</strong>
-                  <div style={{ display: "inline-flex", gap: 8 }}>
+                  <div style={{ display: "inline-flex", gap: 8, flexWrap: "wrap" }}>
                     <button type="button" className="btn-ghost" onClick={() => openDocFile(docDetail.id)} disabled={docActionId === docDetail.id}>
                       {docDetail.source_type === "preview_video" ? "播放视频" : "查看PDF"}
                     </button>
-                    {docDetail.source_type !== "preview_video" && (
-                      <>
+                    {docDetail.source_type !== "preview_video" &&
+                      (docTaskByDoc[docDetail.id]?.status === "pending" || docTaskByDoc[docDetail.id]?.status === "running") && (
                         <button
                           type="button"
                           className="btn-ghost"
-                          onClick={() => reprocessDocument(docDetail.id)}
-                          disabled={
-                            docUploading ||
-                            statusPollingDocIds[docDetail.id] ||
-                            effectiveStatus === "processing" ||
-                            docTaskByDoc[docDetail.id]?.status === "pending" ||
-                            docTaskByDoc[docDetail.id]?.status === "running"
-                          }
+                          style={{ color: "var(--danger, #c00)" }}
+                          onClick={() => cancelDocumentTask(docDetail.id)}
                         >
-                          {statusPollingDocIds[docDetail.id] ||
-                          effectiveStatus === "processing" ||
-                          docTaskByDoc[docDetail.id]?.status === "pending" ||
-                          docTaskByDoc[docDetail.id]?.status === "running"
-                            ? "处理中…"
-                            : "重新识别+切片+重建索引"}
+                          停止任务
                         </button>
-                        {(docTaskByDoc[docDetail.id]?.status === "pending" ||
-                          docTaskByDoc[docDetail.id]?.status === "running") && (
-                          <button
-                            type="button"
-                            className="btn-ghost"
-                            style={{ color: "var(--danger, #c00)" }}
-                            onClick={() => cancelDocumentTask(docDetail.id)}
-                          >
-                            停止任务
-                          </button>
-                        )}
-                      </>
-                    )}
+                      )}
                     {effectiveError && (
                       <button
                         type="button"
@@ -449,6 +534,52 @@ export default function TeacherChapterMaterials() {
           )}
         </div>
       </div>
+
+      {editDocId != null && (() => {
+        const doc = chapterDocs.find((d) => d.id === editDocId);
+        if (!doc) return null;
+        return (
+          <div
+            style={{ position: "fixed", inset: 0, background: "rgba(0,0,0,0.45)", display: "flex", alignItems: "center", justifyContent: "center", zIndex: 130 }}
+            onClick={() => setEditDocId(null)}
+          >
+            <div className="card" style={{ width: "min(400px, 92vw)", padding: 16 }} onClick={(e) => e.stopPropagation()}>
+              <h3 style={{ margin: "0 0 12px" }}>编辑资料</h3>
+              <p style={{ color: "var(--text-muted)", fontSize: 13, marginBottom: 12 }}>{doc.file_name || doc.title}</p>
+              <div style={{ display: "flex", flexDirection: "column", gap: 10, marginBottom: 16 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={editForm.student_visible}
+                    onChange={(e) => setEditForm((f) => ({ ...f, student_visible: e.target.checked }))}
+                  />
+                  <span>学生预习页中可见</span>
+                </label>
+                <label style={{ display: "flex", alignItems: "center", gap: 8, cursor: "pointer" }}>
+                  <input
+                    type="checkbox"
+                    checked={editForm.downloadable}
+                    onChange={(e) => setEditForm((f) => ({ ...f, downloadable: e.target.checked }))}
+                  />
+                  <span>学生预习页中可下载</span>
+                </label>
+              </div>
+              <div style={{ display: "flex", justifyContent: "flex-end", gap: 8 }}>
+                <button type="button" className="btn-ghost" onClick={() => setEditDocId(null)}>
+                  取消
+                </button>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={() => patchDocumentVisibility(editDocId, editForm.student_visible, editForm.downloadable)}
+                >
+                  保存
+                </button>
+              </div>
+            </div>
+          </div>
+        );
+      })()}
 
       {errorLogModal && (
         <div

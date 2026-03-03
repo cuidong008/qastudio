@@ -173,10 +173,10 @@ export default function AdminCourses() {
                       <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => setExpandCourseId(expandCourseId === c.id ? null : c.id)}>
                         {expandCourseId === c.id ? "收起章节" : "章节"}
                       </button>
-                      <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => doReindex(c.id, c.name)} disabled={reindexingId !== null || clearingId !== null}>
+                      <button type="button" className="btn-ghost" style={{ marginRight: 8 }} title="只重建索引，不删除课程下的文件和知识库内容" onClick={() => doReindex(c.id, c.name)} disabled={reindexingId !== null || clearingId !== null}>
                         {reindexingId === c.id ? "索引中…" : "重建索引"}
                       </button>
-                      <button type="button" className="btn-ghost" style={{ marginRight: 8, color: "var(--danger, #c00)" }} onClick={() => doClearKnowledge(c.id, c.name)} disabled={reindexingId !== null || clearingId !== null}>
+                      <button type="button" className="btn-ghost" style={{ marginRight: 8, color: "var(--danger, #c00)" }} title="删除课程下的所有文件并清空知识库" onClick={() => doClearKnowledge(c.id, c.name)} disabled={reindexingId !== null || clearingId !== null}>
                         {clearingId === c.id ? "清理中…" : "一键清理"}
                       </button>
                       <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)" }} onClick={() => doDelete(c.id)}>删除</button>

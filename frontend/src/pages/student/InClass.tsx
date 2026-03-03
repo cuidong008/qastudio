@@ -1,13 +1,27 @@
 import { useEffect, useMemo, useRef, useState } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
 import { useAuth } from "../../api/auth";
+import TeacherStudentLearningCard, { type StudentLearningPayload, type StatsRow } from "../../components/TeacherStudentLearningCard";
 import Preview from "./Preview";
 import Review from "./Review";
 import Exercises from "./Exercises";
 import Feedback from "./Feedback";
+import StudentLearningData from "./StudentLearningData";
 
-const CHAT_STORAGE_KEY = "qastudio.student.chat.v1";
+const CHAT_STORAGE_KEY_STUDENT = "qastudio.student.chat.v1";
+const CHAT_STORAGE_KEY_TEACHER_PREFIX = "qastudio.teacher.chat.v1.";
+const CHAT_STORAGE_KEY_ADMIN_PREFIX = "qastudio.admin.chat.v1.";
+
+function getChatStorageKey(variant: "student" | "teacher" | "admin", userId?: number | null): string | null {
+  if (variant === "teacher") {
+    return userId != null ? CHAT_STORAGE_KEY_TEACHER_PREFIX + userId : null;
+  }
+  if (variant === "admin") {
+    return userId != null ? CHAT_STORAGE_KEY_ADMIN_PREFIX + userId : null;
+  }
+  return CHAT_STORAGE_KEY_STUDENT;
+}
 const MAX_AVATAR_FILE_BYTES = 1.5 * 1024 * 1024;
 const SUPPORTED_AVATAR_TYPES = new Set([
   "image/png",
@@ -127,6 +141,8 @@ type ChatMessage = {
   reference_page?: number | null;
   knowledge_point?: string | null;
   question_asked_id?: number | null;
+  /** 教师端：查看学生学情时的结构化数据 */
+  payload?: StudentLearningPayload;
 };
 
 type ChatSession = {
@@ -145,8 +161,22 @@ const studentMenus = [
   { key: "review", label: "课后复习" },
   { key: "exercises", label: "习题训练" },
   { key: "feedback", label: "反馈" },
+  { key: "learning-data", label: "我的学情" },
 ] as const;
 type WorkspaceMode = (typeof studentMenus)[number]["key"];
+
+const teacherQuickLinks = [
+  { label: "学情概览", path: "/teacher/learning-data" },
+  { label: "我的课程", path: "/teacher/courses" },
+  { label: "我的班级", path: "/teacher/classes" },
+  { label: "课件流水线", path: "/teacher/pipeline" },
+  { label: "题库管理", path: "/teacher/question-bank" },
+];
+
+const adminQuickLinks = [
+  { label: "用户管理", path: "/admin/users" },
+  { label: "RAG配置", path: "/admin/rag" },
+];
 
 function makeSession(id: number, courseId: number | null = null): ChatSession {
   const now = Date.now();
@@ -165,11 +195,36 @@ function hasUserQuestion(session: ChatSession): boolean {
   return session.messages.some((m) => m.role === "user");
 }
 
-function loadChatState(): { sessions: ChatSession[]; sessionSeq: number; activeSessionId: number } {
+/** 教师端：判断是否为「查看学生学情」意图并提取关键词（姓名或学号） */
+function parseLearningIntent(message: string): string | null {
+  const t = message.trim();
+  if (!t.includes("学情")) return null;
+  const m1 = t.match(/把\s*([^的]+)\s*的学情/);
+  if (m1) return m1[1].trim();
+  const m2 = t.match(/(?:查看|列出|显示)\s*([^的\s]+)\s*的?学情/);
+  if (m2) return m2[1].trim();
+  const m3 = t.match(/学情[表]?\s*[：:]\s*(\S+)/);
+  if (m3) return m3[1].trim();
+  const m4 = t.match(/^\/学情\s*(.*)$/);
+  if (m4) return m4[1].trim();
+  const after = t.slice(t.indexOf("学情") + 2).trim();
+  if (after) return after.split(/\s/)[0] ?? "";
+  const before = t.slice(0, t.indexOf("学情")).replace(/^.*?(?:把|给|查看|列出|显示)\s*/i, "").trim();
+  return before || null;
+}
+
+function getDefaultLearningTimeRange(): { start: string; end: string } {
+  const end = new Date();
+  const start = new Date();
+  start.setDate(start.getDate() - 6);
+  return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
+}
+
+function loadChatState(storageKey: string): { sessions: ChatSession[]; sessionSeq: number; activeSessionId: number } {
   const fallback = { sessions: [makeSession(1)], sessionSeq: 2, activeSessionId: 1 };
   if (typeof window === "undefined") return fallback;
   try {
-    const raw = localStorage.getItem(CHAT_STORAGE_KEY);
+    const raw = localStorage.getItem(storageKey);
     if (!raw) return fallback;
     const parsed = JSON.parse(raw) as {
       sessions?: ChatSession[];
@@ -200,10 +255,12 @@ function loadChatState(): { sessions: ChatSession[]; sessionSeq: number; activeS
   }
 }
 
-export default function InClass() {
+const fallbackChatState = { sessions: [makeSession(1)], sessionSeq: 2, activeSessionId: 1 };
+
+export default function InClass({ variant = "student" }: { variant?: "student" | "teacher" | "admin" }) {
   const { user, logout, updateProfile, changePassword } = useAuth();
   const navigate = useNavigate();
-  const initialState = useMemo(() => loadChatState(), []);
+  const storageKey = getChatStorageKey(variant, user?.id);
   const [question, setQuestion] = useState("");
   const [loading, setLoading] = useState(false);
   const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
@@ -215,8 +272,8 @@ export default function InClass() {
   const [collapsedCourseGroups, setCollapsedCourseGroups] = useState<Record<string, boolean>>({});
   const [userMenuOpen, setUserMenuOpen] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
-  const [displayName, setDisplayName] = useState("");
   const [avatarUrl, setAvatarUrl] = useState<string | null>(null);
+  const [editUsername, setEditUsername] = useState("");
   const [profileSaving, setProfileSaving] = useState(false);
   const [passwordSaving, setPasswordSaving] = useState(false);
   const [avatarProcessing, setAvatarProcessing] = useState(false);
@@ -226,9 +283,15 @@ export default function InClass() {
   const [settingsError, setSettingsError] = useState("");
   const [settingsSuccess, setSettingsSuccess] = useState("");
   const [mode, setMode] = useState<WorkspaceMode>("qa");
-  const [sessionSeq, setSessionSeq] = useState(initialState.sessionSeq);
-  const [sessions, setSessions] = useState<ChatSession[]>(initialState.sessions);
-  const [activeSessionId, setActiveSessionId] = useState(initialState.activeSessionId);
+  const [sessionSeq, setSessionSeq] = useState(() =>
+    variant === "student" ? loadChatState(CHAT_STORAGE_KEY_STUDENT).sessionSeq : fallbackChatState.sessionSeq
+  );
+  const [sessions, setSessions] = useState<ChatSession[]>(() =>
+    variant === "student" ? loadChatState(CHAT_STORAGE_KEY_STUDENT).sessions : fallbackChatState.sessions
+  );
+  const [activeSessionId, setActiveSessionId] = useState(() =>
+    variant === "student" ? loadChatState(CHAT_STORAGE_KEY_STUDENT).activeSessionId : fallbackChatState.activeSessionId
+  );
   const inputRef = useRef<HTMLInputElement | null>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
@@ -245,8 +308,23 @@ export default function InClass() {
   }, []);
 
   useEffect(() => {
-    api.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
-  }, []);
+    if (variant === "teacher") {
+      api.teacher.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
+    } else if (variant === "admin") {
+      setCourses([]);
+    } else {
+      api.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
+    }
+  }, [variant]);
+
+  useEffect(() => {
+    if ((variant === "teacher" || variant === "admin") && storageKey) {
+      const loaded = loadChatState(storageKey);
+      setSessions(loaded.sessions);
+      setSessionSeq(loaded.sessionSeq);
+      setActiveSessionId(loaded.activeSessionId);
+    }
+  }, [variant, storageKey]);
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? sessions[0],
@@ -275,7 +353,12 @@ export default function InClass() {
     });
     const groups = Array.from(grouped.entries()).map(([courseId, list]) => ({
       courseId,
-      courseName: courseId == null ? "未选择课程" : courseNameMap.get(courseId) ?? `课程 ${courseId}`,
+      courseName:
+        courseId == null
+          ? "未选择课程"
+          : courseId === 0
+            ? "全部课程"
+            : courseNameMap.get(courseId) ?? `课程 ${courseId}`,
       sessions: list.sort((a, b) => b.updatedAt - a.updatedAt),
     }));
     return groups.sort((a, b) => {
@@ -296,12 +379,12 @@ export default function InClass() {
   };
 
   useEffect(() => {
-    if (typeof window === "undefined") return;
+    if (typeof window === "undefined" || !storageKey) return;
     localStorage.setItem(
-      CHAT_STORAGE_KEY,
+      storageKey,
       JSON.stringify({ sessions, sessionSeq, activeSessionId })
     );
-  }, [sessions, sessionSeq, activeSessionId]);
+  }, [sessions, sessionSeq, activeSessionId, storageKey]);
 
   const createNewSession = () => {
     const reusable = sessions.find((s) => !hasUserQuestion(s));
@@ -323,18 +406,18 @@ export default function InClass() {
   const handleAsk = async () => {
     const q = question.trim();
     if (!q || !activeSession) return;
-    if (!activeSession.courseId) {
-      const tipMsg: ChatMessage = {
-        id: Date.now(),
-        role: "assistant",
-        content: "请先选择课程，再进行提问",
-      };
-      updateActiveSession((session) => ({
-        ...session,
-        messages: [...session.messages, tipMsg],
-      }));
+    const courseId = activeSession.courseId;
+    const hasCourse =
+      variant === "admin" ||
+      variant === "teacher" ||
+      (courseId != null && courseId > 0);
+    if (!hasCourse) {
+      if (variant === "student") {
+        alert("请先选择课程，再进行提问。");
+      }
       return;
     }
+    const apiCourseId = (variant === "teacher" && courseId === 0) || variant === "admin" ? null : courseId;
     const userMsg: ChatMessage = {
       id: Date.now(),
       role: "user",
@@ -347,8 +430,110 @@ export default function InClass() {
     }));
     setQuestion("");
     setLoading(true);
+
+    const learningKeyword = variant === "teacher" ? parseLearningIntent(q) : null;
+    if (variant === "teacher" && learningKeyword !== null) {
+      try {
+        if (!learningKeyword.trim()) {
+          const assistantMsg: ChatMessage = {
+            id: Date.now() + 1,
+            role: "assistant",
+            content: "请说明要查看学情的学生姓名或学号，例如：把张三的学情表列出来",
+            payload: {
+              type: "student_learning",
+              keyword: "",
+              candidates: [],
+              selectedStudentId: null,
+              selectedStudentName: null,
+              timeRange: null,
+              period: "7",
+              customStart: "",
+              customEnd: "",
+              courseRows: [],
+              allChaptersByCourse: {},
+            },
+          };
+          updateActiveSession((session) => ({ ...session, messages: [...session.messages, assistantMsg] }));
+          return;
+        }
+        const candidates = await api.teacher.students.list({ q: learningKeyword.trim() });
+        const filtered = candidates;
+        const defaultRange = getDefaultLearningTimeRange();
+        const emptyPayload: StudentLearningPayload = {
+          type: "student_learning",
+          keyword: learningKeyword || "",
+          candidates: filtered.map((s) => ({ id: s.id, student_no: s.student_no, display_name: s.display_name })),
+          selectedStudentId: null,
+          selectedStudentName: null,
+          timeRange: null,
+          period: "7",
+          customStart: "",
+          customEnd: "",
+          courseRows: [],
+          allChaptersByCourse: {},
+        };
+        if (filtered.length === 0) {
+          const content = learningKeyword.trim()
+            ? `未找到匹配「${learningKeyword}」的学生（按姓名或学号）。`
+            : "请说明要查看学情的学生姓名或学号，例如：把张三的学情表列出来";
+          const assistantMsg: ChatMessage = {
+            id: Date.now() + 1,
+            role: "assistant",
+            content,
+            payload: { ...emptyPayload, candidates: filtered.map((s) => ({ id: s.id, student_no: s.student_no, display_name: s.display_name })) },
+          };
+          updateActiveSession((session) => ({ ...session, messages: [...session.messages, assistantMsg] }));
+          return;
+        }
+        if (filtered.length === 1) {
+          const student = filtered[0];
+          const studentName = (student.display_name || student.student_no || `学生${student.id}`).trim();
+          const list = await api.teacher.statsByCourseStudent({
+            studentId: student.id,
+            startDate: defaultRange.start,
+            endDate: defaultRange.end,
+          });
+          const courseIds = [...new Set(list.map((r) => r.course_id))];
+          const allChaptersByCourse: Record<number, { id: number; title: string }[]> = {};
+          await Promise.all(
+            courseIds.map((cid) =>
+              api.teacher.courses.chapters(cid).then((chList) => {
+                allChaptersByCourse[cid] = chList.map((ch) => ({ id: ch.id, title: ch.title }));
+              })
+            )
+          );
+          const assistantMsg: ChatMessage = {
+            id: Date.now() + 1,
+            role: "assistant",
+            content: `已列出 **${studentName}** 的学情统计（默认近7天），可修改统计周期后点击「再次查询」。`,
+            payload: {
+              ...emptyPayload,
+              candidates: filtered.map((s) => ({ id: s.id, student_no: s.student_no, display_name: s.display_name })),
+              selectedStudentId: student.id,
+              selectedStudentName: studentName,
+              timeRange: defaultRange,
+              courseRows: list as StatsRow[],
+              allChaptersByCourse,
+            },
+          };
+          updateActiveSession((session) => ({ ...session, messages: [...session.messages, assistantMsg] }));
+          return;
+        }
+        const assistantMsg: ChatMessage = {
+          id: Date.now() + 1,
+          role: "assistant",
+          content: "找到多位匹配学生，请选择要查看学情的一位：",
+          payload: { ...emptyPayload, candidates: filtered.map((s) => ({ id: s.id, student_no: s.student_no, display_name: s.display_name })) },
+        };
+        updateActiveSession((session) => ({ ...session, messages: [...session.messages, assistantMsg] }));
+      } finally {
+        setLoading(false);
+      }
+      return;
+    }
+
     try {
-      const res = await api.qa.ask(q, activeSession.courseId);
+      const res = await api.qa.ask(q, apiCourseId);
       const assistantMsg: ChatMessage = {
         id: Date.now() + 1,
         role: "assistant",
@@ -366,6 +551,76 @@ export default function InClass() {
     } finally {
       setLoading(false);
     }
+  };
+
+  const updateLearningPayload = (
+    messageId: number,
+    updater: (prev: StudentLearningPayload) => StudentLearningPayload
+  ) => {
+    updateActiveSession((session) => ({
+      ...session,
+      messages: session.messages.map((m) =>
+        m.id === messageId && m.payload?.type === "student_learning"
+          ? { ...m, payload: updater(m.payload) }
+          : m
+      ),
+    }), false);
+  };
+
+  const handleSelectStudentLearning = async (messageId: number, studentId: number, studentName: string) => {
+    const defaultRange = getDefaultLearningTimeRange();
+    try {
+      const list = await api.teacher.statsByCourseStudent({
+        studentId,
+        startDate: defaultRange.start,
+        endDate: defaultRange.end,
+      });
+      const courseIds = [...new Set(list.map((r) => r.course_id))];
+      const allChaptersByCourse: Record<number, { id: number; title: string }[]> = {};
+      await Promise.all(
+        courseIds.map((cid) =>
+          api.teacher.courses.chapters(cid).then((chList) => {
+            allChaptersByCourse[cid] = chList.map((ch) => ({ id: ch.id, title: ch.title }));
+          })
+        )
+      );
+      updateLearningPayload(messageId, (p) => ({
+        ...p,
+        selectedStudentId: studentId,
+        selectedStudentName: studentName,
+        timeRange: defaultRange,
+        courseRows: list as StatsRow[],
+        allChaptersByCourse,
+      }));
+    } catch {
+      updateLearningPayload(messageId, (p) => ({ ...p, selectedStudentId: null, selectedStudentName: null }));
+    }
+  };
+
+  const handleLearningTimeRangeChange = (messageId: number, period: string, customStart: string, customEnd: string) => {
+    updateLearningPayload(messageId, (p) => ({ ...p, period, customStart, customEnd }));
+  };
+
+  const handleRefetchLearningTimeRange = (
+    messageId: number,
+    _studentId: number,
+    start: string,
+    end: string,
+    period: string,
+    customStart: string,
+    customEnd: string,
+    courseRows: StatsRow[],
+    allChaptersByCourse: Record<number, { id: number; title: string }[]>
+  ) => {
+    updateLearningPayload(messageId, (p) => ({
+      ...p,
+      timeRange: { start, end },
+      period,
+      customStart,
+      customEnd,
+      courseRows,
+      allChaptersByCourse,
+    }));
   };
 
   const handleOpenReferenceFile = async (message: ChatMessage) => {
@@ -484,8 +739,8 @@ export default function InClass() {
   };
 
   const openSettings = () => {
-    setDisplayName(user?.display_name || user?.username || "");
     setAvatarUrl(user?.avatar_url || null);
+    setEditUsername(user?.username ?? "");
     setCurrentPassword("");
     setNewPassword("");
     setConfirmPassword("");
@@ -533,12 +788,23 @@ export default function InClass() {
   const handleSaveProfile = async () => {
     setSettingsError("");
     setSettingsSuccess("");
+    const payload: { avatar_url?: string | null; username?: string } = {};
+    if (avatarUrl !== (user?.avatar_url ?? null)) {
+      payload.avatar_url = avatarUrl ?? null;
+    }
+    const canEditUsername =
+      user && user.role !== "admin" && (user.username_changed_at == null || user.username_changed_at === "");
+    const newUsername = editUsername.trim();
+    if (canEditUsername && newUsername && newUsername !== user?.username) {
+      payload.username = newUsername;
+    }
+    if (Object.keys(payload).length === 0) {
+      setSettingsSuccess("未修改");
+      return;
+    }
     try {
       setProfileSaving(true);
-      await updateProfile({
-        display_name: displayName.trim() || null,
-        avatar_url: avatarUrl ?? null,
-      });
+      await updateProfile(payload);
       setSettingsSuccess("资料已更新");
     } catch (e) {
       setSettingsError((e as Error)?.message || "保存失败");
@@ -679,28 +945,32 @@ export default function InClass() {
       </aside>
 
       <section className="student-chat-main">
-        <div className="student-chat-topbar">
-          <div className="student-chat-course-picker">
-            <span>课程</span>
-            <select
-              value={activeSession.courseId ?? ""}
-              onChange={(e) => {
-                const nextId = e.target.value ? Number(e.target.value) : null;
-                updateActiveSession((session) => ({ ...session, courseId: nextId }));
-              }}
-            >
-              <option value="">请选择课程</option>
-              {courses.map((c) => (
-                <option key={c.id} value={c.id}>
-                  {c.name}
-                </option>
-              ))}
-            </select>
+        {variant !== "admin" && (
+          <div className="student-chat-topbar">
+            <div className="student-chat-course-picker">
+              <span>课程</span>
+              <select
+                value={activeSession.courseId ?? ""}
+                onChange={(e) => {
+                  const raw = e.target.value;
+                  const nextId = raw === "" ? null : Number(raw);
+                  updateActiveSession((session) => ({ ...session, courseId: nextId }));
+                }}
+              >
+                <option value="">请选择课程</option>
+                {variant === "teacher" && <option value="0">全部课程</option>}
+                {courses.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
           </div>
-        </div>
+        )}
 
         <div className="student-chat-message-list">
-          {mode === "qa" ? (
+          {(variant === "teacher" || variant === "admin" || mode === "qa") ? (
             <>
               {activeSession.messages.length === 0 ? (
                 <div className="student-chat-empty">
@@ -714,6 +984,15 @@ export default function InClass() {
                     className={`student-chat-message ${msg.role === "user" ? "from-user" : "from-assistant"}`}
                   >
                     <p>{msg.content}</p>
+                    {msg.role === "assistant" && msg.payload?.type === "student_learning" && (
+                      <TeacherStudentLearningCard
+                        messageId={msg.id}
+                        payload={msg.payload}
+                        onSelectStudent={handleSelectStudentLearning}
+                        onTimeRangeChange={handleLearningTimeRangeChange}
+                        onRefetchWithTimeRange={handleRefetchLearningTimeRange}
+                      />
+                    )}
                     <div className="student-chat-message-meta">
                       {msg.role === "assistant" && msg.document_ref && (
                         msg.reference_doc_id ? (
@@ -750,13 +1029,14 @@ export default function InClass() {
               {mode === "preview" && <Preview courseId={activeSession.courseId} />}
               {mode === "review" && <Review inWorkspace onGoQa={() => setMode("qa")} courseId={activeSession.courseId} />}
               {mode === "exercises" && <Exercises courseId={activeSession.courseId} />}
-              {mode === "feedback" && <Feedback inWorkspace onGoQa={() => setMode("qa")} />}
+              {mode === "feedback" && <Feedback inWorkspace onGoQa={() => setMode("qa")} courseId={activeSession.courseId} />}
+              {mode === "learning-data" && <StudentLearningData inWorkspace onGoQa={() => setMode("qa")} courseId={activeSession.courseId} />}
             </div>
           )}
         </div>
 
         <div className="student-chat-input-wrap">
-          {mode === "qa" ? (
+          {(variant === "teacher" || variant === "admin" || mode === "qa") ? (
             <div className="student-chat-input-row">
               <input
                 ref={inputRef}
@@ -778,17 +1058,39 @@ export default function InClass() {
               </button>
             </div>
           )}
-          <div className="student-chat-menu-row">
-            {studentMenus.map((item) => (
-              <button
-                key={item.key}
-                type="button"
-                className={`student-chat-menu-btn ${mode === item.key ? "is-active" : ""}`}
-                onClick={() => setMode(item.key)}
-              >
-                {item.label}
-              </button>
-            ))}
+          <div className={`student-chat-menu-row${variant === "admin" ? " student-chat-menu-row--admin" : ""}`}>
+            {variant === "admin" ? (
+              adminQuickLinks.map((item) => (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className="student-chat-menu-btn"
+                >
+                  {item.label}
+                </Link>
+              ))
+            ) : variant === "teacher" ? (
+              teacherQuickLinks.map((item) => (
+                <Link
+                  key={item.path}
+                  to={item.path}
+                  className="student-chat-menu-btn"
+                >
+                  {item.label}
+                </Link>
+              ))
+            ) : (
+              studentMenus.map((item) => (
+                <button
+                  key={item.key}
+                  type="button"
+                  className={`student-chat-menu-btn ${mode === item.key ? "is-active" : ""}`}
+                  onClick={() => setMode(item.key)}
+                >
+                  {item.label}
+                </button>
+              ))
+            )}
           </div>
         </div>
       </section>
@@ -801,7 +1103,7 @@ export default function InClass() {
                 {avatarUrl ? (
                   <img src={avatarUrl} alt="头像" />
                 ) : (
-                  (displayName || user?.username || "U").slice(0, 1).toUpperCase()
+                  (user?.display_name || user?.username || "U").slice(0, 1).toUpperCase()
                 )}
               </span>
               <div>
@@ -827,17 +1129,49 @@ export default function InClass() {
               </div>
             </div>
 
-            <label className="student-chat-settings-field">
-              <span>显示姓名</span>
-              <input
-                type="text"
-                maxLength={64}
-                value={displayName}
-                onChange={(e) => setDisplayName(e.target.value)}
-                placeholder="请输入显示姓名"
-              />
-            </label>
-            <button type="button" className="btn-primary" onClick={handleSaveProfile} disabled={profileSaving || avatarProcessing}>
+            <div className="student-chat-settings-field student-chat-settings-field-row">
+              <span className="student-chat-settings-field-label">学号/工号</span>
+              <span className="student-chat-settings-field-value">{user?.student_no ?? "—"}</span>
+            </div>
+
+            <div className="student-chat-settings-field student-chat-settings-field-row">
+              <span className="student-chat-settings-field-label">姓名</span>
+              <span className="student-chat-settings-field-value">{user?.display_name ?? "—"}</span>
+            </div>
+
+            <div className="student-chat-settings-field">
+              <div className="student-chat-settings-field-row">
+                <span className="student-chat-settings-field-label">登录用户名</span>
+                {user?.role === "admin" ? (
+                  <span className="student-chat-settings-field-value">{user?.username}</span>
+                ) : user?.username_changed_at != null && user.username_changed_at !== "" ? (
+                  <span className="student-chat-settings-field-value">{user?.username}</span>
+                ) : (
+                  <input
+                    type="text"
+                    className="student-chat-settings-field-row-input"
+                    maxLength={64}
+                    value={editUsername}
+                    onChange={(e) => setEditUsername(e.target.value)}
+                    placeholder="请输入登录用户名"
+                  />
+                )}
+              </div>
+              {user?.role === "admin" ? (
+                <p className="student-chat-settings-help">管理员不可修改登录用户名</p>
+              ) : user?.username_changed_at != null && user.username_changed_at !== "" ? (
+                <p className="student-chat-settings-help">登录用户名仅可修改一次，您已修改过，不可再次修改</p>
+              ) : (
+                <p className="student-chat-settings-help">登录用户名仅可修改一次，请谨慎填写。修改后点击下方「保存资料」生效。</p>
+              )}
+            </div>
+
+            <button
+              type="button"
+              className="btn-primary"
+              onClick={handleSaveProfile}
+              disabled={profileSaving || avatarProcessing}
+            >
               {profileSaving ? "保存中…" : "保存资料"}
             </button>
 

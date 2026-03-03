@@ -25,6 +25,10 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
   } | null>(null);
   const [recallPoints, setRecallPoints] = useState(["", "", ""]);
   const [recallSubmitted, setRecallSubmitted] = useState(false);
+  const [recallResult, setRecallResult] = useState<{
+    reference_points: string[];
+    results: { is_correct: boolean | null; reason: string | null }[];
+  } | null>(null);
   const [answers, setAnswers] = useState<Record<number, string>>({});
   const [results, setResults] = useState<Record<number, { answer_record_id: number; is_correct: boolean; correct_answer: string }>>({});
 
@@ -69,6 +73,7 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
     api.review.task(selected).then(setTask);
     setRecallPoints(["", "", ""]);
     setRecallSubmitted(false);
+    setRecallResult(null);
     setAnswers({});
     setResults({});
   }, [selected]);
@@ -77,7 +82,8 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
     if (!selected) return;
     const clean = recallPoints.map((item) => item.trim());
     if (clean.some((item) => !item)) return;
-    await api.review.submitRecall(selected, clean);
+    const res = await api.review.submitRecall(selected, clean);
+    setRecallResult({ reference_points: res.reference_points, results: res.results });
     setRecallSubmitted(true);
   };
 
@@ -196,7 +202,7 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
                   return next;
                 })
               }
-              style={{ display: "block", marginBottom: 8, maxWidth: 480 }}
+              style={{ display: "block", marginBottom: 8, width: 960, maxWidth: "100%" }}
             />
           ))}
           {!recallSubmitted ? (
@@ -204,7 +210,33 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
               提交回忆卡
             </button>
           ) : (
-            <p style={{ color: "var(--success)", marginBottom: 16 }}>回忆卡已提交。</p>
+            <div style={{ marginBottom: 16 }}>
+              <p style={{ color: "var(--success)", marginBottom: 12 }}>回忆卡已提交。</p>
+              {recallResult && (
+                <ul style={{ margin: 0, paddingLeft: 20, listStyle: "none" }}>
+                  {[0, 1, 2].map((i) => {
+                    const ref = recallResult.reference_points[i] ?? "";
+                    const res = recallResult.results[i];
+                    const isCorrect = res?.is_correct;
+                    const label = isCorrect === true ? "正确" : isCorrect === false ? "有误" : "—";
+                    const labelColor = isCorrect === true ? "var(--success)" : isCorrect === false ? "var(--error)" : "var(--text-muted)";
+                    return (
+                      <li key={i} style={{ marginBottom: 8 }}>
+                        <span style={{ color: labelColor, fontWeight: 600 }}>关键点 {i + 1}：{label}</span>
+                        {ref ? (
+                          <span style={{ marginLeft: 8, color: "var(--text-secondary)" }}>
+                            参考答案：{ref}
+                          </span>
+                        ) : null}
+                        {res?.reason ? (
+                          <span style={{ display: "block", marginTop: 2, fontSize: 13, color: "var(--text-muted)" }}>{res.reason}</span>
+                        ) : null}
+                      </li>
+                    );
+                  })}
+                </ul>
+              )}
+            </div>
           )}
           <h4 style={{ marginBottom: 8, marginTop: 16, fontSize: 15, fontWeight: 600 }}>
             巩固练习（基础题+变式题+1道综合题）
@@ -244,25 +276,33 @@ export default function Review({ inWorkspace = false, onGoQa, courseId }: { inWo
                     ))}
                   </div>
                 ) : (
-                  <input
-                    type="text"
-                    placeholder="输入答案"
-                    value={answers[q.id] || ""}
-                    onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
-                    style={{ marginBottom: 10, maxWidth: 300 }}
-                  />
+                  <div style={{ display: "flex", alignItems: "center", gap: "1em", marginBottom: 10, flexWrap: "wrap" }}>
+                    <input
+                      type="text"
+                      placeholder="输入答案"
+                      value={answers[q.id] || ""}
+                      onChange={(e) => setAnswers((prev) => ({ ...prev, [q.id]: e.target.value }))}
+                      style={{ width: 600, minWidth: 300, maxWidth: "100%" }}
+                    />
+                    {!qResult ? (
+                      <button type="button" className="btn-secondary" onClick={() => submitQuestion(q.id)} disabled={!answers[q.id]?.trim()}>
+                        提交本题
+                      </button>
+                    ) : null}
+                  </div>
                 )}
-                {!qResult ? (
+                {!qResult && qOptions.length > 0 ? (
                   <button type="button" className="btn-secondary" onClick={() => submitQuestion(q.id)} disabled={!answers[q.id]?.trim()}>
                     提交本题
                   </button>
-                ) : (
+                ) : null}
+                {qResult ? (
                   <div>
                     <p style={{ color: qResult.is_correct ? "var(--success)" : "var(--error)", margin: "0 0 8px" }}>
-                      {qResult.is_correct ? "回答正确" : `回答错误，正确答案：${qResult.correct_answer}`}
+                      {qResult.is_correct ? "回答正确" : `回答有误，参考答案：${qResult.correct_answer}`}
                     </p>
                   </div>
-                )}
+                ) : null}
               </div>
             );
           })}

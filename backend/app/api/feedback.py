@@ -11,9 +11,44 @@ from ..api.auth import get_current_user
 router = APIRouter(prefix="/feedback", tags=["feedback"])
 
 
+class FeedbackItemOut(BaseModel):
+    id: int
+    content: str
+    reply_text: str | None
+    status: str | None
+    created_at: str  # ISO format
+
+
+@router.get("", response_model=list[FeedbackItemOut])
+async def list_my_feedbacks(
+    db: AsyncSession = Depends(get_db),
+    user: User | None = Depends(get_current_user),
+):
+    """获取当前用户提交的反馈列表（含处理结果、状态、提交时间），按提交时间逆序"""
+    if not user:
+        raise HTTPException(status_code=401, detail="请先登录")
+    r = await db.execute(
+        select(StudentFeedback)
+        .where(StudentFeedback.user_id == user.id)
+        .order_by(StudentFeedback.created_at.desc())
+    )
+    rows = r.scalars().all()
+    return [
+        FeedbackItemOut(
+            id=f.id,
+            content=f.content or "",
+            reply_text=f.reply_text,
+            status=f.status or "待处理",
+            created_at=f.created_at.isoformat() if f.created_at else "",
+        )
+        for f in rows
+    ]
+
+
 class FeedbackIn(BaseModel):
     content: str
     source: str = "form"  # form | dialogue
+    course_id: int | None = None  # 当前课程（课中提交时带右上角所选课程）
 
 
 class FeedbackFromQaIn(BaseModel):
@@ -40,6 +75,7 @@ async def submit_feedback_from_qa(
     content = f"Q: {qa_record.question_text}\nA: {qa_record.answer_text or '(无)'}"
     feedback = StudentFeedback(
         user_id=user.id,
+        course_id=qa_record.course_id,
         content=content,
         source="dialogue",
     )
@@ -61,6 +97,7 @@ async def submit_feedback(
     source = body.source if body.source in ("form", "dialogue") else "form"
     feedback = StudentFeedback(
         user_id=user.id if user else None,
+        course_id=body.course_id,
         content=content,
         source=source,
     )

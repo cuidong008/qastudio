@@ -3,13 +3,14 @@ import re
 
 from fastapi import APIRouter, Depends, HTTPException, Query
 from pydantic import BaseModel
-from sqlalchemy import select, func
+from sqlalchemy import select, func, and_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..db import get_db
 from ..db.models import User, Question, AnswerRecord
 from ..api.auth import get_current_user
 from ..services.llm_grading_service import grade_qa_or_blank
+from ..services.difficulty import score_range_for_difficulty
 
 router = APIRouter(prefix="/questions", tags=["questions"])
 
@@ -75,11 +76,18 @@ async def list_questions(
     limit: int = Query(20, le=50),
     db: AsyncSession = Depends(get_db),
 ):
-    q = select(Question).where(Question.is_active == True, Question.is_approved == True)
+    q = select(Question).where(
+        Question.is_active == True,
+        Question.is_approved == True,
+        Question.question_bank_type == "training",
+    )
     if chapter_id is not None:
         q = q.where(Question.chapter_id == chapter_id)
-    if difficulty:
-        q = q.where(Question.difficulty == difficulty)
+    if difficulty and difficulty.strip() in ("basic", "applied", "extended"):
+        r = score_range_for_difficulty(difficulty.strip())
+        if r:
+            min_excl, max_incl = r
+            q = q.where(and_(Question.difficulty_score > min_excl, Question.difficulty_score <= max_incl))
     if question_types:
         normalized_types = [t.strip() for t in question_types.split(",") if t.strip()]
         if normalized_types:

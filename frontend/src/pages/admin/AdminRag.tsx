@@ -254,7 +254,7 @@ export default function AdminRag() {
   return (
     <div>
       <h1 style={{ marginBottom: 8, fontSize: 24, fontWeight: 600 }}>RAG 配置</h1>
-      <p style={{ color: "var(--text-muted)", marginBottom: 24, fontSize: 15 }}>
+      <p style={{ color: "var(--text-muted)", marginBottom: 24, fontSize: 15, maxWidth: 640 }}>
         参考 RAGFlow：先配置「模型提供商」（同一提供商的 API Key 可复用于 LLM / Embedding 等），再在「设置默认模型」中选择使用的 LLM 与 Embedding。保存后立即生效。
       </p>
 

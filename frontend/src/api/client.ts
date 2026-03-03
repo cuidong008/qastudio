@@ -81,6 +81,25 @@ function getToken(): string | null {
   return localStorage.getItem("token");
 }
 
+/** 教师端文档（含 course_id、chapter_ids） */
+export type DocWithChapters = {
+  id: number;
+  chapter_id: number | null;
+  course_id?: number | null;
+  source_type: string;
+  title: string;
+  page_ref: string | null;
+  file_name: string | null;
+  file_size: number | null;
+  parse_status: string | null;
+  parse_error: string | null;
+  chunk_count: number | null;
+  student_visible: boolean;
+  downloadable: boolean;
+  chapter_ids?: number[];
+  created_at: string | null;
+};
+
 type JsonRequestOptions = Omit<RequestInit, "body"> & { body?: unknown };
 
 export async function request<T>(
@@ -153,9 +172,30 @@ export const api = {
   auth: {
     login: (username: string, password: string) =>
       request<{ access_token: string; role: string }>("/auth/login", { method: "POST", body: { username, password } }),
-    me: () => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; avatar_url: string | null } | null>("/auth/me"),
-    updateProfile: (body: { display_name?: string | null; avatar_url?: string | null }) =>
-      request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; avatar_url: string | null }>("/auth/profile", { method: "PUT", body }),
+    me: () =>
+      request<{
+        id: number;
+        username: string;
+        role: string;
+        display_name: string | null;
+        student_no: string | null;
+        avatar_url: string | null;
+        username_changed_at: string | null;
+      } | null>("/auth/me"),
+    updateProfile: (body: {
+      display_name?: string | null;
+      avatar_url?: string | null;
+      username?: string | null;
+    }) =>
+      request<{
+        id: number;
+        username: string;
+        role: string;
+        display_name: string | null;
+        student_no: string | null;
+        avatar_url: string | null;
+        username_changed_at: string | null;
+      }>("/auth/profile", { method: "PUT", body }),
     changePassword: (body: { current_password: string; new_password: string }) =>
       request<{ ok: boolean }>("/auth/password", { method: "POST", body }),
   },
@@ -199,13 +239,18 @@ export const api = {
         comprehensive_question: { id: number; question_type: string | null; difficulty: string; question_text: string; options: string | null } | null;
       }>(`/review/task/${chapterId}`),
     submitRecall: (chapterId: number, recallPoints: string[]) =>
-      request<{ ok: boolean; message: string }>("/review/recall", {
+      request<{
+        ok: boolean;
+        message: string;
+        reference_points: string[];
+        results: { is_correct: boolean | null; reason: string | null }[];
+      }>("/review/recall", {
         method: "POST",
         body: { chapter_id: chapterId, recall_points: recallPoints },
       }),
   },
   qa: {
-    ask: (question: string, courseId: number) =>
+    ask: (question: string, courseId: number | null) =>
       request<{ answer: string; document_ref: string | null; reference_doc_id?: number | null; reference_page?: number | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, course_id: courseId } }),
     reference: (docId: number) =>
       request<{ id: number; title: string; source_type: string; page_ref: string | null; file_name: string | null }>(`/qa/reference/${docId}`),
@@ -258,11 +303,94 @@ export const api = {
       const q = qs.toString() ? `?${qs.toString()}` : "";
       return request<{
         preview_completion_rate: number;
-        top_asked: { question: string; count: number }[];
+        preview_student_count?: number;
+        completed_question_count?: number;
+        feedback_question_count?: number;
+        top_asked: { question: string; count: number; course_id?: number | null }[];
         answer_accuracy_rate: number;
+        ai_irrelevant_count?: number;
         weak_knowledge_points: string[];
+        weak_knowledge_point_course_ids?: (number | null)[];
+        weak_knowledge_point_wrong_counts?: number[];
       }>(`/teacher/stats/overview${q}`);
     },
+    /** 学情课程统计详细表：按课程+学生维度，班级名称来自教师管理且关联该课程的班级 */
+    statsByCourseStudent: (params?: { courseId?: number; classId?: number; studentId?: number; startDate?: string; endDate?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.courseId != null) qs.set("course_id", String(params.courseId));
+      if (params?.classId != null) qs.set("class_id", String(params.classId));
+      if (params?.studentId != null) qs.set("student_id", String(params.studentId));
+      if (params?.startDate) qs.set("start_date", params.startDate);
+      if (params?.endDate) qs.set("end_date", params.endDate);
+      const q = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{
+        course_id: number;
+        course_name: string;
+        student_id: number;
+        student_no: string;
+        student_name: string;
+        class_name: string;
+        preview_rate: string;
+        preview_completed_chapter_ids: number[];
+        completed_question_count: number;
+        completed_question_count_by_chapter?: { chapter_id: number; count: number }[];
+        correct_question_count_by_chapter?: { chapter_id: number; count: number }[];
+        accuracy_rate: string;
+        feedback_question_count: number;
+        ai_ask_count: number;
+        ai_irrelevant_count: number;
+        weak_knowledge_points: string;
+        weak_knowledge_points_by_chapter?: { chapter_id: number; weak_knowledge_points: string }[];
+      }[]>(`/teacher/stats/by-course-student${q}`);
+    },
+    feedbackList: (params?: { courseId?: number; classId?: number }) => {
+      const qs = new URLSearchParams();
+      if (params?.courseId != null) qs.set("course_id", String(params.courseId));
+      if (params?.classId != null) qs.set("class_id", String(params.classId));
+      const q = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{
+        id: number;
+        course_name: string;
+        feedback_text: string;
+        student_no: string;
+        student_name: string;
+        class_name: string;
+        created_at: string;
+        reply_text: string;
+        status: string;
+        processed_at: string | null;
+      }[]>(`/teacher/feedback/list${q}`);
+    },
+    getFeedback: (id: number) =>
+      request<{
+        id: number;
+        course_name: string;
+        feedback_text: string;
+        student_no: string;
+        student_name: string;
+        class_name: string;
+        created_at: string;
+        reply_text: string | null;
+        status: string | null;
+        processed_at: string | null;
+      }>(`/teacher/feedback/${id}`),
+    updateFeedback: (id: number, body: { reply_text?: string | null; status?: string | null }) =>
+      request<{
+        id: number;
+        course_name: string;
+        feedback_text: string;
+        student_no: string;
+        student_name: string;
+        class_name: string;
+        created_at: string;
+        reply_text: string | null;
+        status: string | null;
+        processed_at: string | null;
+      }>(`/teacher/feedback/${id}`, { method: "PUT", body }),
+    getPaperGenerateDefaults: () =>
+      request<{ type: string; count: number; difficulty: string; score: number }[]>("/teacher/config/paper-generate-defaults"),
+    getExerciseGenerateDefaults: () =>
+      request<{ type: string; max: number; difficulty: string }[]>("/teacher/config/exercise-generate-defaults"),
     configChapters: () =>
       request<{
         chapter_id: number;
@@ -285,11 +413,11 @@ export const api = {
       }),
     courses: {
       list: () =>
-        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }[]>("/teacher/courses"),
-      create: (body: { name: string; code?: string; description?: string; is_active?: boolean }) =>
-        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>("/teacher/courses", { method: "POST", body }),
-      update: (id: number, body: { name?: string; code?: string; description?: string; is_active?: boolean }) =>
-        request<{ id: number; name: string; code: string | null; description: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>(`/teacher/courses/${id}`, { method: "PUT", body }),
+        request<{ id: number; name: string; code: string | null; description: string | null; remark: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }[]>("/teacher/courses"),
+      create: (body: { name: string; code?: string; description?: string; remark?: string; is_active?: boolean }) =>
+        request<{ id: number; name: string; code: string | null; description: string | null; remark: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>("/teacher/courses", { method: "POST", body }),
+      update: (id: number, body: { name?: string; code?: string; description?: string; remark?: string; is_active?: boolean }) =>
+        request<{ id: number; name: string; code: string | null; description: string | null; remark: string | null; is_active: boolean; owner_teacher_id: number | null; created_at: string | null }>(`/teacher/courses/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/teacher/courses/${id}`, { method: "DELETE" }),
       reindex: (courseId: number) =>
         request<{ ok: boolean; task_id: number; status: string }>(`/teacher/courses/${courseId}/reindex`, { method: "POST" }),
@@ -342,12 +470,287 @@ export const api = {
       deleteChapter: (chapterId: number) => request<{ ok: boolean }>(`/teacher/chapters/${chapterId}`, { method: "DELETE" }),
       generateChapterQuestions: (
         chapterId: number,
-        body: { single_choice_max: number; multiple_choice_max: number; judge_max: number; qa_max: number; blank_max: number }
+        body: {
+          single_choice_max: number;
+          multiple_choice_max: number;
+          judge_max: number;
+          qa_max: number;
+          blank_max: number;
+          question_bank_type: "training" | "exam";
+          single_choice_difficulty_score: number;
+          multiple_choice_difficulty_score: number;
+          judge_difficulty_score: number;
+          qa_difficulty_score: number;
+          blank_difficulty_score: number;
+          knowledge_point_ids?: number[];
+        }
       ) =>
         request<{ ok: boolean; task_id: number; status: string }>(
           `/teacher/chapters/${chapterId}/questions/generate`,
           { method: "POST", body }
         ),
+      generatePaper: (
+        body: {
+          course_id: number;
+          chapter_ids: number[];
+          paper_title: string;
+          paper_bank_type: "training" | "formal";
+          question_source: "local" | "internet";
+          overall_difficulty?: number | null;
+          configs: { type: string; count: number; difficulty?: number | null; score: number }[];
+          save_to_bank: boolean;
+        }
+      ) =>
+        request<{
+          ok: boolean;
+          paper_id: number | null;
+          status: string;
+          is_partial: boolean;
+          message: string;
+          insufficient_types: { question_type: string; requested: number; available: number; missing: number }[];
+          preview_questions: {
+            question_type: string;
+            question_text: string;
+            options: string[];
+            correct_answer: string;
+            explanation: string | null;
+            difficulty_score: number;
+            score: number;
+            source: "local" | "internet";
+          }[];
+          total_score: number;
+          overall_difficulty: number;
+        }>("/teacher/papers/generate", { method: "POST", body }),
+      listPapers: (params?: {
+        courseId?: number;
+        chapterIds?: number[];
+        titleKw?: string;
+        difficultyMin?: number;
+        difficultyMax?: number;
+        reviewStatus?: "pending" | "reviewed" | "";
+        paperBankType?: "training" | "formal" | "";
+        status?: "generated" | "partial" | "failed" | "";
+      }) => {
+        const qs = new URLSearchParams();
+        if (params?.courseId != null && params.courseId > 0) qs.set("course_id", String(params.courseId));
+        if ((params?.chapterIds || []).length) {
+          for (const id of params?.chapterIds || []) {
+            if (id > 0) qs.append("chapter_ids", String(id));
+          }
+        }
+        if ((params?.titleKw || "").trim()) qs.set("title_kw", (params?.titleKw || "").trim());
+        if (params?.difficultyMin != null) qs.set("difficulty_min", String(params.difficultyMin));
+        if (params?.difficultyMax != null) qs.set("difficulty_max", String(params.difficultyMax));
+        if (params?.reviewStatus) qs.set("review_status", params.reviewStatus);
+        if (params?.paperBankType) qs.set("paper_bank_type", params.paperBankType);
+        if (params?.status) qs.set("status", params.status);
+        const q = qs.toString() ? `?${qs.toString()}` : "";
+        return request<{
+          id: number;
+          course_id: number;
+          course_name: string;
+          title: string;
+          paper_bank_type: "training" | "formal";
+          question_source: "local" | "internet";
+          status: "pending" | "reviewed";
+          review_status: "pending" | "reviewed";
+          is_partial: boolean;
+          total_score: number;
+          overall_difficulty: number;
+          chapter_ids: number[];
+          created_at: string | null;
+          updated_at: string | null;
+        }[]>(`/teacher/papers${q}`);
+      },
+      listPapersPaged: (params?: {
+        courseId?: number;
+        chapterIds?: number[];
+        titleKw?: string;
+        difficultyMin?: number;
+        difficultyMax?: number;
+        reviewStatus?: "pending" | "reviewed" | "";
+        paperBankType?: "training" | "formal" | "";
+        status?: "pending" | "reviewed" | "";
+        page?: number;
+        pageSize?: number;
+      }) => {
+        const qs = new URLSearchParams();
+        if (params?.courseId != null && params.courseId > 0) qs.set("course_id", String(params.courseId));
+        if ((params?.chapterIds || []).length) {
+          for (const id of params?.chapterIds || []) {
+            if (id > 0) qs.append("chapter_ids", String(id));
+          }
+        }
+        if ((params?.titleKw || "").trim()) qs.set("title_kw", (params?.titleKw || "").trim());
+        if (params?.difficultyMin != null) qs.set("difficulty_min", String(params.difficultyMin));
+        if (params?.difficultyMax != null) qs.set("difficulty_max", String(params.difficultyMax));
+        if (params?.reviewStatus) qs.set("review_status", params.reviewStatus);
+        if (params?.paperBankType) qs.set("paper_bank_type", params.paperBankType);
+        if (params?.status) qs.set("status", params.status);
+        if (params?.page) qs.set("page", String(params.page));
+        if (params?.pageSize) qs.set("page_size", String(params.pageSize));
+        const q = qs.toString() ? `?${qs.toString()}` : "";
+        return request<{
+          items: {
+            id: number;
+            course_id: number;
+            course_name: string;
+            title: string;
+            paper_type: "electronic" | "file";
+            paper_bank_type: "training" | "formal";
+            question_source: "local" | "internet";
+            status: "pending" | "reviewed";
+            review_status: "pending" | "reviewed";
+            is_partial: boolean;
+            total_score: number;
+            overall_difficulty: number;
+            chapter_ids: number[];
+            created_at: string | null;
+            updated_at: string | null;
+          }[];
+          total: number;
+          page: number;
+          page_size: number;
+        }>(`/teacher/papers/paged${q}`);
+      },
+      batchDeletePapers: (paperIds: number[]) =>
+        request<{ ok: boolean; deleted: number }>("/teacher/papers/batch-delete", { method: "POST", body: { paper_ids: paperIds } }),
+      exportPapersCsv: (params?: {
+        courseId?: number;
+        chapterIds?: number[];
+        titleKw?: string;
+        difficultyMin?: number;
+        difficultyMax?: number;
+        reviewStatus?: "pending" | "reviewed" | "";
+        paperBankType?: "training" | "formal" | "";
+        status?: "pending" | "reviewed" | "";
+      }) => {
+        const qs = new URLSearchParams();
+        if (params?.courseId != null && params.courseId > 0) qs.set("course_id", String(params.courseId));
+        if ((params?.chapterIds || []).length) {
+          for (const id of params?.chapterIds || []) {
+            if (id > 0) qs.append("chapter_ids", String(id));
+          }
+        }
+        if ((params?.titleKw || "").trim()) qs.set("title_kw", (params?.titleKw || "").trim());
+        if (params?.difficultyMin != null) qs.set("difficulty_min", String(params.difficultyMin));
+        if (params?.difficultyMax != null) qs.set("difficulty_max", String(params.difficultyMax));
+        if (params?.reviewStatus) qs.set("review_status", params.reviewStatus);
+        if (params?.paperBankType) qs.set("paper_bank_type", params.paperBankType);
+        if (params?.status) qs.set("status", params.status);
+        const q = qs.toString() ? `?${qs.toString()}` : "";
+        return requestBlob(`/teacher/papers/export/csv${q}`);
+      },
+      paperDetail: (paperId: number) =>
+        request<{
+          id: number;
+          course_id: number;
+          course_name: string;
+          title: string;
+          paper_type: "electronic" | "file";
+          paper_bank_type: "training" | "formal";
+          question_source: "local" | "internet";
+          status: "pending" | "reviewed";
+          review_status: "pending" | "reviewed";
+          is_partial: boolean;
+          total_score: number;
+          overall_difficulty: number;
+          chapter_ids: number[];
+          request_payload: Record<string, unknown>;
+          content_payload: {
+            preview_questions?: {
+              question_type: string;
+              question_text: string;
+              options: string[];
+              correct_answer: string;
+              explanation: string | null;
+              difficulty_score: number;
+              score: number;
+              source: "local" | "internet";
+            }[];
+            insufficient_types?: { question_type: string; requested: number; available: number; missing: number }[];
+          } | null;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/teacher/papers/${paperId}`),
+      listPaperFiles: (paperId: number) =>
+        request<{ id: number; paper_id: number; file_name: string; created_at: string | null }[]>(
+          `/teacher/papers/${paperId}/files`
+        ),
+      uploadPaperFile: (paperId: number, file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return request<{ id: number; paper_id: number; file_name: string; created_at: string | null }>(
+          `/teacher/papers/${paperId}/files`,
+          { method: "POST", body: form }
+        );
+      },
+      downloadPaperFile: (paperId: number, fileId: number) =>
+        requestBlob(`/teacher/papers/${paperId}/files/${fileId}/download`),
+      deletePaperFile: (paperId: number, fileId: number) =>
+        request<{ ok: boolean }>(`/teacher/papers/${paperId}/files/${fileId}`, { method: "DELETE" }),
+      importPaper: (params: {
+        courseId: number;
+        title: string;
+        paperBankType: "training" | "formal";
+        chapterIds?: number[];
+        files: File[];
+      }) => {
+        const form = new FormData();
+        form.append("course_id", String(params.courseId));
+        form.append("title", params.title);
+        form.append("paper_bank_type", params.paperBankType);
+        form.append("chapter_ids", JSON.stringify(params.chapterIds ?? []));
+        for (const f of params.files) form.append("files", f);
+        return requestForm<{ paper_id: number; file_count: number }>("/teacher/papers/import", form, { method: "POST" });
+      },
+      updatePaper: (
+        paperId: number,
+        body: {
+          title?: string;
+          status?: "pending" | "reviewed";
+          paper_bank_type?: "training" | "formal";
+          question_source?: "local" | "internet";
+          total_score?: number;
+          overall_difficulty?: number;
+          request_payload?: Record<string, unknown>;
+          content_payload?: Record<string, unknown>;
+          error_message?: string | null;
+        }
+      ) =>
+        request<{
+          id: number;
+          course_id: number;
+          course_name: string;
+          title: string;
+          paper_type: "electronic" | "file";
+          paper_bank_type: "training" | "formal";
+          question_source: "local" | "internet";
+          status: "pending" | "reviewed";
+          review_status: "pending" | "reviewed";
+          is_partial: boolean;
+          total_score: number;
+          overall_difficulty: number;
+          chapter_ids: number[];
+          request_payload: Record<string, unknown>;
+          content_payload: {
+            preview_questions?: {
+              question_type: string;
+              question_text: string;
+              options: string[];
+              correct_answer: string;
+              explanation: string | null;
+              difficulty_score: number;
+              score: number;
+              source: "local" | "internet";
+            }[];
+            insufficient_types?: { question_type: string; requested: number; available: number; missing: number }[];
+          } | null;
+          error_message: string | null;
+          created_at: string | null;
+          updated_at: string | null;
+        }>(`/teacher/papers/${paperId}`, { method: "PUT", body }),
       getQuestionTask: (taskId: number) =>
         request<{
           id: number;
@@ -379,19 +782,70 @@ export const api = {
           chapter_id: number;
           chapter_title: string;
           question_type: string;
+          question_bank_type: string;
           difficulty: string;
+          difficulty_score: number;
           question_text: string;
           options: string | null;
           correct_answer: string;
           explanation: string | null;
+          remark: string | null;
+          is_approved: boolean;
+          generated_time: string | null;
+          edited_time: string | null;
           knowledge_point_ids: string | null;
           knowledge_points: string[];
           created_at: string | null;
         }[]>(`/teacher/chapters/${chapterId}/questions${q}`);
       },
+      importQuestionsPreview: (form: FormData) =>
+        requestForm<{
+          course_id: number;
+          chapter_ids: number[];
+          question_bank_type: string;
+          parsed_count: number;
+          items: {
+            chapter_id: number | null;
+            chapter_title: string | null;
+            question_type: string;
+            question_text: string;
+            options: string[];
+            correct_answer: string;
+            explanation: string | null;
+            difficulty_score: number | null;
+          }[];
+        }>("/teacher/questions/import/preview", form, { method: "POST" }),
+      importQuestionsConfirm: (body: {
+        course_id: number;
+        question_bank_type: string;
+        items: {
+          chapter_id: number;
+          question_type: string;
+          question_text: string;
+          options: string[];
+          correct_answer: string;
+          explanation: string | null;
+          difficulty_score: number | null;
+        }[];
+      }) =>
+        request<{ imported_count: number; message: string }>("/teacher/questions/import/confirm", {
+          method: "POST",
+          body,
+        }),
       updateQuestion: (
         questionId: number,
-        body: { difficulty?: string; question_text?: string; options?: string[] | null; correct_answer?: string; explanation?: string | null }
+        body: {
+          difficulty?: string;
+          question_bank_type?: "training" | "exam";
+          difficulty_score?: number;
+          question_text?: string;
+          options?: string[] | null;
+          correct_answer?: string;
+          explanation?: string | null;
+          remark?: string | null;
+          is_approved?: boolean;
+          knowledge_point_ids?: number[];
+        }
       ) =>
         request<{
           id: number;
@@ -400,42 +854,55 @@ export const api = {
           chapter_id: number;
           chapter_title: string;
           question_type: string;
+          question_bank_type: string;
           difficulty: string;
+          difficulty_score: number;
           question_text: string;
           options: string | null;
           correct_answer: string;
           explanation: string | null;
+          remark: string | null;
+          is_approved: boolean;
+          generated_time: string | null;
+          edited_time: string | null;
           knowledge_point_ids: string | null;
           knowledge_points: string[];
           created_at: string | null;
         }>(`/teacher/questions/${questionId}`, { method: "PUT", body }),
       deleteQuestion: (questionId: number) => request<{ ok: boolean }>(`/teacher/questions/${questionId}`, { method: "DELETE" }),
+      /** 文档列表项（含关联章节 id 列表） */
       chapterDocuments: (chapterId: number) =>
-        request<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }[]>(
-          `/teacher/chapters/${chapterId}/documents`
-        ),
+        request<DocWithChapters[]>(`/teacher/chapters/${chapterId}/documents`),
+      courseDocuments: (courseId: number) =>
+        request<DocWithChapters[]>(`/teacher/courses/${courseId}/documents`),
       uploadChapterDocument: (chapterId: number, file: File) => {
         const form = new FormData();
         form.append("file", file);
-        return requestForm<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }>(
-          `/teacher/chapters/${chapterId}/documents/upload`,
-          form,
-          { method: "POST" }
-        );
+        return requestForm<DocWithChapters>(`/teacher/chapters/${chapterId}/documents/upload`, form, { method: "POST" });
       },
       uploadChapterVideo: (chapterId: number, file: File) => {
         const form = new FormData();
         form.append("file", file);
-        return requestForm<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null }>(
-          `/teacher/chapters/${chapterId}/videos/upload`,
-          form,
-          { method: "POST" }
-        );
+        return requestForm<DocWithChapters>(`/teacher/chapters/${chapterId}/videos/upload`, form, { method: "POST" });
+      },
+      uploadCourseDocument: (courseId: number, file: File, chapterIds: number[]) => {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("chapter_ids_json", JSON.stringify(chapterIds));
+        return requestForm<DocWithChapters>(`/teacher/courses/${courseId}/documents/upload`, form, { method: "POST" });
+      },
+      uploadCourseVideo: (courseId: number, file: File, chapterIds: number[]) => {
+        const form = new FormData();
+        form.append("file", file);
+        form.append("chapter_ids_json", JSON.stringify(chapterIds));
+        return requestForm<DocWithChapters>(`/teacher/courses/${courseId}/videos/upload`, form, { method: "POST" });
       },
       documentDetail: (docId: number) =>
-        request<{ id: number; chapter_id: number | null; source_type: string; title: string; page_ref: string | null; file_name: string | null; file_size: number | null; parse_status: string | null; parse_error: string | null; chunk_count: number | null; created_at: string | null; content_preview: string; chunks: { index: number; text: string }[] }>(
+        request<DocWithChapters & { content_preview: string; chunks: { index: number; text: string }[] }>(
           `/teacher/documents/${docId}`
         ),
+      patchDocument: (docId: number, body: { student_visible?: boolean; downloadable?: boolean; chapter_ids?: number[] }) =>
+        request<DocWithChapters>(`/teacher/documents/${docId}`, { method: "PATCH", body }),
       deleteDocument: (docId: number) => request<{ ok: boolean }>(`/teacher/documents/${docId}`, { method: "DELETE" }),
       reprocessDocument: (docId: number) =>
         request<{ ok: boolean; task_id: number; status: string }>(
@@ -476,12 +943,13 @@ export const api = {
       update: (id: number, body: { name?: string; term?: string; course_id?: number }) =>
         request<{ id: number; name: string; term: string | null; course_id: number | null; course_name: string | null; owner_teacher_id: number | null; student_count: number; created_at: string | null }>(`/teacher/classes/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/teacher/classes/${id}`, { method: "DELETE" }),
-      students: (classId: number, params?: { q?: string; student_no?: string; name?: string }) => {
+      students: (classId: number, params?: { q?: string; student_no?: string; name?: string; admin_class_or_dept?: string }) => {
         const q = new URLSearchParams();
         if (params?.q) q.set("q", params.q);
         if (params?.student_no) q.set("student_no", params.student_no);
         if (params?.name) q.set("name", params.name);
-        return request<{ id: number; username: string; student_no: string | null; display_name: string | null }[]>(
+        if (params?.admin_class_or_dept) q.set("admin_class_or_dept", params.admin_class_or_dept);
+        return request<{ id: number; username: string; student_no: string | null; display_name: string | null; admin_class_or_dept: string | null }[]>(
           `/teacher/classes/${classId}/students${q.toString() ? `?${q}` : ""}`
         );
       },
@@ -489,15 +957,29 @@ export const api = {
         request<{ ok: boolean; assigned: number }>(`/teacher/classes/${classId}/students/assign`, { method: "POST", body }),
       removeStudent: (classId: number, studentId: number) =>
         request<{ ok: boolean }>(`/teacher/classes/${classId}/students/${studentId}`, { method: "DELETE" }),
+      /** 下载批量导入学生模版（CSV，表头：学号，姓名） */
+      downloadStudentImportTemplate: () => requestBlob("/teacher/classes/students/import-template"),
+      /** 批量导入学生：上传填好的模版文件，按学号匹配用户表 */
+      importStudents: (classId: number, file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return requestForm<{ ok: boolean; imported: number; skipped: number; not_found: string[]; message: string }>(
+          `/teacher/classes/${classId}/students/import`,
+          form,
+          { method: "POST" }
+        );
+      },
     },
     students: {
-      list: (params?: { q?: string; student_no?: string; name?: string }) => {
+      list: (params?: { q?: string; student_no?: string; name?: string; admin_class_or_dept?: string }) => {
         const q = new URLSearchParams();
         if (params?.q) q.set("q", params.q);
         if (params?.student_no) q.set("student_no", params.student_no);
         if (params?.name) q.set("name", params.name);
-        return request<{ id: number; username: string; student_no: string | null; display_name: string | null }[]>(`/teacher/students?${q}`);
+        if (params?.admin_class_or_dept) q.set("admin_class_or_dept", params.admin_class_or_dept);
+        return request<{ id: number; username: string; student_no: string | null; display_name: string | null; admin_class_or_dept: string | null }[]>(`/teacher/students?${q}`);
       },
+      listAdminClasses: () => request<string[]>("/teacher/students/admin-classes"),
     },
     export: (report: string) => `${API_BASE}/teacher/export/csv?report=${report}`,
     pipeline: {
@@ -691,10 +1173,10 @@ export const api = {
     },
   },
   feedback: {
-    submit: (content: string, source: "form" | "dialogue" = "form") =>
+    submit: (content: string, source: "form" | "dialogue" = "form", courseId?: number | null) =>
       request<{ ok: boolean; id?: number; message?: string }>("/feedback", {
         method: "POST",
-        body: { content, source },
+        body: { content, source, course_id: courseId ?? undefined },
       }),
     /** 将某次答疑对话记为学习反馈（仅限本人提问记录） */
     submitFromQa: (questionAskedId: number) =>
@@ -702,6 +1184,40 @@ export const api = {
         method: "POST",
         body: { question_asked_id: questionAskedId },
       }),
+    /** 当前用户提交的反馈列表（含处理结果、状态、提交时间），按提交时间逆序 */
+    listMy: () =>
+      request<{ id: number; content: string; reply_text: string | null; status: string; created_at: string }[]>(
+        "/feedback"
+      ),
+  },
+  /** 学生端：我的学情（与教师端学情课程统计详细表同结构，仅当前用户） */
+  student: {
+    learningStats: (params?: { courseId?: number; startDate?: string; endDate?: string }) => {
+      const qs = new URLSearchParams();
+      if (params?.courseId != null) qs.set("course_id", String(params.courseId));
+      if (params?.startDate) qs.set("start_date", params.startDate);
+      if (params?.endDate) qs.set("end_date", params.endDate);
+      const q = qs.toString() ? `?${qs.toString()}` : "";
+      return request<{
+        course_id: number;
+        course_name: string;
+        student_id: number;
+        student_no: string;
+        student_name: string;
+        class_name: string;
+        preview_rate: string;
+        preview_completed_chapter_ids: number[];
+        completed_question_count: number;
+        completed_question_count_by_chapter?: { chapter_id: number; count: number }[];
+        correct_question_count_by_chapter?: { chapter_id: number; count: number }[];
+        accuracy_rate: string;
+        feedback_question_count: number;
+        ai_ask_count: number;
+        ai_irrelevant_count: number;
+        weak_knowledge_points: string;
+        weak_knowledge_points_by_chapter?: { chapter_id: number; weak_knowledge_points: string }[];
+      }[]>(`/student/learning-stats${q}`);
+    },
   },
   admin: {
     users: {
@@ -709,14 +1225,26 @@ export const api = {
         const q = new URLSearchParams();
         if (params?.role) q.set("role", params.role);
         if (params?.q) q.set("q", params.q);
-        return request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; created_at: string | null }[]>(`/admin/users?${q}`);
+        return request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; created_at: string | null }[]>(`/admin/users?${q}`);
       },
-      create: (body: { username: string; password?: string; role: string; display_name?: string; student_no?: string }) =>
-        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null }>("/admin/users", { method: "POST", body }),
-      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null }>(`/admin/users/${id}`),
-      update: (id: number, body: { password?: string; role?: string; display_name?: string; student_no?: string }) =>
-        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null }>(`/admin/users/${id}`, { method: "PUT", body }),
+      create: (body: { username: string; password?: string; role: string; display_name?: string; student_no?: string; admin_class_or_dept?: string }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null }>("/admin/users", { method: "POST", body }),
+      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null }>(`/admin/users/${id}`),
+      update: (id: number, body: { password?: string; role?: string; display_name?: string; student_no?: string; admin_class_or_dept?: string }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null }>(`/admin/users/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/admin/users/${id}`, { method: "DELETE" }),
+      /** 下载批量导入用户模版（CSV） */
+      downloadImportTemplate: () => requestBlob("/admin/users/import-template"),
+      /** 批量导入用户：上传填好的模版 CSV */
+      importUsers: (file: File) => {
+        const form = new FormData();
+        form.append("file", file);
+        return requestForm<{ ok: boolean; imported: number; errors: string[]; message: string }>(
+          "/admin/users/import",
+          form,
+          { method: "POST" }
+        );
+      },
     },
     classes: {
       list: () => request<{ id: number; name: string; term: string | null; created_at: string | null }[]>("/admin/classes"),

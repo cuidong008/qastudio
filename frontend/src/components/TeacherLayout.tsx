@@ -1,15 +1,18 @@
 import { ReactNode, useEffect } from "react";
-import { Link, useNavigate } from "react-router-dom";
+import { NavLink, useNavigate } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
 export default function TeacherLayout({
   children,
   requireAuth,
   fluid,
+  fullBleed,
 }: {
   children: ReactNode;
   requireAuth?: boolean;
   fluid?: boolean;
+  /** 问答首页等全屏页面设为 true，main 无内边距 */
+  fullBleed?: boolean;
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
@@ -17,7 +20,7 @@ export default function TeacherLayout({
   const redirectTo =
     requireAuth && !user
       ? "/login"
-      : requireAuth && user && user.role !== "teacher" && user.role !== "admin"
+      : requireAuth && user && user.role !== "teacher" && user.role !== "teaching_leader" && user.role !== "admin"
         ? "/student"
         : null;
 
@@ -42,22 +45,16 @@ export default function TeacherLayout({
         }}
       >
         <nav style={{ display: "flex", gap: 8 }}>
-          <Link to="/teacher" className="nav-link">
-            学情概览
-          </Link>
-          <Link to="/teacher/courses" className="nav-link">
-            我的课程
-          </Link>
-          <Link to="/teacher/classes" className="nav-link">
-            我的班级
-          </Link>
-          <Link to="/teacher/pipeline" className="nav-link">
-            课件流水线
-          </Link>
+          <NavLink to="/teacher/qa" className="nav-link"><span>问答首页</span></NavLink>
+          <NavLink to="/teacher/learning-data" className="nav-link"><span>学情概览</span></NavLink>
+          <NavLink to="/teacher/courses" className="nav-link"><span>我的课程</span></NavLink>
+          <NavLink to="/teacher/classes" className="nav-link" onMouseEnter={() => { import("../pages/teacher/TeacherClasses"); }}><span>我的班级</span></NavLink>
+          <NavLink to="/teacher/pipeline" className="nav-link"><span>课件流水线</span></NavLink>
+          <NavLink to="/teacher/question-bank" className="nav-link" end={false}><span>题库管理</span></NavLink>
         </nav>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
-            {user?.display_name || user?.username}（教师）
+            {user?.display_name || user?.username}（{user?.role === "teaching_leader" ? "教研组长" : "教师"}）
           </span>
           <button
             type="button"
@@ -75,8 +72,8 @@ export default function TeacherLayout({
       <main
         style={{
           flex: 1,
-          padding: 24,
-          maxWidth: fluid ? "none" : 1000,
+          padding: fullBleed ? 0 : 24,
+          maxWidth: fluid || fullBleed ? "none" : 1000,
           margin: "0 auto",
           width: "100%",
         }}

@@ -199,7 +199,7 @@ export default function Preview({ courseId }: { courseId?: number | null }) {
           </ul>
           <h4 style={{ marginBottom: 8, fontSize: 15, fontWeight: 600 }}>预习材料（先学习资料，再做题）</h4>
           <div className="material-block">
-            <p style={{ margin: "0 0 8px", fontWeight: 600 }}>讲义 PDF：{task.materials.pdf_ready ? "可查看/下载" : "未上传"}</p>
+            <p style={{ margin: "0 0 8px", fontWeight: 600, fontSize: 14 }}>讲义 PDF：{task.materials.pdf_ready ? "可查看/下载" : "未上传"}</p>
           {task.pdf_materials.length > 0 && (
             <ul className="material-list">
               {task.pdf_materials.map((item) => (
@@ -252,7 +252,7 @@ export default function Preview({ courseId }: { courseId?: number | null }) {
           )}
           </div>
           {!materialsReady ? (
-            <button type="button" className="btn-secondary" onClick={() => setMaterialsReady(true)} style={{ marginBottom: 16 }}>
+            <button type="button" className="btn-secondary" onClick={() => setMaterialsReady(true)} style={{ marginBottom: 16, fontSize: 14, color: "#000" }}>
               我已完成资料学习，开始做题
             </button>
           ) : (

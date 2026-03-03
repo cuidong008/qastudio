@@ -1,35 +1,37 @@
-/* ===== UI/UX Pro Max · Dark Theme Design System ===== */
-/* Font loaded via index.html for better performance */
+/* ===== 参考百度搜索结果页：左上区蓝色主调 + 黑/灰文字 ===== */
+/* 主蓝、标题黑、正文灰、白底浅灰块，风格与页面一致 */
 
 :root {
-  /* Surfaces */
-  --bg-base: #0a0a0c;
-  --bg-surface: #121214;
-  --bg-elevated: #1a1a1e;
-  --bg-card: #16161a;
-  --bg-hover: rgba(255, 255, 255, 0.04);
+  /* Surfaces — 页面底色白；白底 + 浅灰块 */
+  --bg-base: #ffffff;
+  --bg-surface: #ffffff;
+  --bg-elevated: #ffffff;
+  --bg-card: #ffffff;
+  --bg-muted: #f8f8f8;
+  --bg-hover: rgba(0, 0, 0, 0.05);
 
-  /* Text */
-  --text-primary: #fafafa;
-  --text-secondary: #a1a1aa;
-  --text-muted: #71717a;
+  /* Text — 主标题/正文/次要均为纯黑，辅助为浅灰黑 */
+  --text-primary: #000000;
+  --text-secondary: #000000;
+  --text-muted: #333333;
 
-  /* Accent */
-  --accent: #6366f1;
-  --accent-hover: #818cf8;
-  --accent-muted: rgba(99, 102, 241, 0.15);
+  /* Accent — 与百度页蓝色文字一致，略深；悬停更深；淡蓝底/悬停蓝底与主按钮悬停同色 */
+  --accent: #2563eb;
+  --accent-hover: #1d4ed8;
+  --accent-muted: rgba(29, 78, 216, 0.12);
+  --accent-hover-bg: rgba(29, 78, 216, 0.38);
 
   /* Semantic */
-  --success: #22c55e;
-  --success-muted: rgba(34, 197, 94, 0.15);
-  --error: #ef4444;
-  --error-muted: rgba(239, 68, 68, 0.15);
-  --info: #3b82f6;
-  --info-muted: rgba(59, 130, 246, 0.15);
+  --success: #2563eb;
+  --success-muted: rgba(37, 99, 235, 0.14);
+  --error: #dc2626;
+  --error-muted: rgba(239, 68, 68, 0.12);
+  --info: #2563eb;
+  --info-muted: rgba(37, 99, 235, 0.12);
 
-  /* Borders */
-  --border: rgba(255, 255, 255, 0.08);
-  --border-focus: rgba(99, 102, 241, 0.5);
+  /* Borders — 浅灰（与页面一致） */
+  --border: #e4e4e4;
+  --border-focus: rgba(37, 99, 235, 0.5);
 
   /* Radius */
   --radius-sm: 6px;
@@ -38,9 +40,9 @@
   --radius-xl: 18px;
 
   /* Shadows */
-  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.4);
-  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.5);
-  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.6);
+  --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.06);
+  --shadow-md: 0 4px 12px rgba(0, 0, 0, 0.08);
+  --shadow-lg: 0 8px 24px rgba(0, 0, 0, 0.12);
 
   /* Transitions */
   --transition: 0.2s ease;
@@ -133,8 +135,9 @@ button,
   border: 1px solid var(--border);
 }
 .btn-secondary:hover:not(:disabled) {
-  background: var(--bg-hover);
-  border-color: var(--text-muted);
+  background: var(--accent-hover-bg);
+  border-color: var(--accent);
+  color: var(--text-primary);
 }
 
 .btn-ghost {
@@ -142,7 +145,7 @@ button,
   color: var(--text-secondary);
 }
 .btn-ghost:hover:not(:disabled) {
-  background: var(--bg-hover);
+  background: var(--accent-hover-bg);
   color: var(--text-primary);
 }
 
@@ -156,7 +159,7 @@ button,
   transition: border-color var(--transition), box-shadow var(--transition);
 }
 .card:hover {
-  border-color: rgba(255, 255, 255, 0.12);
+  border-color: rgba(0, 0, 0, 0.12);
 }
 
 /* ===== Nav Links ===== */
@@ -170,8 +173,13 @@ button,
   transition: all var(--transition);
 }
 .nav-link:hover {
-  color: var(--text-primary) !important;
-  background: var(--bg-hover);
+  color: #ffffff !important;
+  background: var(--accent-hover);
+}
+/* 当前页菜单项：文字为深蓝（与悬停色一致），不再显示下划线 */
+.nav-link.active,
+.nav-link.active span {
+  color: var(--accent-hover) !important;
 }
 
 /* ===== Utility Classes ===== */
@@ -223,18 +231,18 @@ button,
 
 .toast-close:hover {
   color: var(--text-primary);
-  border-color: rgba(255, 255, 255, 0.35);
-  background: rgba(255, 255, 255, 0.08);
+  border-color: rgba(0, 0, 0, 0.2);
+  background: rgba(0, 0, 0, 0.06);
 }
 
 .toast-info {
-  border-color: rgba(59, 130, 246, 0.45);
-  background: rgba(59, 130, 246, 0.15);
+  border-color: rgba(37, 99, 235, 0.45);
+  background: rgba(37, 99, 235, 0.1);
 }
 
 .toast-success {
-  border-color: rgba(34, 197, 94, 0.5);
-  background: rgba(34, 197, 94, 0.16);
+  border-color: rgba(37, 99, 235, 0.5);
+  background: rgba(37, 99, 235, 0.12);
 }
 
 .toast-error {
@@ -242,11 +250,31 @@ button,
   background: rgba(239, 68, 68, 0.16);
 }
 
+.question-bank-grid {
+  display: grid;
+  grid-template-columns: 246px minmax(0, 1fr);
+  gap: 14px;
+  align-items: stretch;
+}
+
+@media (max-width: 900px) {
+  .question-bank-grid {
+    grid-template-columns: 1fr;
+  }
+}
+
+/* 题库管理左侧 6 个子菜单：悬停与其它菜单一致，白字蓝底 */
+.question-bank-sidebar-link:hover {
+  background: var(--accent-hover) !important;
+  color: #ffffff !important;
+  border-color: var(--accent-hover) !important;
+}
+
 /* ===== Preview Materials ===== */
 .material-block {
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
-  background: rgba(99, 102, 241, 0.08);
+  background: var(--accent-muted);
   padding: 12px;
   margin-bottom: 14px;
 }
@@ -297,9 +325,8 @@ button,
 .btn-material-download {
   background: transparent;
   color: var(--text-primary);
-  border: 1px solid rgba(255, 255, 255, 0.35);
+  border: 1px solid rgba(0, 0, 0, 0.15);
 }
-
 .btn-material-download:hover:not(:disabled) {
   background: var(--bg-hover);
 }
@@ -307,7 +334,7 @@ button,
 .material-tag {
   font-size: 12px;
   color: var(--text-secondary);
-  background: rgba(255, 255, 255, 0.08);
+  background: rgba(0, 0, 0, 0.06);
   border: 1px solid var(--border);
   border-radius: 999px;
   padding: 2px 8px;
@@ -368,7 +395,7 @@ button,
 }
 
 .student-chat-user-trigger:hover {
-  border-color: rgba(255, 255, 255, 0.2);
+  border-color: rgba(0, 0, 0, 0.15);
 }
 
 .student-chat-user-avatar {
@@ -431,8 +458,8 @@ button,
 }
 
 .student-chat-user-menu button:hover {
-  background: var(--bg-hover);
-  color: var(--text-primary);
+  background: var(--accent-hover);
+  color: #ffffff;
 }
 
 .student-chat-session-group {
@@ -537,7 +564,7 @@ button,
   min-height: 0;
   display: flex;
   flex-direction: column;
-  padding: 16px 20px;
+  padding: 16px 80px;
 }
 
 .student-chat-topbar {
@@ -604,7 +631,7 @@ button,
 .student-chat-message.from-user {
   margin-left: auto;
   background: var(--accent-muted);
-  border: 1px solid rgba(99, 102, 241, 0.4);
+  border: 1px solid rgba(37, 99, 235, 0.35);
 }
 
 .student-chat-message.from-assistant {
@@ -644,7 +671,7 @@ button,
 }
 
 .student-chat-input-wrap {
-  margin-top: 12px;
+  margin-top: 2.6em;
   border: 1px solid var(--border);
   border-radius: var(--radius-xl);
   background: var(--bg-surface);
@@ -658,6 +685,10 @@ button,
 
 .student-chat-input-row input {
   flex: 1;
+  min-height: 48px;
+  line-height: 1.5;
+  padding: 10px 14px;
+  box-sizing: border-box;
 }
 
 .student-chat-menu-row {
@@ -667,27 +698,32 @@ button,
   gap: 8px;
 }
 
+.student-chat-menu-row--admin {
+  gap: 1em;
+}
+
 .student-chat-menu-btn {
   display: inline-flex;
   align-items: center;
   padding: 6px 10px;
   border-radius: var(--radius-md);
   font-size: 13px;
-  color: var(--text-secondary);
+  color: #000;
   background: var(--bg-elevated);
   border: 1px solid var(--border);
   min-height: 32px;
 }
 
 .student-chat-menu-btn.is-active {
-  color: var(--text-primary);
+  color: #000;
   border-color: var(--accent);
   background: var(--accent-muted);
 }
 
 .student-chat-menu-btn:hover {
-  color: var(--text-primary);
-  border-color: var(--text-muted);
+  color: #ffffff;
+  background: var(--accent-hover);
+  border-color: var(--accent-hover);
 }
 
 .student-chat-tool-content {
@@ -751,6 +787,42 @@ button,
 
 .student-chat-settings-field input {
   width: 100%;
+}
+
+.student-chat-settings-field-label {
+  display: block;
+  margin-bottom: 6px;
+  color: var(--text-secondary);
+  font-size: 14px;
+}
+
+.student-chat-settings-field-value {
+  padding: 6px 0;
+  color: var(--text);
+  font-size: 14px;
+}
+
+.student-chat-settings-field-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+.student-chat-settings-field-row .student-chat-settings-field-label {
+  margin-bottom: 0;
+  flex-shrink: 0;
+  width: 6em;
+  min-width: 6em;
+}
+
+.student-chat-settings-field-row .student-chat-settings-field-value {
+  padding: 0;
+  text-align: left;
+}
+
+.student-chat-settings-field-row .student-chat-settings-field-row-input {
+  flex: 1;
+  min-width: 0;
 }
 
 .student-chat-settings-divider {

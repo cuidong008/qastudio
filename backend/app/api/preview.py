@@ -8,10 +8,13 @@ from pydantic import BaseModel
 from sqlalchemy import select, func
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from sqlalchemy import and_
+
 from ..config import settings
 from ..db import get_db
-from ..db.models import User, Chapter, KnowledgePoint, PreviewRecord, Question, KnowledgeDocument, ChapterConfig
+from ..db.models import User, Chapter, KnowledgePoint, PreviewRecord, Question, KnowledgeDocument, DocumentChapter, ChapterConfig
 from ..api.auth import get_current_user
+from ..services.difficulty import score_range_for_difficulty
 
 router = APIRouter(prefix="/preview", tags=["preview"])
 
@@ -66,47 +69,47 @@ async def get_preview_task(chapter_id: int, db: AsyncSession = Depends(get_db)):
     key_points = [p.title for p in points if (p.title or "").strip()]
     learning_goals = key_points if key_points else ["核心概念概览", "关键协议作用", "电商场景关联"]
 
-    pdf_count_result = await db.execute(
-        select(func.count(KnowledgeDocument.id)).where(
-            KnowledgeDocument.chapter_id == chapter_id,
-            KnowledgeDocument.source_type.in_(["pdf_upload", "ppt"]),
-        )
-    )
-    pdf_count = int(pdf_count_result.scalar() or 0)
+    doc_ids_sub = select(DocumentChapter.doc_id).where(DocumentChapter.chapter_id == chapter_id).distinct()
     pdf_rows = (
         await db.execute(
             select(KnowledgeDocument)
             .where(
-                KnowledgeDocument.chapter_id == chapter_id,
+                KnowledgeDocument.id.in_(doc_ids_sub),
                 KnowledgeDocument.source_type.in_(["pdf_upload", "ppt"]),
                 KnowledgeDocument.file_path.is_not(None),
             )
             .order_by(KnowledgeDocument.id.desc())
         )
     ).scalars().all()
+    pdf_rows = [r for r in pdf_rows if getattr(r, "student_visible", True) is not False]
+    pdf_count = len(pdf_rows)
+
     video_rows = (
         await db.execute(
             select(KnowledgeDocument)
             .where(
-                KnowledgeDocument.chapter_id == chapter_id,
+                KnowledgeDocument.id.in_(doc_ids_sub),
                 KnowledgeDocument.source_type == "preview_video",
                 KnowledgeDocument.file_path.is_not(None),
             )
             .order_by(KnowledgeDocument.id.desc())
         )
     ).scalars().all()
+    video_rows = [r for r in video_rows if getattr(r, "student_visible", True) is not False]
 
     cfg_result = await db.execute(select(ChapterConfig).where(ChapterConfig.chapter_id == chapter_id))
     cfg = cfg_result.scalar_one_or_none()
     video_url = (cfg.preview_video_url or "").strip() if cfg else ""
 
+    basic_min, basic_max = score_range_for_difficulty("basic") or (0.7, 1.0)
     question_result = await db.execute(
         select(Question)
         .where(
             Question.chapter_id == chapter_id,
             Question.is_active == True,
             Question.is_approved == True,
-            Question.difficulty == "basic",
+            Question.question_bank_type == "training",
+            and_(Question.difficulty_score > basic_min, Question.difficulty_score <= basic_max),
             Question.question_type.in_(["single_choice", "multiple_choice", "judge"]),
         )
         .order_by(Question.id)
@@ -153,6 +156,8 @@ async def get_preview_material_file(
         raise HTTPException(status_code=404, detail="预习材料不存在")
     if doc.source_type not in {"pdf_upload", "ppt", "preview_video"}:
         raise HTTPException(status_code=400, detail="该材料不支持下载")
+    if getattr(doc, "downloadable", True) is False:
+        raise HTTPException(status_code=403, detail="该材料未开放下载")
     abs_path = Path(settings.upload_dir) / doc.file_path
     if not abs_path.exists():
         raise HTTPException(status_code=404, detail="文件不存在")

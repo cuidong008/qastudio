@@ -1,17 +1,22 @@
 """后管台 API：用户、班级、课程、开课管理（仅 admin）"""
+import csv
+import io
 import json
 import logging
+from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, BackgroundTasks
+from fastapi import APIRouter, Depends, File, HTTPException, Query, UploadFile, BackgroundTasks
+from fastapi.responses import FileResponse
 from pydantic import BaseModel
-from sqlalchemy import delete, select, update
+from sqlalchemy import and_, delete, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from ..config import settings
 from ..db import get_db
 from ..db.models import (
     User, UserRole, Class, Course, Teaching, Chapter, CourseReindexTask,
     QuestionGenerationTask, DocumentProcessTask, ReviewRecord,
-    CourseQuestionSynonym, QuestionAsked,
+    CourseQuestionSynonym, QuestionAsked, KnowledgeDocument,
 )
 from ..api.auth import require_admin
 from ..services.chapter_cleanup_service import cleanup_chapter_related_data
@@ -346,6 +351,7 @@ class UserListOut(BaseModel):
     role: str
     display_name: str | None
     student_no: str | None
+    admin_class_or_dept: str | None = None  # 学生：行政班级；教师：部门
     created_at: str | None
 
     class Config:
@@ -358,6 +364,7 @@ class UserCreateIn(BaseModel):
     role: str = "student"
     display_name: str | None = None
     student_no: str | None = None
+    admin_class_or_dept: str | None = None
 
 
 class UserUpdateIn(BaseModel):
@@ -365,6 +372,7 @@ class UserUpdateIn(BaseModel):
     role: str | None = None
     display_name: str | None = None
     student_no: str | None = None
+    admin_class_or_dept: str | None = None
 
 
 @router.get("/users", response_model=list[UserListOut])
@@ -386,7 +394,8 @@ async def list_users(
     return [
         UserListOut(
             id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-            student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
+            student_no=u.student_no, admin_class_or_dept=getattr(u, "admin_class_or_dept", None),
+            created_at=u.created_at.isoformat() if u.created_at else None,
         )
         for u in rows
     ]
@@ -398,8 +407,8 @@ async def create_user(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_admin),
 ):
-    if body.role not in ("student", "teacher", "admin"):
-        raise HTTPException(status_code=400, detail="role 须为 student / teacher / admin")
+    if body.role not in ("student", "teacher", "teaching_leader", "admin"):
+        raise HTTPException(status_code=400, detail="role 须为 student / teacher / teaching_leader / admin")
     r = await db.execute(select(User).where(User.username == body.username.strip()))
     if r.scalar_one_or_none():
         raise HTTPException(status_code=400, detail="用户名已存在")
@@ -415,14 +424,153 @@ async def create_user(
         role=body.role,
         display_name=body.display_name or body.username.strip(),
         student_no=body.student_no.strip() if body.student_no else None,
+        admin_class_or_dept=body.admin_class_or_dept.strip() if body.admin_class_or_dept else None,
     )
     db.add(u)
     await db.commit()
     await db.refresh(u)
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-        student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
+        student_no=u.student_no, admin_class_or_dept=u.admin_class_or_dept,
+        created_at=u.created_at.isoformat() if u.created_at else None,
     )
+
+
+_ADMIN_USER_IMPORT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "static" / "用户导入模版.csv"
+
+
+@router.get("/users/import-template")
+async def download_user_import_template(
+    user: User = Depends(require_admin),
+):
+    """下载批量导入用户用的 CSV 模版，表头：用户名、学号/工号、姓名、角色、行政班级/部门。除行政班级/部门外不能为空。"""
+    if not _ADMIN_USER_IMPORT_TEMPLATE_PATH.is_file():
+        raise HTTPException(status_code=500, detail="模版文件不存在")
+    return FileResponse(
+        path=str(_ADMIN_USER_IMPORT_TEMPLATE_PATH),
+        filename="用户导入模版.csv",
+        media_type="text/csv; charset=utf-8",
+    )
+
+
+def _role_from_csv(value: str) -> str | None:
+    v = (value or "").strip()
+    if v in ("student", "teacher", "teaching_leader", "admin"):
+        return v
+    if v in ("学生", "学生 "):
+        return "student"
+    if v in ("教师", "教师 "):
+        return "teacher"
+    if v in ("教研组长", "教研组长 "):
+        return "teaching_leader"
+    if v in ("管理员", "管理员 "):
+        return "admin"
+    return None
+
+
+@router.post("/users/import")
+async def import_users(
+    file: UploadFile = File(..., description="CSV 模版，表头：用户名、学号/工号、姓名、角色、行政班级/部门"),
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_admin),
+):
+    """通过上传填好的模版 CSV 批量创建用户。用户名、学号/工号、姓名、角色不能为空，行政班级/部门可为空。默认密码 123456。"""
+    if not file.filename:
+        raise HTTPException(status_code=400, detail="请选择文件")
+    raw = await file.read()
+    try:
+        text = raw.decode("utf-8-sig").strip()
+    except UnicodeDecodeError:
+        try:
+            text = raw.decode("gbk").strip()
+        except Exception:
+            raise HTTPException(status_code=400, detail="文件编码不支持，请使用 UTF-8 或 GBK 保存的 CSV")
+    if not text:
+        raise HTTPException(status_code=400, detail="文件为空")
+    reader = csv.reader(io.StringIO(text))
+    rows = list(reader)
+    if not rows:
+        raise HTTPException(status_code=400, detail="文件无有效行")
+    header = [str(c).strip() for c in rows[0]]
+    col_username = col_student_no = col_display_name = col_role = col_admin = None
+    for i, h in enumerate(header):
+        if h in ("用户名", "username"):
+            col_username = i
+        elif h in ("学号/工号", "学号", "工号", "student_no"):
+            col_student_no = i
+        elif h in ("姓名", "显示名", "display_name", "name"):
+            col_display_name = i
+        elif h in ("角色", "role"):
+            col_role = i
+        elif h in ("行政班级/部门", "行政班级", "部门", "admin_class_or_dept"):
+            col_admin = i
+    if col_username is None:
+        raise HTTPException(status_code=400, detail="表头需包含「用户名」列")
+    if col_student_no is None:
+        raise HTTPException(status_code=400, detail="表头需包含「学号/工号」列")
+    if col_display_name is None:
+        raise HTTPException(status_code=400, detail="表头需包含「姓名」列")
+    if col_role is None:
+        raise HTTPException(status_code=400, detail="表头需包含「角色」列")
+    data_rows = rows[1:]
+    default_password = "123456"
+    imported = 0
+    errors: list[str] = []
+    existing_usernames = set()
+    existing_student_nos = set()
+    r_ex = await db.execute(select(User.username, User.student_no).where(User.username.isnot(None)))
+    for row in r_ex.all():
+        if row[0]:
+            existing_usernames.add(row[0])
+        if row[1]:
+            existing_student_nos.add(row[1])
+    for idx, r in enumerate(data_rows):
+        row_no = idx + 2
+        username = (r[col_username] if len(r) > col_username else "").strip() if r[col_username] is not None else ""
+        student_no = (r[col_student_no] if len(r) > col_student_no else "").strip() if col_student_no is not None and len(r) > col_student_no else ""
+        display_name = (r[col_display_name] if len(r) > col_display_name else "").strip() if col_display_name is not None and len(r) > col_display_name else ""
+        role_val = (r[col_role] if len(r) > col_role else "").strip() if col_role is not None and len(r) > col_role else ""
+        admin_val = (r[col_admin] if len(r) > col_admin else "").strip() if col_admin is not None and len(r) > col_admin else ""
+        if not username:
+            errors.append(f"第{row_no}行：用户名为空")
+            continue
+        if not student_no:
+            errors.append(f"第{row_no}行：学号/工号为空")
+            continue
+        if not display_name:
+            errors.append(f"第{row_no}行：姓名为空")
+            continue
+        if not role_val:
+            errors.append(f"第{row_no}行：角色为空")
+            continue
+        role = _role_from_csv(role_val)
+        if not role:
+            errors.append(f"第{row_no}行：角色无效（须为：学生/教师/教研组长/管理员 或 student/teacher/teaching_leader/admin）")
+            continue
+        if username in existing_usernames:
+            errors.append(f"第{row_no}行：用户名「{username}」已存在")
+            continue
+        if student_no in existing_student_nos:
+            errors.append(f"第{row_no}行：学号/工号「{student_no}」已存在")
+            continue
+        u = User(
+            username=username,
+            hashed_password=bcrypt.hashpw(default_password.encode(), bcrypt.gensalt()).decode("utf-8"),
+            role=role,
+            display_name=display_name,
+            student_no=student_no,
+            admin_class_or_dept=admin_val if admin_val else None,
+        )
+        db.add(u)
+        await db.flush()
+        existing_usernames.add(username)
+        existing_student_nos.add(student_no)
+        imported += 1
+    await db.commit()
+    message = f"成功导入 {imported} 个用户"
+    if errors:
+        message += f"；{len(errors)} 行未导入"
+    return {"ok": True, "imported": imported, "errors": errors[:50], "message": message}
 
 
 @router.get("/users/{user_id}", response_model=UserListOut)
@@ -437,7 +585,8 @@ async def get_user(
         raise HTTPException(status_code=404, detail="用户不存在")
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-        student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
+        student_no=u.student_no, admin_class_or_dept=getattr(u, "admin_class_or_dept", None),
+        created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
 
@@ -455,8 +604,8 @@ async def update_user(
     if body.password is not None and body.password != "":
         u.hashed_password = bcrypt.hashpw(body.password.encode(), bcrypt.gensalt()).decode("utf-8")
     if body.role is not None:
-        if body.role not in ("student", "teacher", "admin"):
-            raise HTTPException(status_code=400, detail="role 须为 student / teacher / admin")
+        if body.role not in ("student", "teacher", "teaching_leader", "admin"):
+            raise HTTPException(status_code=400, detail="role 须为 student / teacher / teaching_leader / admin")
         u.role = body.role
     if body.display_name is not None:
         u.display_name = body.display_name
@@ -467,11 +616,14 @@ async def update_user(
             if r_dup.scalar_one_or_none():
                 raise HTTPException(status_code=400, detail="学号/工号已存在")
         u.student_no = next_no
+    if body.admin_class_or_dept is not None:
+        u.admin_class_or_dept = body.admin_class_or_dept.strip() if body.admin_class_or_dept else None
     await db.commit()
     await db.refresh(u)
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
-        student_no=u.student_no, created_at=u.created_at.isoformat() if u.created_at else None,
+        student_no=u.student_no, admin_class_or_dept=getattr(u, "admin_class_or_dept", None),
+        created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
 
@@ -724,6 +876,27 @@ async def delete_course(
     await db.execute(update(Class).where(Class.course_id == course_id).values(course_id=None))
     await db.execute(update(QuestionAsked).where(QuestionAsked.course_id == course_id).values(course_id=None))
     await db.execute(delete(CourseReindexTask).where(CourseReindexTask.course_id == course_id))
+    # 课程级文档（无 chapter_id）：删除记录并删磁盘文件
+    r_kd = await db.execute(
+        select(KnowledgeDocument.file_path).where(
+            and_(KnowledgeDocument.course_id == course_id, KnowledgeDocument.chapter_id.is_(None))
+        )
+    )
+    course_level_paths = [row[0] for row in r_kd.all() if row[0]]
+    await db.execute(
+        delete(KnowledgeDocument).where(
+            and_(KnowledgeDocument.course_id == course_id, KnowledgeDocument.chapter_id.is_(None))
+        )
+    )
+    await db.flush()
+    root = Path(settings.upload_dir)
+    for rel in course_level_paths:
+        try:
+            path = root / rel
+            if path.exists() and path.is_file():
+                path.unlink()
+        except Exception as e:
+            logger.warning("delete_course_level_file_failed course_id=%s file=%s err=%s", course_id, rel, str(e))
     await db.delete(c)
     await db.commit()
     try:
@@ -1018,9 +1191,9 @@ async def create_teaching(
     r = await db.execute(select(Class).where(Class.id == body.class_id))
     if not r.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="班级不存在")
-    r = await db.execute(select(User).where(User.id == body.teacher_id, User.role == UserRole.teacher.value))
+    r = await db.execute(select(User).where(User.id == body.teacher_id, User.role.in_([UserRole.teacher.value, UserRole.teaching_leader.value])))
     if not r.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="授课人须为教师角色")
+        raise HTTPException(status_code=400, detail="授课人须为教师或教研组长角色")
     r = await db.execute(
         select(Teaching).where(
             Teaching.course_id == body.course_id,
@@ -1063,9 +1236,9 @@ async def create_teachings_batch(
     r = await db.execute(select(Course).where(Course.id == body.course_id))
     if not r.scalar_one_or_none():
         raise HTTPException(status_code=404, detail="课程不存在")
-    r = await db.execute(select(User).where(User.id == body.teacher_id, User.role == UserRole.teacher.value))
+    r = await db.execute(select(User).where(User.id == body.teacher_id, User.role.in_([UserRole.teacher.value, UserRole.teaching_leader.value])))
     if not r.scalar_one_or_none():
-        raise HTTPException(status_code=400, detail="授课人须为教师角色")
+        raise HTTPException(status_code=400, detail="授课人须为教师或教研组长角色")
     created: list[TeachingOut] = []
     skipped: list[dict] = []
     term_val = body.term or ""
@@ -1149,9 +1322,9 @@ async def update_teaching(
     if not t:
         raise HTTPException(status_code=404, detail="开课不存在")
     if body.teacher_id is not None:
-        r_u = await db.execute(select(User).where(User.id == body.teacher_id, User.role == UserRole.teacher.value))
+        r_u = await db.execute(select(User).where(User.id == body.teacher_id, User.role.in_([UserRole.teacher.value, UserRole.teaching_leader.value])))
         if not r_u.scalar_one_or_none():
-            raise HTTPException(status_code=400, detail="授课人须为教师角色")
+            raise HTTPException(status_code=400, detail="授课人须为教师或教研组长角色")
         t.teacher_id = body.teacher_id
     if body.term is not None:
         t.term = body.term

@@ -6,7 +6,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from .config import settings
 from .db import init_db
 from .db.session import AsyncSessionLocal
-from .api import auth, chapters, questions, preview, qa, teacher, ppt, feedback, admin, review, teacher_pipeline
+from .api import auth, chapters, questions, preview, qa, teacher, ppt, feedback, admin, review, teacher_pipeline, student
 
 
 @asynccontextmanager
@@ -51,6 +51,7 @@ app.include_router(teacher.router, prefix="/api")
 app.include_router(teacher_pipeline.router, prefix="/api")
 app.include_router(ppt.router, prefix="/api")
 app.include_router(feedback.router, prefix="/api")
+app.include_router(student.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
 

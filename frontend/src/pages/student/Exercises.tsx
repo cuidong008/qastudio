@@ -233,16 +233,30 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
               ))}
             </div>
           ) : (
-            <input type="text" placeholder="输入答案" value={userAnswer} onChange={(e) => setUserAnswer(e.target.value)} style={{ marginBottom: 20, maxWidth: 400 }} />
+            <div style={{ display: "flex", alignItems: "center", gap: "1em", marginBottom: 20, flexWrap: "wrap" }}>
+              <input
+                type="text"
+                placeholder="输入答案"
+                value={userAnswer}
+                onChange={(e) => setUserAnswer(e.target.value)}
+                style={{ flex: "1 1 200px", maxWidth: 800, minWidth: 0, boxSizing: "border-box" }}
+              />
+              {!result && (
+                <button type="button" className="btn-primary" onClick={submitAnswer} disabled={!userAnswer.trim()}>
+                  提交答案
+                </button>
+              )}
+            </div>
           )}
-          {!result ? (
+          {options.length > 0 && !result && (
             <button type="button" className="btn-primary" onClick={submitAnswer} disabled={!userAnswer.trim()}>
               提交答案
             </button>
-          ) : (
+          )}
+          {result ? (
             <div>
               <p style={{ color: result.is_correct ? "var(--success)" : "var(--error)", marginBottom: 8, fontWeight: 500 }}>
-                {result.is_correct ? "回答正确" : "回答错误"}，正确答案：{result.correct_answer}
+                {result.is_correct ? "回答正确，正确答案" : "回答有误，参考答案"}：{result.correct_answer}
               </p>
               {result.explanation && (
                 <p style={{ marginBottom: 8 }}>
@@ -263,7 +277,7 @@ export default function Exercises({ courseId }: { courseId?: number | null }) {
                 下一题
               </button>
             </div>
-          )}
+          ) : null}
         </div>
       ) : tab === "practice" && (selectedCourseId == null || chapterId == null) ? null : (
         <p style={{ color: "var(--text-muted)" }}>暂无题目，请选择其他章节或难度。</p>

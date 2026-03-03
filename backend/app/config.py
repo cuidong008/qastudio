@@ -29,6 +29,27 @@ class Settings(BaseSettings):
     rag_vector_store_chunk_overlap: int = 100
     rag_vector_store_top_k: int = 10
 
+    # 生成习题页「题目类型配置」表格默认值（最大数量、难度系数）
+    exercise_default_single_choice_max: int = 10
+    exercise_default_multiple_choice_max: int = 10
+    exercise_default_judge_max: int = 10
+    exercise_default_blank_max: int = 10
+    exercise_default_qa_max: int = 5
+    exercise_default_difficulty: str = "0.8"
+
+    # 生成试卷页「题型数量&难度配置」表格默认值（数量、难度系数、每题分数）
+    paper_default_single_choice_count: int = 10
+    paper_default_multiple_choice_count: int = 10
+    paper_default_judge_count: int = 10
+    paper_default_blank_count: int = 10
+    paper_default_qa_count: int = 5
+    paper_default_difficulty: str = "0.8"
+    paper_default_single_choice_score: float = 2
+    paper_default_multiple_choice_score: float = 4
+    paper_default_judge_score: float = 1
+    paper_default_blank_score: float = 2
+    paper_default_qa_score: float = 10
+
     class Config:
         env_file = ".env"
         extra = "ignore"

@@ -1,10 +1,12 @@
 import { useEffect } from "react";
-import { Link, useNavigate, Outlet } from "react-router-dom";
+import { Link, NavLink, useNavigate, Outlet, useLocation } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
 export default function AdminLayout() {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  const isQaHome = location.pathname === "/admin" || location.pathname === "/admin/";
 
   useEffect(() => {
     if (!user) {
@@ -12,7 +14,7 @@ export default function AdminLayout() {
       return;
     }
     if (user.role !== "admin") {
-      navigate(user.role === "teacher" ? "/teacher" : "/student", { replace: true });
+      navigate((user.role === "teacher" || user.role === "teaching_leader") ? "/teacher" : "/student", { replace: true });
     }
   }, [user, navigate]);
 
@@ -33,9 +35,9 @@ export default function AdminLayout() {
         }}
       >
         <nav style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
-          <Link to="/admin" className="nav-link">概览</Link>
-          <Link to="/admin/users" className="nav-link">用户管理</Link>
-          <Link to="/admin/rag" className="nav-link">RAG 配置</Link>
+          <NavLink to="/admin" className="nav-link" end><span>问答首页</span></NavLink>
+          <NavLink to="/admin/users" className="nav-link"><span>用户管理</span></NavLink>
+          <NavLink to="/admin/rag" className="nav-link"><span>RAG 配置</span></NavLink>
         </nav>
         <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
@@ -52,7 +54,12 @@ export default function AdminLayout() {
           </button>
         </div>
       </header>
-      <main style={{ flex: 1, padding: 24, maxWidth: 1200, margin: "0 auto", width: "100%" }}>
+      <main
+        style={{
+          flex: 1,
+          ...(isQaHome ? { padding: 0, maxWidth: "none", margin: 0 } : { padding: 24, maxWidth: 1200, margin: "0 auto", width: "100%" }),
+        }}
+      >
         <Outlet />
       </main>
     </div>
