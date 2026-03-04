@@ -23,7 +23,7 @@ from fastapi import APIRouter, Depends, Query, HTTPException, UploadFile, File, 
 from fastapi.responses import StreamingResponse, FileResponse
 from openai import OpenAI
 from pydantic import BaseModel, Field
-from sqlalchemy import select, func, delete, update, and_, or_
+from sqlalchemy import select, func, delete, update, and_, or_, tuple_
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
@@ -159,7 +159,8 @@ class StatsOverviewOut(BaseModel):
     feedback_question_count: int = 0  # 反馈问题数（按课程/班级筛选）
     top_asked: list[dict]  # 每项含 question, count, course_id (可选)
     answer_accuracy_rate: float
-    ai_irrelevant_count: int = 0  # AI无关问题数：答疑未命中课程知识库的提问条数（rag_hit=False）
+    ai_ask_count: int = 0  # AI提问数：与 top_asked 同口径（课程/章节/学生范围内答疑提问总数）
+    ai_irrelevant_count: int = 0  # AI无关问题数：course_irrelevant=True 的提问条数
     weak_knowledge_points: list[str]
     weak_knowledge_point_course_ids: list[int | None] = []  # 与 weak_knowledge_points 同序，每条对应课程 id
     weak_knowledge_point_wrong_counts: list[int] = []  # 与 weak_knowledge_points 同序，每条错题次数
@@ -5770,11 +5771,35 @@ async def list_student_admin_classes(
 
 
 async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
-    """若指定 class_id，返回该班级用户 id 列表，用于过滤统计；否则返回 None 表示不过滤"""
-    if class_id is None:
-        return None
-    r = await db.execute(select(StudentClassMembership.student_id).where(StudentClassMembership.class_id == class_id))
+    """若指定 class_id，返回该班级用户 id 列表；否则返回全部学生用户 id 列表。学情统计仅统计学生角色。"""
+    if class_id is not None:
+        r = await db.execute(select(StudentClassMembership.student_id).where(StudentClassMembership.class_id == class_id))
+        return [row[0] for row in r.all()]
+    r = await db.execute(select(User.id).where(User.role == UserRole.student.value))
     return [row[0] for row in r.all()]
+
+
+async def _course_student_pairs_for_overview(
+    db: AsyncSession,
+    scoped_course_ids: set[int] | None,
+    class_id: int | None,
+    user: User,
+) -> list[tuple[int, int]]:
+    """与学情课程统计详细表一致的 (course_id, student_id) 集合：来自 Class + StudentClassMembership，用于概览 AI 提问数/无关数与详情表合计一致。"""
+    if not scoped_course_ids:
+        return []
+    q = (
+        select(Class.course_id, StudentClassMembership.student_id)
+        .select_from(Class)
+        .join(StudentClassMembership, StudentClassMembership.class_id == Class.id)
+        .where(Class.course_id.in_(scoped_course_ids))
+    )
+    if _is_teacher_scoped(user):
+        q = q.where(Class.owner_teacher_id == user.id)
+    if class_id is not None:
+        q = q.where(Class.id == class_id)
+    r = await db.execute(q)
+    return [(int(row[0]), int(row[1])) for row in r.all()]
 
 
 async def _student_count_in_scope(
@@ -5836,7 +5861,8 @@ def _normalize_question_text(question: str, course_synonyms: dict[str, str] | No
         "特征": "特点",
         "的": "",
     }
-    for src, dst in replacements.items():
+    # 先按 src 长度降序应用，避免「么」->「吗」把「是什么」变成「是什吗」导致「是什么」无法被替换
+    for src, dst in sorted(replacements.items(), key=lambda x: -len(x[0])):
         text = text.replace(src, dst)
     for phrase in ("有什么特点", "特点是什么", "有哪些特点", "有什么特征", "特征是什么", "有哪些特征"):
         text = text.replace(phrase, "特点")
@@ -6115,6 +6141,8 @@ async def stats_overview(
     class_id: int | None = Query(None),
     course_id: int | None = Query(None),
     chapter_id: int | None = Query(None),
+    start_date: str | None = Query(None, description="统计周期起日 YYYY-MM-DD，与学情课程统计详细表一致"),
+    end_date: str | None = Query(None, description="统计周期止日 YYYY-MM-DD，与学情课程统计详细表一致"),
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
@@ -6130,6 +6158,22 @@ async def stats_overview(
         scoped_course_ids = {course_id}
     elif _is_teacher_scoped(user):
         scoped_course_ids = teacher_course_ids
+
+    time_filter = False
+    start_dt = None
+    end_dt = None
+    if start_date and end_date:
+        try:
+            start_dt = datetime.strptime(start_date, "%Y-%m-%d")
+            end_dt = datetime.strptime(end_date, "%Y-%m-%d") + timedelta(days=1)
+            time_filter = True
+        except ValueError:
+            pass
+
+    # 与学情课程统计详细表一致的 (course, student) 对，使概览 AI 提问数/无关数 = 详情表合计
+    course_student_pairs: list[tuple[int, int]] = []
+    if scoped_course_ids:
+        course_student_pairs = await _course_student_pairs_for_overview(db, scoped_course_ids, class_id, user)
 
     chapter_obj = None
     if chapter_id is not None:
@@ -6164,6 +6208,10 @@ async def stats_overview(
         q_done_preview_students = q_done_preview_students.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         q_done_preview_students = q_done_preview_students.where(PreviewRecord.user_id.in_(user_ids))
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_done_preview_students = q_done_preview_students.where(
+            PreviewRecord.completed_at >= start_dt, PreviewRecord.completed_at < end_dt
+        )
     r_done_preview = await db.execute(q_done_preview_students)
     done_preview_student_count = r_done_preview.scalar() or 0
     preview_rate = (done_preview_student_count / total_students_in_scope * 100) if total_students_in_scope else 0.0
@@ -6174,6 +6222,10 @@ async def stats_overview(
         q_preview_students = q_preview_students.where(PreviewRecord.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         q_preview_students = q_preview_students.where(PreviewRecord.user_id.in_(user_ids))
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_preview_students = q_preview_students.where(
+            PreviewRecord.completed_at >= start_dt, PreviewRecord.completed_at < end_dt
+        )
     r_preview_students = await db.execute(q_preview_students)
     preview_student_count = r_preview_students.scalar() or 0
 
@@ -6196,11 +6248,29 @@ async def stats_overview(
             top_q_stmt = top_q_stmt.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         top_q_stmt = top_q_stmt.where(QuestionAsked.user_id.in_(user_ids))
+    if time_filter and start_dt is not None and end_dt is not None:
+        top_q_stmt = top_q_stmt.where(
+            QuestionAsked.created_at >= start_dt, QuestionAsked.created_at < end_dt
+        )
     top_q_stmt = top_q_stmt.order_by(func.count(QuestionAsked.id).desc()).limit(200)
     top_q = await db.execute(top_q_stmt)
     synonym_course_ids = scoped_course_ids if (scoped_course_ids is not None) else teacher_course_ids
     course_synonym_maps = await _load_course_synonym_maps(db, synonym_course_ids) if synonym_course_ids else {}
     top_asked = _merge_similar_questions([(r[1], r[2], r[0]) for r in top_q.all()], course_synonym_maps, limit=5)
+
+    # AI提问数：所选课程 + 统计周期 + 学生角色提问数总和，与学情课程统计详细表同口径（全部 QuestionAsked，不限制 rag_hit），使概览数 = 详情表合计
+    if not course_student_pairs:
+        ai_ask_count = 0
+    else:
+        q_ai_ask_count = select(func.count(QuestionAsked.id)).where(
+            tuple_(QuestionAsked.course_id, QuestionAsked.user_id).in_(course_student_pairs)
+        )
+        if time_filter and start_dt is not None and end_dt is not None:
+            q_ai_ask_count = q_ai_ask_count.where(
+                QuestionAsked.created_at >= start_dt, QuestionAsked.created_at < end_dt
+            )
+        r_ai_ask = await db.execute(q_ai_ask_count)
+        ai_ask_count = r_ai_ask.scalar() or 0
 
     # 作答正确率
     q_ans = select(func.count(AnswerRecord.id))
@@ -6217,6 +6287,9 @@ async def stats_overview(
     if user_ids is not None:
         q_ans = q_ans.where(AnswerRecord.user_id.in_(user_ids))
         q_ans_ok = q_ans_ok.where(AnswerRecord.user_id.in_(user_ids))
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_ans = q_ans.where(AnswerRecord.created_at >= start_dt, AnswerRecord.created_at < end_dt)
+        q_ans_ok = q_ans_ok.where(AnswerRecord.created_at >= start_dt, AnswerRecord.created_at < end_dt)
     total_answers = await db.execute(q_ans)
     correct_answers = await db.execute(q_ans_ok)
     ans_total = total_answers.scalar() or 0
@@ -6230,30 +6303,28 @@ async def stats_overview(
         q_feedback = q_feedback.where(StudentFeedback.course_id.in_(scoped_course_ids))
     if user_ids is not None:
         q_feedback = q_feedback.where(StudentFeedback.user_id.in_(user_ids))
+    if time_filter and start_dt is not None and end_dt is not None:
+        q_feedback = q_feedback.where(
+            StudentFeedback.created_at >= start_dt, StudentFeedback.created_at < end_dt
+        )
     r_feedback = await db.execute(q_feedback)
     feedback_question_count = r_feedback.scalar() or 0
 
-    # AI无关问题数：按表字段 course_irrelevant 统计（大模型在知识库未命中时判断为与课程无关的提问）
-    q_irrelevant = select(func.count(QuestionAsked.id)).where(
-        QuestionAsked.course_irrelevant == True
-    )
-    if _is_teacher_scoped(user):
-        if scoped_course_ids is not None:
-            if not scoped_course_ids:
-                q_irrelevant = q_irrelevant.where(QuestionAsked.id == -1)
-            else:
-                q_irrelevant = q_irrelevant.where(QuestionAsked.course_id.in_(scoped_course_ids))
-        if scoped_chapter_ids is not None and scoped_chapter_ids:
-            q_irrelevant = q_irrelevant.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
+    # AI无关问题数：仅根据 course_irrelevant 标记位查询
+    _irrelevant_predicate = QuestionAsked.course_irrelevant == True
+    if not course_student_pairs:
+        ai_irrelevant_count = 0
     else:
-        if scoped_course_ids is not None:
-            q_irrelevant = q_irrelevant.where(QuestionAsked.course_id.in_(scoped_course_ids))
-        if scoped_chapter_ids is not None:
-            q_irrelevant = q_irrelevant.where(QuestionAsked.chapter_id.in_(scoped_chapter_ids))
-    if user_ids is not None:
-        q_irrelevant = q_irrelevant.where(QuestionAsked.user_id.in_(user_ids))
-    r_irrelevant = await db.execute(q_irrelevant)
-    ai_irrelevant_count = r_irrelevant.scalar() or 0
+        q_irrelevant = select(func.count(QuestionAsked.id)).where(
+            _irrelevant_predicate,
+            tuple_(QuestionAsked.course_id, QuestionAsked.user_id).in_(course_student_pairs),
+        )
+        if time_filter and start_dt is not None and end_dt is not None:
+            q_irrelevant = q_irrelevant.where(
+                QuestionAsked.created_at >= start_dt, QuestionAsked.created_at < end_dt
+            )
+        r_irrelevant = await db.execute(q_irrelevant)
+        ai_irrelevant_count = r_irrelevant.scalar() or 0
 
     # 薄弱知识点（Top 5）：按错题次数累计到知识点，再取频次最高的 5 个标题
     wrong_q_ids = (
@@ -6268,6 +6339,10 @@ async def stats_overview(
             wrong_q_ids = wrong_q_ids.where(Question.chapter_id.in_(scoped_chapter_ids))
     if user_ids is not None:
         wrong_q_ids = wrong_q_ids.where(AnswerRecord.user_id.in_(user_ids))
+    if time_filter and start_dt is not None and end_dt is not None:
+        wrong_q_ids = wrong_q_ids.where(
+            AnswerRecord.created_at >= start_dt, AnswerRecord.created_at < end_dt
+        )
     wrong_q_ids = wrong_q_ids.group_by(AnswerRecord.question_id)
     r_wrong = await db.execute(wrong_q_ids)
     wrong_rows = [(int(row[0]), int(row[1] or 0)) for row in r_wrong.all() if row[0] is not None]
@@ -6332,6 +6407,7 @@ async def stats_overview(
         feedback_question_count=int(feedback_question_count),
         top_asked=top_asked,
         answer_accuracy_rate=round(accuracy, 1),
+        ai_ask_count=int(ai_ask_count),
         ai_irrelevant_count=int(ai_irrelevant_count),
         weak_knowledge_points=weak_titles,
         weak_knowledge_point_course_ids=weak_course_ids,
@@ -6579,13 +6655,14 @@ async def _compute_stats_by_course_student(
     r_fb = await db.execute(q_fb)
     feedback_count: dict[tuple[int, int], int] = {(int(row[0]), int(row[1])): int(row[2]) for row in r_fb.all()}
 
-    # AI 提问数、无关数
+    # AI 提问数、无关数（无关：仅根据 course_irrelevant 标记位）
+    _irr_predicate = QuestionAsked.course_irrelevant == True
     q_qa = (
         select(
             QuestionAsked.course_id,
             QuestionAsked.user_id,
             func.count(QuestionAsked.id).label("ask_count"),
-            func.count(QuestionAsked.id).filter(QuestionAsked.course_irrelevant == True).label("irr_count"),
+            func.count(QuestionAsked.id).filter(_irr_predicate).label("irr_count"),
         )
         .where(QuestionAsked.course_id.in_(course_ids), QuestionAsked.user_id.in_(student_ids))
     )

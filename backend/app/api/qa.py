@@ -11,7 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from ..config import settings
 from ..db import get_db
-from ..db.models import User, QuestionAsked, KnowledgeDocument, KnowledgePoint, Chapter, Course
+from ..db.models import User, UserRole, QuestionAsked, KnowledgeDocument, KnowledgePoint, Chapter, Course
 from ..api.auth import get_current_user
 from ..services.qa_engine import answer_from_documents, answer_question, QAResponse
 from ..rag.generator import distill_answer_if_raw
@@ -30,6 +30,7 @@ class AskOut(BaseModel):
     document_ref: str | None
     reference_doc_id: int | None = None
     reference_page: int | None = None
+    reference_doc_title: str | None = None  # 参考文档名称（文件名或标题），用于展示「参考文档：文件名，第xx页」
     knowledge_point: str | None
     in_scope: bool
     question_asked_id: int | None = None  # 用于「将本条对话提交为学习反馈」
@@ -158,14 +159,34 @@ def _judge_course_relevance(question: str, course_name: str | None, answer: str)
         return False
 
 
-def _build_knowledge_miss_answer(question: str) -> str:
+# 大模型也未能给出合适答案时，统一返回的提示文案
+NO_MATCH_ANSWER = "该问题未匹配到合适答案，建议结合教材和课堂PPT复习"
+
+
+def _is_no_match_response(text: str) -> bool:
+    """判断大模型返回是否表示「无法匹配到合适答案」（含旧话术与约定短语）。"""
+    t = (text or "").strip()
+    if not t:
+        return True
+    if "无法匹配到合适答案" in t and len(t) < 80:
+        return True
+    if t == "无法匹配到合适答案" or t.replace(" ", "").replace("　", "") == "无法匹配到合适答案":
+        return True
+    # 大模型可能仍返回旧话术，也视为未匹配，统一替换为新提示
+    if "未在课程知识库中匹配到相关内容" in t or ("未在课程知识库" in t and "结合教材" in t):
+        return True
+    return False
+
+
+def _try_llm_answer_or_no_match(question: str) -> tuple[bool, str]:
+    """
+    先让大模型尝试回答问题；若模型判定无法给出匹配度合适的答案，则返回固定提示。
+    返回 (found_suitable_answer, answer_text)。若未找到合适答案，answer_text 为 NO_MATCH_ANSWER。
+    """
     prompt = (
-        "你是一名大学计算机课程助教。当前用户问题在课程知识库中没有命中。"
-        "请基于通用常识直接回答用户问题，要求：\n"
-        "1) 先直接给可执行结论；\n"
-        "2) 再给 2-3 条简短建议；\n"
-        "3) 不提及知识库、检索或模型；\n"
-        "4) 120 字以内。\n"
+        "你是一名课程助教。请尝试回答用户问题。\n"
+        "若你能基于课程或通用知识给出匹配度合适的答案，请直接写出答案（2～5 句，简洁）。\n"
+        "若你无法给出匹配度合适的答案（如问题与课程明显无关、或信息不足无法回答），请只输出一行：无法匹配到合适答案。\n\n"
         f"用户问题：{question}"
     )
     try:
@@ -175,15 +196,15 @@ def _build_knowledge_miss_answer(question: str) -> str:
         settings = get_rag_settings()
         answer = get_llm(settings).generate(
             prompt,
-            max_tokens=min(settings.llm_max_tokens, 220),
-            temperature=max(settings.llm_temperature, 0.5),
+            max_tokens=min(settings.llm_max_tokens, 280),
+            temperature=max(settings.llm_temperature, 0.4),
         )
         text = (answer or "").strip()
-        if text:
-            return text
+        if _is_no_match_response(text):
+            return (False, NO_MATCH_ANSWER)
+        return (True, text)
     except Exception:
-        pass
-    return "今年口红常见趋势是低饱和豆沙、奶咖棕、柔雾玫瑰。建议按肤色先试豆沙系，再看通勤/约会场景，优先选保湿不拔干质地。"
+        return (False, NO_MATCH_ANSWER)
 
 
 def _summarize_doc_answer(question: str, doc_tuples: list[tuple[str, str | None, str | None]]) -> str:
@@ -252,7 +273,7 @@ async def ask(
 
         settings = get_rag_settings()
         if settings.enabled and course_id is not None:
-            answer, ppt_ref, knowledge_point, in_scope, rag_reference_doc_id, rag_reference_page = rag_ask(
+            answer, ppt_ref, knowledge_point, in_scope, rag_reference_doc_id, rag_reference_page, rag_source_title = rag_ask(
                 question, course_id, chapter_id=None
             )
             logger.warning(
@@ -261,23 +282,19 @@ async def ask(
                 (answer or "")[:150],
                 ppt_ref,
             )
-            # 仅在确实没有任何引用信息时，才降级为“知识库无答案”兜底
-            if "未在课程知识库" in (answer or "") and not (ppt_ref or knowledge_point):
-                logger.warning("[RAG-TRACE] qa_api_rag_miss_to_general_answer q=%r course_id=%s", question, course_id)
-                answer = _build_knowledge_miss_answer(question)
+            # 无 chunks（情况2）或 有 chunks 但模型判为未匹配（情况1）：统一由大模型尝试作答，无合适答案再给固定提示
+            if "当前问题在知识库中没有参考答案" in (ppt_ref or ""):
+                if answer is None or (answer or "").strip() == "":
+                    _, answer = _try_llm_answer_or_no_match(question)
+                if _is_no_match_response(answer or ""):
+                    answer = NO_MATCH_ANSWER
+            elif "未在课程知识库" in (answer or "") and not (ppt_ref or knowledge_point):
+                logger.warning("[RAG-TRACE] qa_api_rag_miss_try_llm_then_fixed q=%r course_id=%s", question, course_id)
+                _, answer = _try_llm_answer_or_no_match(question)
                 ppt_ref = "当前问题在知识库中没有参考答案"
                 knowledge_point = None
                 in_scope = False
-                # 大模型判断该问题是否与当前课程无关，供学情统计「AI无关问题数」
-                course_name_for_judge = None
-                if course_id is not None:
-                    r_course = await db.execute(select(Course.name).where(Course.id == course_id))
-                    row = r_course.one_or_none()
-                    if row:
-                        course_name_for_judge = row[0]
-                course_irrelevant = _judge_course_relevance(question, course_name_for_judge, answer or "")
             else:
-                course_irrelevant = None
                 logger.warning(
                     "[RAG-TRACE] qa_api_rag_hit q=%r course_id=%s ref=%r kp=%r in_scope=%s",
                     question,
@@ -286,6 +303,27 @@ async def ask(
                     knowledge_point,
                     in_scope,
                 )
+            # 兜底：任一路径若答案仍是“未匹配”话术（含旧版），先让大模型尝试作答，仍无合适答案再给固定提示
+            if _is_no_match_response(answer or ""):
+                logger.warning("[RAG-TRACE] qa_api_rag_unified_no_match_try_llm q=%r", question)
+                _, answer = _try_llm_answer_or_no_match(question)
+                if _is_no_match_response(answer or ""):
+                    answer = NO_MATCH_ANSWER
+                ppt_ref = "当前问题在知识库中没有参考答案"
+                knowledge_point = None
+                in_scope = False
+            # 在本地知识库中没能找到合适答案时，对学生角色调用大模型判断是否与当前所选课程无关，并记录
+            if "当前问题在知识库中没有参考答案" in (ppt_ref or ""):
+                course_irrelevant = None
+                if user and getattr(user, "role", None) == UserRole.student.value and course_id is not None:
+                    course_name_for_judge = None
+                    r_course = await db.execute(select(Course.name).where(Course.id == course_id))
+                    row = r_course.one_or_none()
+                    if row:
+                        course_name_for_judge = row[0]
+                    course_irrelevant = _judge_course_relevance(question, course_name_for_judge, answer or "")
+            else:
+                course_irrelevant = False
             # 若答案仍像课件原文，用大模型蒸馏成针对问题的简洁回答（RAG 与非 RAG 统一）
             logger.warning("[RAG-TRACE] qa_api before distill_answer_if_raw")
             answer = distill_answer_if_raw(question, answer or "")
@@ -309,13 +347,34 @@ async def ask(
                 db.add(record)
                 await db.flush()
                 question_asked_id = record.id
+            # 大模型作答且无参考答案时，只展示“当前问题在知识库中没有参考答案”，不展示参考文档/文件名
+            no_answer_ref = "当前问题在知识库中没有参考答案" in (ppt_ref or "")
+            reference_doc_title = None
+            out_reference_doc_id = rag_reference_doc_id
+            out_reference_page = rag_reference_page if rag_reference_page and rag_reference_page > 0 else (
+                None if _looks_like_total_pages_ref(ppt_ref) else _parse_page_num(ppt_ref)
+            )
+            if not no_answer_ref:
+                if rag_reference_doc_id is not None:
+                    r_doc = await db.execute(
+                        select(KnowledgeDocument.file_name, KnowledgeDocument.title).where(
+                            KnowledgeDocument.id == rag_reference_doc_id
+                        )
+                    )
+                    row = r_doc.one_or_none()
+                    if row:
+                        reference_doc_title = (row[0] or row[1] or "").strip() or None
+                if reference_doc_title is None and (rag_source_title or "").strip() and (ppt_ref or "").strip():
+                    reference_doc_title = (rag_source_title or "").strip()
+            else:
+                out_reference_doc_id = None
+                out_reference_page = None
             return AskOut(
                 answer=answer,
                 document_ref=ppt_ref,
-                reference_doc_id=rag_reference_doc_id,
-                reference_page=rag_reference_page if rag_reference_page and rag_reference_page > 0 else (
-                    None if _looks_like_total_pages_ref(ppt_ref) else _parse_page_num(ppt_ref)
-                ),
+                reference_doc_id=out_reference_doc_id,
+                reference_page=out_reference_page,
+                reference_doc_title=reference_doc_title,
                 knowledge_point=knowledge_point,
                 in_scope=in_scope,
                 question_asked_id=question_asked_id,
@@ -362,15 +421,18 @@ async def ask(
         pts_result = await db.execute(q_pts)
         points = list(pts_result.scalars().all())
     if not docs and not points and question:
-        fallback_answer = _build_knowledge_miss_answer(question)
+        # 关键词路径也无命中：先让大模型尝试作答，若无合适答案再给固定提示
+        _, fallback_answer = _try_llm_answer_or_no_match(question)
         no_ref_msg = "当前问题在知识库中没有参考答案"
-        course_name_for_judge = None
-        if course_id is not None:
+        # 在本地知识库中没能找到合适答案时，对学生角色调用大模型判断是否与当前所选课程无关，并记录
+        course_irrelevant_fallback = None
+        if user and getattr(user, "role", None) == UserRole.student.value and course_id is not None:
+            course_name_for_judge = None
             r_course = await db.execute(select(Course.name).where(Course.id == course_id))
             row = r_course.one_or_none()
             if row:
                 course_name_for_judge = row[0]
-        course_irrelevant_fallback = _judge_course_relevance(question, course_name_for_judge, fallback_answer)
+            course_irrelevant_fallback = _judge_course_relevance(question, course_name_for_judge, fallback_answer)
         question_asked_id: int | None = None
         if user:
             record = QuestionAsked(
@@ -391,6 +453,7 @@ async def ask(
             document_ref=no_ref_msg,
             reference_doc_id=None,
             reference_page=None,
+            reference_doc_title=None,
             knowledge_point=None,
             in_scope=False,
             question_asked_id=question_asked_id,
@@ -449,11 +512,15 @@ async def ask(
         db.add(record)
         await db.flush()
         question_asked_id = record.id
+    reference_doc_title = None
+    if primary_doc:
+        reference_doc_title = (primary_doc.file_name or primary_doc.title or "").strip() or None
     return AskOut(
         answer=resp.answer,
         document_ref=resp.ppt_ref,
         reference_doc_id=primary_doc.id if primary_doc else None,
         reference_page=None if _looks_like_total_pages_ref(resp.ppt_ref) else _parse_page_num(resp.ppt_ref),
+        reference_doc_title=reference_doc_title,
         knowledge_point=resp.knowledge_point,
         in_scope=resp.in_scope,
         question_asked_id=question_asked_id,

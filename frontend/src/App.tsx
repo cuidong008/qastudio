@@ -3,7 +3,7 @@ import { Routes, Route, Navigate } from "react-router-dom";
 import { useAuth } from "./api/auth";
 import Layout from "./components/Layout";
 import Preview from "./pages/student/Preview";
-import InClass from "./pages/student/InClass";
+import InClass, { type InClassVariant } from "./pages/student/InClass";
 import Review from "./pages/student/Review";
 import Exercises from "./pages/student/Exercises";
 import Feedback from "./pages/student/Feedback";
@@ -53,7 +53,7 @@ function App() {
         <Route path="/student/review" element={<Layout role="student" requireAuth><Review /></Layout>} />
         <Route path="/student/exercises" element={<Layout role="student" requireAuth><Exercises /></Layout>} />
         <Route path="/student/feedback" element={<Layout role="student" requireAuth><Feedback /></Layout>} />
-        <Route path="/teacher/qa" element={<TeacherLayout requireAuth fluid fullBleed><InClass variant="teacher" /></TeacherLayout>} />
+        <Route path="/teacher/qa" element={<TeacherLayout requireAuth fluid fullBleed><InClass variant={(user?.role === "teaching_leader" ? "teaching_leader" : "teacher") as InClassVariant} /></TeacherLayout>} />
         <Route path="/teacher" element={<Navigate to="/teacher/qa" replace />} />
         <Route path="/teacher/learning-data" element={<TeacherLayout requireAuth><TeacherLearningData /></TeacherLayout>} />
         <Route path="/teacher/courses" element={<TeacherLayout requireAuth><TeacherCourses /></TeacherLayout>} />

@@ -9,18 +9,22 @@ import Exercises from "./Exercises";
 import Feedback from "./Feedback";
 import StudentLearningData from "./StudentLearningData";
 
-const CHAT_STORAGE_KEY_STUDENT = "qastudio.student.chat.v1";
+/** 各角色按用户隔离的 key 前缀，避免教师/学生/管理员之间或不同用户之间混用会话 */
+const CHAT_STORAGE_KEY_STUDENT_PREFIX = "qastudio.student.chat.v1.";
 const CHAT_STORAGE_KEY_TEACHER_PREFIX = "qastudio.teacher.chat.v1.";
 const CHAT_STORAGE_KEY_ADMIN_PREFIX = "qastudio.admin.chat.v1.";
+/** 旧版学生端使用的全局 key（无 userId），迁移到 per-user 后仅用于一次性读取 */
+const CHAT_STORAGE_KEY_STUDENT_LEGACY = "qastudio.student.chat.v1";
 
-function getChatStorageKey(variant: "student" | "teacher" | "admin", userId?: number | null): string | null {
-  if (variant === "teacher") {
-    return userId != null ? CHAT_STORAGE_KEY_TEACHER_PREFIX + userId : null;
-  }
-  if (variant === "admin") {
-    return userId != null ? CHAT_STORAGE_KEY_ADMIN_PREFIX + userId : null;
-  }
-  return CHAT_STORAGE_KEY_STUDENT;
+/** 每用户最多保留的问答会话条数（按 updatedAt 保留最近 N 条） */
+const MAX_CHAT_SESSIONS_PER_USER = 100;
+
+/** 教师与教研组长共用教师端 key（会话按 userId 隔离） */
+function getChatStorageKey(variant: "student" | "teacher" | "teaching_leader" | "admin", userId?: number | null): string | null {
+  if (userId == null) return null;
+  if (variant === "teacher" || variant === "teaching_leader") return CHAT_STORAGE_KEY_TEACHER_PREFIX + userId;
+  if (variant === "admin") return CHAT_STORAGE_KEY_ADMIN_PREFIX + userId;
+  return CHAT_STORAGE_KEY_STUDENT_PREFIX + userId;
 }
 const MAX_AVATAR_FILE_BYTES = 1.5 * 1024 * 1024;
 const SUPPORTED_AVATAR_TYPES = new Set([
@@ -132,6 +136,9 @@ async function compressAvatarToDataUrl(file: File): Promise<{ dataUrl: string; b
   throw new Error("图片压缩后仍超过 1.5MB，请换一张更小的图片");
 }
 
+/** 关联知识点展示最大字符数，超出用 ... 表示 */
+const KNOWLEDGE_POINT_MAX_DISPLAY_LEN = 20;
+
 type ChatMessage = {
   id: number;
   role: "user" | "assistant";
@@ -139,6 +146,7 @@ type ChatMessage = {
   document_ref?: string | null;
   reference_doc_id?: number | null;
   reference_page?: number | null;
+  reference_doc_title?: string | null;
   knowledge_point?: string | null;
   question_asked_id?: number | null;
   /** 教师端：查看学生学情时的结构化数据 */
@@ -220,9 +228,33 @@ function getDefaultLearningTimeRange(): { start: string; end: string } {
   return { start: start.toISOString().slice(0, 10), end: end.toISOString().slice(0, 10) };
 }
 
+function trimSessionsToMax(sessions: ChatSession[], max: number): ChatSession[] {
+  if (sessions.length <= max) return sessions;
+  return [...sessions].sort((a, b) => b.updatedAt - a.updatedAt).slice(0, max);
+}
+
+/**
+ * 若当前 key 无数据且为学生 per-user key，尝试从旧版全局 key 迁移一次，并写入新 key。
+ * 返回最终应使用的 key（可能已写入迁移数据）。
+ */
+function migrateLegacyStudentKeyIfNeeded(storageKey: string): void {
+  if (typeof window === "undefined") return;
+  if (!storageKey.startsWith(CHAT_STORAGE_KEY_STUDENT_PREFIX)) return;
+  const rawNew = localStorage.getItem(storageKey);
+  if (rawNew) return;
+  const rawLegacy = localStorage.getItem(CHAT_STORAGE_KEY_STUDENT_LEGACY);
+  if (!rawLegacy) return;
+  try {
+    localStorage.setItem(storageKey, rawLegacy);
+  } catch {
+    // ignore
+  }
+}
+
 function loadChatState(storageKey: string): { sessions: ChatSession[]; sessionSeq: number; activeSessionId: number } {
   const fallback = { sessions: [makeSession(1)], sessionSeq: 2, activeSessionId: 1 };
   if (typeof window === "undefined") return fallback;
+  migrateLegacyStudentKeyIfNeeded(storageKey);
   try {
     const raw = localStorage.getItem(storageKey);
     if (!raw) return fallback;
@@ -243,10 +275,11 @@ function loadChatState(storageKey: string): { sessions: ChatSession[]; sessionSe
         messages: Array.isArray(s.messages) ? s.messages : [],
       }));
     if (sessions.length === 0) return fallback;
-    const maxId = Math.max(...sessions.map((s) => s.id));
-    const active = sessions.some((s) => s.id === parsed.activeSessionId) ? parsed.activeSessionId! : sessions[0].id;
+    const trimmed = trimSessionsToMax(sessions, MAX_CHAT_SESSIONS_PER_USER);
+    const maxId = Math.max(...trimmed.map((s) => s.id));
+    const active = trimmed.some((s) => s.id === parsed.activeSessionId) ? parsed.activeSessionId! : trimmed[0].id;
     return {
-      sessions,
+      sessions: trimmed,
       sessionSeq: typeof parsed.sessionSeq === "number" ? Math.max(parsed.sessionSeq, maxId + 1) : maxId + 1,
       activeSessionId: active,
     };
@@ -257,7 +290,9 @@ function loadChatState(storageKey: string): { sessions: ChatSession[]; sessionSe
 
 const fallbackChatState = { sessions: [makeSession(1)], sessionSeq: 2, activeSessionId: 1 };
 
-export default function InClass({ variant = "student" }: { variant?: "student" | "teacher" | "admin" }) {
+export type InClassVariant = "student" | "teacher" | "teaching_leader" | "admin";
+
+export default function InClass({ variant = "student" }: { variant?: InClassVariant }) {
   const { user, logout, updateProfile, changePassword } = useAuth();
   const navigate = useNavigate();
   const storageKey = getChatStorageKey(variant, user?.id);
@@ -266,6 +301,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
   const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
   const [openingReferenceId, setOpeningReferenceId] = useState<number | null>(null);
   const [copiedMessageId, setCopiedMessageId] = useState<number | null>(null);
+  const [deleteMessageId, setDeleteMessageId] = useState<number | null>(null);
   const [renameSessionId, setRenameSessionId] = useState<number | null>(null);
   const [renameValue, setRenameValue] = useState("");
   const [sessionSearch, setSessionSearch] = useState("");
@@ -283,18 +319,14 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
   const [settingsError, setSettingsError] = useState("");
   const [settingsSuccess, setSettingsSuccess] = useState("");
   const [mode, setMode] = useState<WorkspaceMode>("qa");
-  const [sessionSeq, setSessionSeq] = useState(() =>
-    variant === "student" ? loadChatState(CHAT_STORAGE_KEY_STUDENT).sessionSeq : fallbackChatState.sessionSeq
-  );
-  const [sessions, setSessions] = useState<ChatSession[]>(() =>
-    variant === "student" ? loadChatState(CHAT_STORAGE_KEY_STUDENT).sessions : fallbackChatState.sessions
-  );
-  const [activeSessionId, setActiveSessionId] = useState(() =>
-    variant === "student" ? loadChatState(CHAT_STORAGE_KEY_STUDENT).activeSessionId : fallbackChatState.activeSessionId
-  );
+  const [sessionSeq, setSessionSeq] = useState(fallbackChatState.sessionSeq);
+  const [sessions, setSessions] = useState<ChatSession[]>(() => fallbackChatState.sessions);
+  const [activeSessionId, setActiveSessionId] = useState(fallbackChatState.activeSessionId);
   const inputRef = useRef<HTMLInputElement | null>(null);
   const avatarInputRef = useRef<HTMLInputElement | null>(null);
   const userMenuRef = useRef<HTMLDivElement | null>(null);
+  /** 仅在一次从 localStorage 加载后再持久化，避免首次挂载用 fallback 覆盖已有历史（教师/学生/管理员统一） */
+  const storageLoadedRef = useRef(false);
 
   useEffect(() => {
     const onDocClick = (e: MouseEvent) => {
@@ -308,7 +340,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
   }, []);
 
   useEffect(() => {
-    if (variant === "teacher") {
+    if (variant === "teacher" || variant === "teaching_leader") {
       api.teacher.courses.list().then((rows) => setCourses(rows.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
     } else if (variant === "admin") {
       setCourses([]);
@@ -318,13 +350,18 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
   }, [variant]);
 
   useEffect(() => {
-    if ((variant === "teacher" || variant === "admin") && storageKey) {
-      const loaded = loadChatState(storageKey);
-      setSessions(loaded.sessions);
-      setSessionSeq(loaded.sessionSeq);
-      setActiveSessionId(loaded.activeSessionId);
-    }
-  }, [variant, storageKey]);
+    if (!storageKey) return;
+    storageLoadedRef.current = false;
+    const loaded = loadChatState(storageKey);
+    setSessions(loaded.sessions);
+    setSessionSeq(loaded.sessionSeq);
+    setActiveSessionId(loaded.activeSessionId);
+    // 下一轮再允许持久化，避免本轮 persist effect 仍读到旧 state 从而用空会话覆盖 localStorage
+    const t = setTimeout(() => {
+      storageLoadedRef.current = true;
+    }, 0);
+    return () => clearTimeout(t);
+  }, [storageKey]);
 
   const activeSession = useMemo(
     () => sessions.find((s) => s.id === activeSessionId) ?? sessions[0],
@@ -368,6 +405,23 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
     });
   }, [sessions, courseNameMap, sessionSearch]);
 
+  /** 弹出删除确认时，待删除的那条问答对应的消息 id 集合（用于高亮展示） */
+  const pendingDeleteMessageIds = useMemo(() => {
+    if (deleteMessageId == null || !activeSession) return new Set<number>();
+    const messages = activeSession.messages;
+    const idx = messages.findIndex((m) => m.id === deleteMessageId);
+    if (idx < 0) return new Set<number>();
+    const ids = new Set<number>();
+    if (messages[idx].role === "user") {
+      ids.add(messages[idx].id);
+      if (idx + 1 < messages.length && messages[idx + 1].role === "assistant") ids.add(messages[idx + 1].id);
+    } else {
+      ids.add(messages[idx].id);
+      if (idx - 1 >= 0 && messages[idx - 1].role === "user") ids.add(messages[idx - 1].id);
+    }
+    return ids;
+  }, [deleteMessageId, activeSession]);
+
   const updateActiveSession = (updater: (session: ChatSession) => ChatSession, touch = true) => {
     setSessions((prev) =>
       prev.map((session) => {
@@ -380,9 +434,11 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
 
   useEffect(() => {
     if (typeof window === "undefined" || !storageKey) return;
+    if (!storageLoadedRef.current) return;
+    const toSave = trimSessionsToMax(sessions, MAX_CHAT_SESSIONS_PER_USER);
     localStorage.setItem(
       storageKey,
-      JSON.stringify({ sessions, sessionSeq, activeSessionId })
+      JSON.stringify({ sessions: toSave, sessionSeq, activeSessionId })
     );
   }, [sessions, sessionSeq, activeSessionId, storageKey]);
 
@@ -397,7 +453,10 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
     const id = sessionSeq;
     const next = makeSession(id, activeSession?.courseId ?? null);
     setSessionSeq((prev) => prev + 1);
-    setSessions((prev) => [next, ...prev]);
+    setSessions((prev) => {
+      const list = [next, ...prev];
+      return trimSessionsToMax(list, MAX_CHAT_SESSIONS_PER_USER);
+    });
     setActiveSessionId(id);
     setMode("qa");
     setQuestion("");
@@ -409,7 +468,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
     const courseId = activeSession.courseId;
     const hasCourse =
       variant === "admin" ||
-      variant === "teacher" ||
+      (variant === "teacher" || variant === "teaching_leader") ||
       (courseId != null && courseId > 0);
     if (!hasCourse) {
       if (variant === "student") {
@@ -417,7 +476,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
       }
       return;
     }
-    const apiCourseId = (variant === "teacher" && courseId === 0) || variant === "admin" ? null : courseId;
+    const apiCourseId = ((variant === "teacher" || variant === "teaching_leader") && courseId === 0) || variant === "admin" ? null : courseId;
     const userMsg: ChatMessage = {
       id: Date.now(),
       role: "user",
@@ -431,8 +490,8 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
     setQuestion("");
     setLoading(true);
 
-    const learningKeyword = variant === "teacher" ? parseLearningIntent(q) : null;
-    if (variant === "teacher" && learningKeyword !== null) {
+    const learningKeyword = (variant === "teacher" || variant === "teaching_leader") ? parseLearningIntent(q) : null;
+    if ((variant === "teacher" || variant === "teaching_leader") && learningKeyword !== null) {
       try {
         if (!learningKeyword.trim()) {
           const assistantMsg: ChatMessage = {
@@ -541,6 +600,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
         document_ref: res.document_ref,
         reference_doc_id: res.reference_doc_id ?? null,
         reference_page: res.reference_page ?? null,
+        reference_doc_title: res.reference_doc_title ?? null,
         knowledge_point: res.knowledge_point,
         question_asked_id: res.question_asked_id ?? null,
       };
@@ -685,6 +745,37 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
     }));
     window.setTimeout(() => inputRef.current?.focus(), 0);
   };
+
+  /** 请求删除该条问答（仅前端对话中移除，不删后台记录）；确认后执行 */
+  const handleRequestDeleteMessage = (messageId: number) => setDeleteMessageId(messageId);
+
+  const handleConfirmDeleteMessage = () => {
+    if (deleteMessageId == null || !activeSession) {
+      setDeleteMessageId(null);
+      return;
+    }
+    const messages = activeSession.messages;
+    const idx = messages.findIndex((m) => m.id === deleteMessageId);
+    if (idx < 0) {
+      setDeleteMessageId(null);
+      return;
+    }
+    const toRemove = new Set<number>();
+    if (messages[idx].role === "user") {
+      toRemove.add(idx);
+      if (idx + 1 < messages.length && messages[idx + 1].role === "assistant") toRemove.add(idx + 1);
+    } else {
+      toRemove.add(idx);
+      if (idx - 1 >= 0 && messages[idx - 1].role === "user") toRemove.add(idx - 1);
+    }
+    updateActiveSession((session) => ({
+      ...session,
+      messages: session.messages.filter((_, i) => !toRemove.has(i)),
+    }));
+    setDeleteMessageId(null);
+  };
+
+  const handleCancelDeleteMessage = () => setDeleteMessageId(null);
 
   const startRename = (session: ChatSession) => {
     setRenameSessionId(session.id);
@@ -958,7 +1049,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
                 }}
               >
                 <option value="">请选择课程</option>
-                {variant === "teacher" && <option value="0">全部课程</option>}
+                {(variant === "teacher" || variant === "teaching_leader") && <option value="0">全部课程</option>}
                 {courses.map((c) => (
                   <option key={c.id} value={c.id}>
                     {c.name}
@@ -970,7 +1061,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
         )}
 
         <div className="student-chat-message-list">
-          {(variant === "teacher" || variant === "admin" || mode === "qa") ? (
+          {(variant === "teacher" || variant === "teaching_leader" || variant === "admin" || mode === "qa") ? (
             <>
               {activeSession.messages.length === 0 ? (
                 <div className="student-chat-empty">
@@ -981,7 +1072,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
                 activeSession.messages.map((msg) => (
                   <div
                     key={msg.id}
-                    className={`student-chat-message ${msg.role === "user" ? "from-user" : "from-assistant"}`}
+                    className={`student-chat-message ${msg.role === "user" ? "from-user" : "from-assistant"}${pendingDeleteMessageIds.has(msg.id) ? " student-chat-message--pending-delete" : ""}`}
                   >
                     <p>{msg.content}</p>
                     {msg.role === "assistant" && msg.payload?.type === "student_learning" && (
@@ -994,21 +1085,34 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
                       />
                     )}
                     <div className="student-chat-message-meta">
-                      {msg.role === "assistant" && msg.document_ref && (
-                        msg.reference_doc_id ? (
+                      {msg.role === "assistant" && msg.document_ref && (() => {
+                        const noAnswerRef = (msg.document_ref || "").includes("当前问题在知识库中没有参考答案");
+                        if (noAnswerRef) {
+                          return <span>{msg.document_ref}</span>;
+                        }
+                        const refDocTitle = msg.reference_doc_title ?? (msg.knowledge_point ?? null);
+                        const refDocLabel = refDocTitle ? `${refDocTitle}，${msg.document_ref}` : msg.document_ref;
+                        return msg.reference_doc_id ? (
                           <button
                             type="button"
                             className="student-chat-ref-btn"
                             onClick={() => handleOpenReferenceFile(msg)}
                           >
-                            {openingReferenceId === msg.id ? "参考文档打开中…" : `参考文档：${msg.document_ref}`}
+                            {openingReferenceId === msg.id ? "参考文档打开中…" : `参考文档：${refDocLabel}`}
                           </button>
                         ) : (
-                          <span>参考文档：{msg.document_ref}</span>
-                        )
+                          <span>参考文档：{refDocLabel}</span>
+                        );
+                      })()}
+                      {msg.role === "assistant" && msg.knowledge_point && (
+                        <span title={msg.knowledge_point}>
+                          关联知识点：
+                          {msg.knowledge_point.length > KNOWLEDGE_POINT_MAX_DISPLAY_LEN
+                            ? `${msg.knowledge_point.slice(0, KNOWLEDGE_POINT_MAX_DISPLAY_LEN)}...`
+                            : msg.knowledge_point}
+                        </span>
                       )}
-                      {msg.role === "assistant" && msg.knowledge_point && <span>关联知识点：{msg.knowledge_point}</span>}
-                      <div style={{ display: "inline-flex", gap: 8 }}>
+                      <div style={{ display: "inline-flex", gap: 4 }}>
                         <button type="button" className="btn-ghost" onClick={() => handleCopyMessage(msg)}>
                           {copiedMessageId === msg.id ? "已复制" : "复制"}
                         </button>
@@ -1017,6 +1121,9 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
                             编辑
                           </button>
                         )}
+                        <button type="button" className="btn-ghost" onClick={() => handleRequestDeleteMessage(msg.id)}>
+                          删除
+                        </button>
                       </div>
                     </div>
                   </div>
@@ -1036,7 +1143,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
         </div>
 
         <div className="student-chat-input-wrap">
-          {(variant === "teacher" || variant === "admin" || mode === "qa") ? (
+          {(variant === "teacher" || variant === "teaching_leader" || variant === "admin" || mode === "qa") ? (
             <div className="student-chat-input-row">
               <input
                 ref={inputRef}
@@ -1069,7 +1176,7 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
                   {item.label}
                 </Link>
               ))
-            ) : variant === "teacher" ? (
+            ) : (variant === "teacher" || variant === "teaching_leader") ? (
               teacherQuickLinks.map((item) => (
                 <Link
                   key={item.path}
@@ -1094,6 +1201,21 @@ export default function InClass({ variant = "student" }: { variant?: "student" |
           </div>
         </div>
       </section>
+      {deleteMessageId != null && (
+        <div className="student-chat-settings-mask" onClick={handleCancelDeleteMessage}>
+          <div className="student-chat-settings-dialog" onClick={(e) => e.stopPropagation()} style={{ maxWidth: 360 }}>
+            <h3 style={{ marginBottom: 16 }}>是否删除该条问答？</h3>
+            <div style={{ display: "flex", gap: 8, justifyContent: "flex-end" }}>
+              <button type="button" className="btn-ghost" onClick={handleCancelDeleteMessage}>
+                取消
+              </button>
+              <button type="button" className="btn-primary" onClick={handleConfirmDeleteMessage}>
+                确定
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       {settingsOpen && (
         <div className="student-chat-settings-mask" onClick={() => setSettingsOpen(false)}>
           <div className="student-chat-settings-dialog" onClick={(e) => e.stopPropagation()}>

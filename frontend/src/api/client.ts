@@ -251,7 +251,7 @@ export const api = {
   },
   qa: {
     ask: (question: string, courseId: number | null) =>
-      request<{ answer: string; document_ref: string | null; reference_doc_id?: number | null; reference_page?: number | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, course_id: courseId } }),
+      request<{ answer: string; document_ref: string | null; reference_doc_id?: number | null; reference_page?: number | null; reference_doc_title?: string | null; knowledge_point: string | null; in_scope: boolean; question_asked_id?: number | null }>("/qa/ask", { method: "POST", body: { question, course_id: courseId } }),
     reference: (docId: number) =>
       request<{ id: number; title: string; source_type: string; page_ref: string | null; file_name: string | null }>(`/qa/reference/${docId}`),
     referenceFile: (docId: number) =>
@@ -295,11 +295,13 @@ export const api = {
       ),
   },
   teacher: {
-    stats: (params?: { classId?: number; courseId?: number; chapterId?: number }) => {
+    stats: (params?: { classId?: number; courseId?: number; chapterId?: number; startDate?: string; endDate?: string }) => {
       const qs = new URLSearchParams();
       if (params?.classId != null) qs.set("class_id", String(params.classId));
       if (params?.courseId != null) qs.set("course_id", String(params.courseId));
       if (params?.chapterId != null) qs.set("chapter_id", String(params.chapterId));
+      if (params?.startDate) qs.set("start_date", params.startDate);
+      if (params?.endDate) qs.set("end_date", params.endDate);
       const q = qs.toString() ? `?${qs.toString()}` : "";
       return request<{
         preview_completion_rate: number;
@@ -308,6 +310,7 @@ export const api = {
         feedback_question_count?: number;
         top_asked: { question: string; count: number; course_id?: number | null }[];
         answer_accuracy_rate: number;
+        ai_ask_count?: number;
         ai_irrelevant_count?: number;
         weak_knowledge_points: string[];
         weak_knowledge_point_course_ids?: (number | null)[];

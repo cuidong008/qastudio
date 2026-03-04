@@ -136,6 +136,7 @@ export default function TeacherLearningData() {
     preview_student_count?: number;
     completed_question_count?: number;
     feedback_question_count?: number;
+    ai_ask_count?: number;
     ai_irrelevant_count?: number;
     weak_knowledge_point_course_ids?: (number | null)[];
     weak_knowledge_point_wrong_counts?: number[];
@@ -191,11 +192,16 @@ export default function TeacherLearningData() {
     api.teacher.classes.students(classId).then(setClassStudents).catch(() => setClassStudents([]));
   }, [classId]);
 
-  // 学情统计区（无章节）：始终按「全部章节」拉取，供概览与学情统计详细表（按课程+学生聚合）使用
+  // 学情统计区（无章节）：始终按「全部章节」拉取，供概览与学情统计详细表（按课程+学生聚合）使用；传时间范围使概览与详情表口径一致
   useEffect(() => {
     setLoading(true);
-    api.teacher.stats({ courseId, chapterId: undefined, classId }).then((data) => { setStats(data); setLoading(false); }).catch(() => setLoading(false));
-  }, [courseId, classId]);
+    const params = { courseId, chapterId: undefined, classId };
+    if (timeRange?.start && timeRange?.end) {
+      (params as { startDate?: string; endDate?: string }).startDate = timeRange.start;
+      (params as { startDate?: string; endDate?: string }).endDate = timeRange.end;
+    }
+    api.teacher.stats(params).then((data) => { setStats(data); setLoading(false); }).catch(() => setLoading(false));
+  }, [courseId, classId, timeRange?.start, timeRange?.end]);
 
   // 学情章节统计区：按所选章节拉取，供「学情章节统计详细表」使用
   const [statsChapter, setStatsChapter] = useState<typeof stats>(null);
@@ -335,14 +341,14 @@ export default function TeacherLearningData() {
         ai_irrelevant_count: 0,
       };
     }
-    const totalAsked = stats.top_asked.reduce((s, t) => s + t.count, 0);
+    const totalAskedFallback = stats.top_asked.reduce((s, t) => s + t.count, 0);
     return {
       preview_student_count: stats.preview_student_count ?? 0,
       preview_completion_rate: stats.preview_completion_rate,
       completed_question_count: stats.completed_question_count ?? 0,
       avg_accuracy_rate: stats.answer_accuracy_rate,
       feedback_question_count: stats.feedback_question_count ?? 0,
-      ai_question_count: totalAsked,
+      ai_question_count: stats.ai_ask_count ?? totalAskedFallback,
       ai_irrelevant_count: stats.ai_irrelevant_count ?? 0,
     };
   }, [stats]);

@@ -25,7 +25,7 @@ RAG_SYSTEM_PROMPT = """你是一名课程助教。请仅根据下面「课程知
 要求：
 1. 答案简洁，不超纲，仅基于给定片段；用 2～5 句直接回答，不要照抄课件原文。
 2. 答案正文中不要包含：页码（如 [第1页]）、学校/课程标题、日程（如 15min）、无关排版；引用由系统单独展示。
-3. 若问题与课程内容无关或无法从片段中找到依据，请回答「该问题未在课程知识库中匹配到相关内容，请结合教材与课堂 PPT 复习。」。
+3. 若问题与课程内容无关或无法从片段中找到依据，请仅回答「无法匹配到合适答案」（answer 字段只填这一句，ref_pages 填 []）。
 4. 仅输出 JSON，不要输出其他文字。格式：
 {"answer":"...","ref_pages":[7,8]}
 - answer: 字符串（仅简洁回答，勿带课件结构）
@@ -33,12 +33,6 @@ RAG_SYSTEM_PROMPT = """你是一名课程助教。请仅根据下面「课程知
 
 # 无 chunks 时返回的引用文案（前端会展示为「参考文档：当前问题在知识库中没有参考答案」）
 NO_CHUNKS_REF = "当前问题在知识库中没有参考答案"
-
-_NO_CHUNKS_PROMPT = """你是一名课程助教。当前用户问题在课程知识库中没有匹配到相关内容。
-请基于通用知识用 2～5 句简短、直接回答用户问题，不要提及知识库或检索。
-
-用户问题：{question}"""
-
 
 def _clean_answer_text(answer: str) -> str:
     text = (answer or "").strip()
@@ -283,25 +277,19 @@ def build_prompt(question: str, chunks: list[RetrievedChunk]) -> str:
 def generate_answer(
     question: str,
     chunks: list[RetrievedChunk],
-) -> tuple[str, str | None, str | None, bool, int | None, int | None]:
+) -> tuple[str, str | None, str | None, bool, int | None, int | None, str | None]:
     """
     根据检索结果生成答案。
-    返回 (answer, ppt_ref, knowledge_point, in_scope)。
+    返回 (answer, ppt_ref, knowledge_point, in_scope, reference_doc_id, reference_page, source_title)。
+    source_title：仅当来源为 doc_/slide_ 时的 chunk 标题（文档名/PPT 文件名），供「参考文档」展示用；kp_ 时为 None。
     """
     settings = get_rag_settings()
     llm = get_llm(settings)
     logger.warning("[RAG-TRACE] generate_answer enter chunks=%s question=%r", len(chunks or []), (question or "")[:80])
     if not chunks:
-        logger.warning("[RAG-TRACE] generate_answer no_chunks -> using LLM for answer, ref=%s", NO_CHUNKS_REF)
-        prompt = _NO_CHUNKS_PROMPT.format(question=question)
-        raw = llm.generate(
-            prompt,
-            max_tokens=min(settings.llm_max_tokens, 360),
-            temperature=settings.llm_temperature,
-        )
-        answer = _clean_answer_text((raw or "").strip()) or "请结合教材与课堂 PPT 复习。"
-        logger.warning("[RAG-TRACE] generate_answer no_chunks done answer_len=%s", len(answer))
-        return (answer, NO_CHUNKS_REF, None, True, None, None)
+        # 无 chunks 时不在此处调 LLM，由 qa.py 统一调用 _try_llm_answer_or_no_match，与情况 1、3 一致
+        logger.warning("[RAG-TRACE] generate_answer no_chunks -> return None for qa to try LLM, ref=%s", NO_CHUNKS_REF)
+        return (None, NO_CHUNKS_REF, None, True, None, None, None)
     prompt = build_prompt(question, chunks)
     raw = llm.generate(
         prompt,
@@ -336,14 +324,21 @@ def generate_answer(
     ppt_ref = "、".join([f"第{n}页" for n in page_nums]) if page_nums else (meta.get("page_ref") or None)
     if isinstance(ppt_ref, str) and not ppt_ref.strip():
         ppt_ref = None
-    knowledge_point = meta.get("title") or None
+    # 仅当命中来源为知识点（kp_）时，关联知识点才用其 title；doc_/slide_ 的 title 是文档名/文件名，不作为知识点展示
+    source_id = str(meta.get("source_id") or "").strip()
+    knowledge_point = (meta.get("title") or None) if source_id.startswith("kp_") else None
     if isinstance(knowledge_point, str) and not knowledge_point.strip():
         knowledge_point = None
+    # 参考文档名称：仅当来源为 doc_/slide_ 时取 chunk 标题（文档名或 PPT 文件名），用于「参考文档：xxx，第xx页」展示
+    source_title = None
+    if source_id.startswith("doc_") or source_id.startswith("slide_"):
+        t = meta.get("title")
+        source_title = (t or "").strip() or None
     in_scope = True  # 我们只检索了课程内内容
     reference_doc_id = _resolve_reference_doc(chunks)
     reference_page = page_nums[0] if page_nums else None
     logger.warning(
-        "[RAG-TRACE] generator_done chunks=%s llm_pages=%s available_pages=%s ppt_ref=%r knowledge_point=%r reference_doc_id=%r reference_page=%r answer_len=%s",
+        "[RAG-TRACE] generator_done chunks=%s llm_pages=%s available_pages=%s ppt_ref=%r knowledge_point=%r reference_doc_id=%r reference_page=%r source_title=%r answer_len=%s",
         len(chunks),
         llm_pages,
         sorted(list(available_pages))[:12],
@@ -351,6 +346,7 @@ def generate_answer(
         knowledge_point,
         reference_doc_id,
         reference_page,
+        source_title,
         len(answer),
     )
-    return answer, ppt_ref, knowledge_point, in_scope, reference_doc_id, reference_page
+    return answer, ppt_ref, knowledge_point, in_scope, reference_doc_id, reference_page, source_title
