@@ -1,5 +1,5 @@
 import { useState, useEffect, useMemo } from "react";
-import { api } from "../../api/client";
+import { api, API_BASE } from "../../api/client";
 
 const STAT_PERIODS = [
   { value: "7", label: "近7天" },
@@ -912,7 +912,7 @@ export default function TeacherLearningData() {
       const params = new URLSearchParams({ report: "overview" });
       if (courseId != null) params.set("course_id", String(courseId));
       if (chapterId != null) params.set("chapter_id", String(chapterId));
-      const url = (import.meta.env.VITE_API_BASE || "http://localhost:8000/api") + "/teacher/export/csv?" + params.toString();
+      const url = `${API_BASE}/teacher/export/csv?${params.toString()}`;
       const token = localStorage.getItem("token");
       fetch(url, { headers: token ? { Authorization: `Bearer ${token}` } : {} })
         .then((r) => r.blob())
