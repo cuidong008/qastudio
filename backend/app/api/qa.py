@@ -256,16 +256,21 @@ async def ask(
         r_ids = await db.execute(select(Chapter.id).where(Chapter.course_id == course_id))
         chapter_ids_by_course = [row[0] for row in r_ids.all()]
     else:
-        # 教师「全部课程」：仅允许教师，且在其名下全部课程的章节内检索
-        if not user or getattr(user, "role", None) not in ("teacher", "teaching_leader"):
+        # 教师/教研组长「全部课程」：在其名下全部课程的章节内检索；admin 不选课程时在全库章节内检索
+        role = getattr(user, "role", None) if user else None
+        if not user or role not in ("teacher", "teaching_leader", "admin"):
             raise HTTPException(status_code=400, detail="请选择课程")
-        r_courses = await db.execute(select(Course.id).where(Course.owner_teacher_id == user.id))
-        teacher_course_ids = [row[0] for row in r_courses.all()]
-        if not teacher_course_ids:
-            chapter_ids_by_course = []
-        else:
-            r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(teacher_course_ids)))
+        if role == "admin":
+            r_ch = await db.execute(select(Chapter.id))
             chapter_ids_by_course = [row[0] for row in r_ch.all()]
+        else:
+            r_courses = await db.execute(select(Course.id).where(Course.owner_teacher_id == user.id))
+            teacher_course_ids = [row[0] for row in r_courses.all()]
+            if not teacher_course_ids:
+                chapter_ids_by_course = []
+            else:
+                r_ch = await db.execute(select(Chapter.id).where(Chapter.course_id.in_(teacher_course_ids)))
+                chapter_ids_by_course = [row[0] for row in r_ch.all()]
 
     # RAG 开关：以数据库配置（后管台）为准；仅单课程时走 RAG
     try:

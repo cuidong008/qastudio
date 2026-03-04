@@ -931,6 +931,37 @@ export default function InClass({ variant = "student" }: { variant?: InClassVari
 
   return (
     <div className="student-chat-shell">
+      <style>{`
+        .student-chat-shell .student-chat-message-meta .student-chat-message-meta-actions {
+          display: inline-flex; gap: 4px; align-items: center;
+        }
+        .student-chat-shell .student-chat-message.from-user .student-chat-message-meta .student-chat-message-meta-actions {
+          margin-left: auto;
+        }
+        .student-chat-shell .student-chat-message.from-assistant .student-chat-message-meta .student-chat-message-meta-actions {
+          margin-left: 2em;
+        }
+        /* 强制覆盖任何 button 全局样式，与左侧会话行「重命名」「删除」同款 */
+        .student-chat-shell .student-chat-message-meta .student-chat-message-meta-actions button[data-chat-meta-btn],
+        .student-chat-shell .student-chat-message-meta .student-chat-message-meta-actions button {
+          min-height: 28px !important;
+          min-width: 0 !important;
+          padding: 4px 8px !important;
+          font-size: 12px !important;
+          font-family: inherit !important;
+          font-weight: 500 !important;
+          border-radius: 10px;
+          cursor: pointer;
+          border: none;
+          background: transparent;
+          color: var(--text-secondary);
+        }
+        .student-chat-shell .student-chat-message-meta .student-chat-message-meta-actions button[data-chat-meta-btn]:hover,
+        .student-chat-shell .student-chat-message-meta .student-chat-message-meta-actions button:hover {
+          background: var(--accent-hover-bg);
+          color: var(--text-primary);
+        }
+      `}</style>
       <aside className="student-chat-sidebar">
         <button type="button" className="btn-primary student-chat-new-btn" onClick={createNewSession}>
           + 新建对话
@@ -1112,16 +1143,34 @@ export default function InClass({ variant = "student" }: { variant?: InClassVari
                             : msg.knowledge_point}
                         </span>
                       )}
-                      <div style={{ display: "inline-flex", gap: 4 }}>
-                        <button type="button" className="btn-ghost" onClick={() => handleCopyMessage(msg)}>
+                      <div className="student-chat-message-meta-actions">
+                        <button
+                          type="button"
+                          className="btn-ghost btn-ghost-sm chat-meta-btn"
+                          data-chat-meta-btn
+                          style={{ minHeight: 28, minWidth: 0, padding: "4px 8px", fontSize: 12 }}
+                          onClick={() => handleCopyMessage(msg)}
+                        >
                           {copiedMessageId === msg.id ? "已复制" : "复制"}
                         </button>
                         {msg.role === "user" && (
-                          <button type="button" className="btn-ghost" onClick={() => handleEditQuestion(msg.id)}>
+                          <button
+                            type="button"
+                            className="btn-ghost btn-ghost-sm chat-meta-btn"
+                            data-chat-meta-btn
+                            style={{ minHeight: 28, minWidth: 0, padding: "4px 8px", fontSize: 12 }}
+                            onClick={() => handleEditQuestion(msg.id)}
+                          >
                             编辑
                           </button>
                         )}
-                        <button type="button" className="btn-ghost" onClick={() => handleRequestDeleteMessage(msg.id)}>
+                        <button
+                          type="button"
+                          className="btn-ghost btn-ghost-sm chat-meta-btn"
+                          data-chat-meta-btn
+                          style={{ minHeight: 28, minWidth: 0, padding: "4px 8px", fontSize: 12 }}
+                          onClick={() => handleRequestDeleteMessage(msg.id)}
+                        >
                           删除
                         </button>
                       </div>

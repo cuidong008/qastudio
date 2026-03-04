@@ -186,7 +186,11 @@ async def update_profile(
 
 
 @router.post("/password")
-async def change_password(payload: PasswordChangeIn, user: User | None = Depends(get_current_user)):
+async def change_password(
+    payload: PasswordChangeIn,
+    user: User | None = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
     if not user:
         raise HTTPException(status_code=401, detail="请先登录")
     if not payload.new_password or len(payload.new_password) < 6:
@@ -199,4 +203,5 @@ async def change_password(payload: PasswordChangeIn, user: User | None = Depends
         raise HTTPException(status_code=401, detail="当前密码错误")
 
     user.hashed_password = bcrypt.hashpw(payload.new_password.encode(), bcrypt.gensalt()).decode("utf-8")
+    await db.commit()
     return {"ok": True}

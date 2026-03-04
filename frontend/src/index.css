@@ -103,8 +103,9 @@ textarea::placeholder {
 }
 
 /* ===== Buttons ===== */
-button,
-[role="button"] {
+/* 排除小按钮（data 属性 + class），避免对话里复制/编辑/删除被全局大按钮覆盖 */
+button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
+[role="button"]:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]) {
   font-family: inherit;
   font-weight: 500;
   padding: 10px 18px;
@@ -660,6 +661,56 @@ button,
   font-size: 13px;
 }
 
+/* 每条消息下方的复制/编辑/删除：与左侧会话行同款尺寸 */
+.student-chat-message-meta .student-chat-message-meta-actions {
+  display: inline-flex;
+  gap: 4px;
+  align-items: center;
+}
+/* 问题（用户消息）：按钮靠右 */
+.student-chat-message.from-user .student-chat-message-meta .student-chat-message-meta-actions {
+  margin-left: auto;
+}
+/* 答案（助手消息）：按钮靠左，与前面提示文字间隔约两个汉字 */
+.student-chat-message.from-assistant .student-chat-message-meta .student-chat-message-meta-actions {
+  margin-left: 2em;
+}
+.student-chat-message-meta .student-chat-message-meta-actions button {
+  min-height: 28px !important;
+  min-width: 0 !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 500;
+  transition: all var(--transition);
+}
+.student-chat-message-meta .student-chat-message-meta-actions button:hover {
+  background: var(--accent-hover-bg);
+  color: var(--text-primary);
+}
+/* 保留 .btn-ghost-sm 供其它地方使用，与上方 meta-actions 同尺寸 */
+.btn-ghost-sm {
+  min-height: 28px !important;
+  min-width: 0 !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  border-radius: var(--radius-md);
+  cursor: pointer;
+  border: none;
+  background: transparent;
+  color: var(--text-secondary);
+  font-weight: 500;
+  transition: all var(--transition);
+}
+.btn-ghost-sm:hover {
+  background: var(--accent-hover-bg);
+  color: var(--text-primary);
+}
+
 .student-chat-message-meta .btn-secondary {
   min-height: 32px;
   padding: 6px 10px;
@@ -894,4 +945,26 @@ button,
   .student-chat-input-row {
     flex-direction: column;
   }
+}
+
+/* 对话消息下方「复制/编辑/删除」与左侧会话行同款（不要求直接父级是 meta-actions，只要在 message-meta 内且非参考文档按钮） */
+.student-chat-shell .student-chat-main .student-chat-message-list .student-chat-message .student-chat-message-meta .student-chat-message-meta-actions button,
+.student-chat-shell .student-chat-main .student-chat-message-list .student-chat-message .student-chat-message-meta button:not(.student-chat-ref-btn) {
+  min-height: 28px !important;
+  min-width: 0 !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
+  font-family: inherit !important;
+  font-weight: 500 !important;
+  border-radius: 10px !important;
+  cursor: pointer !important;
+  border: none !important;
+  background: transparent !important;
+  color: var(--text-secondary) !important;
+  transition: all var(--transition);
+}
+.student-chat-shell .student-chat-main .student-chat-message-list .student-chat-message .student-chat-message-meta .student-chat-message-meta-actions button:hover,
+.student-chat-shell .student-chat-main .student-chat-message-list .student-chat-message .student-chat-message-meta button:not(.student-chat-ref-btn):hover {
+  background: var(--accent-hover-bg) !important;
+  color: var(--text-primary) !important;
 }
