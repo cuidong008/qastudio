@@ -1,7 +1,12 @@
 """计算机网络基础课程智能体 - 后端入口"""
+from pathlib import Path
+
 from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.staticfiles import StaticFiles
+from fastapi.responses import FileResponse
+from starlette.exceptions import HTTPException as StarletteHTTPException
 
 from .config import settings
 from .db import init_db
@@ -54,7 +59,18 @@ app.include_router(feedback.router, prefix="/api")
 app.include_router(student.router, prefix="/api")
 app.include_router(admin.router, prefix="/api")
 
+# 生产部署：若存在编译后的前端静态目录，则由后端托管（同源，单容器）
+STATIC_DIR = Path(__file__).resolve().parent.parent / "static"
+if (STATIC_DIR / "index.html").exists():
+    app.mount("/", StaticFiles(directory=str(STATIC_DIR), html=True), name="static")
 
-@app.get("/")
-def root():
-    return {"app": settings.app_name, "docs": "/docs"}
+    @app.exception_handler(StarletteHTTPException)
+    async def spa_fallback(request, exc: StarletteHTTPException):
+        if exc.status_code != 404 or request.url.path.startswith("/api"):
+            raise exc
+        return FileResponse(STATIC_DIR / "index.html", media_type="text/html")
+else:
+
+    @app.get("/")
+    def root():
+        return {"app": settings.app_name, "docs": "/docs"}
