@@ -1,0 +1,31 @@
+# Git
+.git
+.gitignore
+
+# 前端
+frontend/node_modules
+frontend/dist
+frontend/.vite
+frontend/*.local
+*.log
+npm-debug.log*
+
+# 后端
+backend/__pycache__
+backend/**/__pycache__
+backend/.env
+backend/*.db
+backend/uploads
+backend/rag_vector_store
+backend/static
+
+# 文档与无关
+docs
+*.md
+!README.md
+
+# IDE / 其他
+.cursor
+.vscode
+*.swp
+.DS_Store

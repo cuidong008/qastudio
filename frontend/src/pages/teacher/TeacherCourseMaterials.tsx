@@ -41,7 +41,7 @@ export default function TeacherCourseMaterials() {
     chapter_ids: number[];
   }>({ student_visible: true, downloadable: true, chapter_ids: [] });
   const [docTaskByDoc, setDocTaskByDoc] = useState<Record<number, { taskId: number; status: string }>>({});
-  const [docTaskErrorByDoc, setDocTaskErrorByDoc] = useState<Record<number, string>>({});
+  const [docTaskErrorByDoc, _setDocTaskErrorByDoc] = useState<Record<number, string>>({});
 
   const loadChapters = () => {
     if (!courseId) return;

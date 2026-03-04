@@ -1,0 +1,24 @@
+services:
+  app:
+    build: .
+    image: qastudio:latest
+    container_name: qastudio
+    ports:
+      - "8000:8000"
+    environment:
+      - APP_NAME=计算机网络基础课程智能体
+      - DEBUG=false
+      - DATABASE_URL=sqlite+aiosqlite:////data/qastudio.db
+      - SECRET_KEY=${SECRET_KEY:-asdfaksdfjasdfkasljdkfasjklfasjklf}
+      - CORS_ORIGINS=*
+      - UPLOAD_DIR=/data/uploads
+      - RAG_VECTOR_STORE_PATH=/data/rag_vector_store
+      # 可选：RAG / PDF 等
+      # - PDF_PARSE_ENGINE=pypdf
+      # - RAG_EMBEDDING_EXTERNAL_BATCH_SIZE=10
+    volumes:
+      - qastudio_data:/data
+    restart: unless-stopped
+
+volumes:
+  qastudio_data:

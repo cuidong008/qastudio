@@ -133,7 +133,13 @@ export default function TeacherLearningData() {
   const [customEnd, setCustomEnd] = useState("");
   const [stats, setStats] = useState<{
     preview_completion_rate: number;
-    top_asked: { question: string; count: number }[];
+    preview_student_count?: number;
+    completed_question_count?: number;
+    feedback_question_count?: number;
+    ai_irrelevant_count?: number;
+    weak_knowledge_point_course_ids?: (number | null)[];
+    weak_knowledge_point_wrong_counts?: number[];
+    top_asked: { question: string; count: number; course_id?: number | null }[];
     answer_accuracy_rate: number;
     weak_knowledge_points: string[];
   } | null>(null);
@@ -577,6 +583,7 @@ export default function TeacherLearningData() {
     detailTableRawFromApi.forEach((r) => { m[`${r.course_id}-${r.student_id}`] = r.preview_rate; });
     return m;
   }, [detailTableRawFromApi]);
+  void previewRateByCourseStudent; // 预留供学情章节表按 (课程,学生) 显示预习率
 
   /** 学情章节表专用：按 (课程, 学生) 已完成的章节 id 集合，每行按「本章是否完成」显示 100% 或 0% */
   const previewCompletedChapterIds = useMemo(() => {
@@ -715,6 +722,7 @@ export default function TeacherLearningData() {
     }
     return rows;
   }, [courses, chapters, students, classStudents, filteredClasses, courseId, chapterId, classId, detailStudentId, stats, courseStats, chapterStats]);
+  void learningDetailRows; // 预留，学情课程统计详细表已改用 detailTableRowsFromApi
 
   // 学情课程统计详细表使用 detailTableRowsFromApi（后端按课程+学生维度接口），不再使用前端聚合的 learningDetailRowsNoChapter
 
@@ -726,7 +734,6 @@ export default function TeacherLearningData() {
     const studentList = detailChapterStudentId != null ? baseStudentList.filter((stu) => stu.id === detailChapterStudentId) : baseStudentList;
     const maxStudents = 50;
     const avgAccuracy = s?.answer_accuracy_rate ?? 0;
-    const studentsInSlice = Math.min(studentList.length, maxStudents);
 
     const classFor = (cid: number, uid: number) => classNamesByCourseStudent[`${cid}-${uid}`] ?? "—";
     /** 学情章节表：按「本章」是否完成预习，完成=100%，未完成=0%；章节为「全部」时显示 — */
@@ -1512,7 +1519,7 @@ export default function TeacherLearningData() {
                 ) : feedbackPaginated.length === 0 ? (
                   <tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "var(--text-muted)" }}>暂无反馈记录</td></tr>
                 ) : (
-                  feedbackPaginated.map((r, i) => (
+                  feedbackPaginated.map((r, _i) => (
                     <tr key={r.id} style={{ borderBottom: "1px solid var(--border)" }}>
                       <td style={{ padding: "10px 8px" }}>{r.course_name}</td>
                       <td style={{ padding: "10px 8px", maxWidth: 200 }}>{r.feedback_text}</td>
