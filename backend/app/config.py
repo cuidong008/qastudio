@@ -7,7 +7,11 @@ class Settings(BaseSettings):
     debug: bool = False
     database_url: str = "sqlite+aiosqlite:///./qastudio.db"
     secret_key: str = "change-me-in-production"
+    # 静态文件目录（前端构建产物）。空则用 backend/static；可设绝对路径
+    static_dir: str = ""
     cors_origins: str = "http://localhost:5173,http://localhost:5174"
+    # 通过本机 IP 访问时设为 "https?://.*" 以允许任意 Origin（仅建议本地/内网使用）
+    cors_origin_regex: str = ""
     upload_dir: str = "./uploads"
     pdf_parse_engine: str = "mineru_then_pypdf"  # mineru | pypdf | mineru_then_pypdf
     mineru_lang: str = "ch"  # 中文 OCR

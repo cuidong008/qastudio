@@ -1,4 +1,5 @@
-const API_BASE = import.meta.env.VITE_API_BASE || "http://localhost:8000/api";
+/** 相对路径 /api 表示与页面同源（通过 ip:端口 访问时请求会发到同一台机）；开发时可设 VITE_API_BASE=http://localhost:7000/api */
+export const API_BASE = import.meta.env.VITE_API_BASE ?? "/api";
 
 /** 模型提供商（API Key 返回 ***） */
 export type RagProvider = {
