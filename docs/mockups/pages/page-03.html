@@ -1,0 +1,137 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>题库管理页面原型</title>
+  <style>
+    :root {
+      --bg: #f2f5f9;
+      --card: #ffffff;
+      --line: #d9dee8;
+      --muted: #5f6b7a;
+      --title: #1f2a37;
+      --accent: #1f6feb;
+      --side: #eef3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #edf2ff, #f5f8fc 45%, #eefaf6);
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--title);
+      padding: 28px;
+    }
+    .board {
+      width: 1380px;
+      margin: 0 auto 30px auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: 0 14px 36px rgba(9, 30, 66, 0.08);
+      overflow: hidden;
+    }
+    .head {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+      font-weight: 700;
+      font-size: 22px;
+      letter-spacing: .5px;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 270px 1fr;
+      min-height: 620px;
+    }
+    .side {
+      background: var(--side);
+      border-right: 1px solid var(--line);
+      padding: 16px;
+    }
+    .side h4 {
+      margin: 10px 0 6px;
+      font-size: 16px;
+    }
+    .nav {
+      margin: 0;
+      padding-left: 16px;
+      color: #2f3c4f;
+      line-height: 1.9;
+      font-size: 14px;
+    }
+    .current { color: var(--accent); font-weight: 700; }
+    .main {
+      padding: 16px;
+      background: #fbfcff;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      padding: 16px;
+      min-height: 560px;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 4px 0 14px;
+    }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; font-size: 14px; }
+    .hr { border-top: 1px dashed var(--line); margin: 12px 0; }
+    .tag { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: #f8fbff; }
+    .btn { border: 1px solid #9db8ef; border-radius: 8px; padding: 6px 14px; background: #f3f8ff; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f7faff; }
+    .small { font-size: 12px; color: var(--muted); }
+    .upload {
+      border: 1px dashed #9bb3d3;
+      border-radius: 10px;
+      padding: 20px;
+      text-align: center;
+      background: #fbfdff;
+      color: #44536a;
+    }
+  </style>
+</head>
+<body>
+<section class="board">
+    <div class="head">题库管理 / 生成试卷</div>
+    <div class="shell">
+      <aside class="side">
+        <h4>习题库管理</h4><ul class="nav"><li>生成习题</li><li>导入习题</li><li>习题库查询/查看</li></ul>
+        <h4>试卷库管理</h4><ul class="nav"><li class="current">生成试卷（当前）</li><li>导入试卷</li><li>试卷库查询/编辑</li></ul>
+      </aside>
+      <main class="main"><div class="panel">
+        <div class="title">生成试卷</div>
+        <div class="row"><b>基础筛选：</b><span class="tag">课程</span><span class="tag">章节</span></div>
+        <div class="row"><b>基础信息：</b><span class="tag">试卷标题</span><span class="tag">导入试卷库类型</span><span class="tag">题库来源</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>难度配置：</b><span class="tag">整卷难度系数（可选，默认0.8）</span></div>
+        <div class="row"><b>题型分数配置：</b><span class="tag">单选2</span><span class="tag">多选4</span><span class="tag">判断1</span><span class="tag">填空2</span><span class="tag">问答10</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>题型数量 & 难度（多行）：</b></div>
+        <table>
+          <thead><tr><th>题型</th><th>数量</th><th>难度系数</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>单选题</td><td>10</td><td>0.8</td><td>删除</td></tr>
+            <tr><td>多选题</td><td>5</td><td>0.7</td><td>删除</td></tr>
+            <tr><td>判断题</td><td>10</td><td>0.9</td><td>删除</td></tr>
+          </tbody>
+        </table>
+        <div class="row"><span class="btn">添加题型配置</span><span class="btn">预览试卷</span><span class="btn">提交生成</span><span class="btn">下载Word</span></div>
+      </div></main>
+    </div>
+  </section>
+</body>
+</html>

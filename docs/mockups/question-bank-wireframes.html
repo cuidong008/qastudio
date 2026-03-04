@@ -1,0 +1,355 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>题库管理页面原型</title>
+  <style>
+    :root {
+      --bg: #f2f5f9;
+      --card: #ffffff;
+      --line: #d9dee8;
+      --muted: #5f6b7a;
+      --title: #1f2a37;
+      --accent: #1f6feb;
+      --side: #eef3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #edf2ff, #f5f8fc 45%, #eefaf6);
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--title);
+      padding: 28px;
+    }
+    .board {
+      width: 1380px;
+      margin: 0 auto 30px auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: 0 14px 36px rgba(9, 30, 66, 0.08);
+      overflow: hidden;
+    }
+    .head {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+      font-weight: 700;
+      font-size: 22px;
+      letter-spacing: .5px;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 270px 1fr;
+      min-height: 620px;
+    }
+    .side {
+      background: var(--side);
+      border-right: 1px solid var(--line);
+      padding: 16px;
+    }
+    .side h4 {
+      margin: 10px 0 6px;
+      font-size: 16px;
+    }
+    .nav {
+      margin: 0;
+      padding-left: 16px;
+      color: #2f3c4f;
+      line-height: 1.9;
+      font-size: 14px;
+    }
+    .current { color: var(--accent); font-weight: 700; }
+    .main {
+      padding: 16px;
+      background: #fbfcff;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      padding: 16px;
+      min-height: 560px;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 4px 0 14px;
+    }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; font-size: 14px; }
+    .hr { border-top: 1px dashed var(--line); margin: 12px 0; }
+    .tag { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: #f8fbff; }
+    .btn { border: 1px solid #9db8ef; border-radius: 8px; padding: 6px 14px; background: #f3f8ff; }
+    .radio {
+      display: inline-flex;
+      align-items: center;
+      gap: 6px;
+      font-size: 14px;
+      color: #253142;
+      margin-right: 10px;
+    }
+    .dot {
+      width: 14px;
+      height: 14px;
+      border-radius: 50%;
+      border: 1.5px solid #8ea3bf;
+      background: #fff;
+      display: inline-block;
+      position: relative;
+    }
+    .dot.checked::after {
+      content: \"\";
+      position: absolute;
+      left: 3px;
+      top: 3px;
+      width: 6px;
+      height: 6px;
+      border-radius: 50%;
+      background: #1f6feb;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f7faff; }
+    .small { font-size: 12px; color: var(--muted); }
+    .field-line {
+      display: grid;
+      grid-template-columns: 70px 1fr;
+      align-items: center;
+      gap: 10px;
+      margin: 8px 0;
+      font-size: 14px;
+    }
+    .field-label {
+      font-weight: 600;
+      color: #253142;
+    }
+    .select-box {
+      border: 1px solid var(--line);
+      border-radius: 8px;
+      padding: 8px 12px;
+      background: #f8fbff;
+      color: #4b5a70;
+      width: 320px;
+      display: inline-flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    .field-inline {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 8px 0;
+      font-size: 14px;
+      flex-wrap: wrap;
+    }
+    .type-table {
+      width: 732px;
+    }
+    .upload {
+      border: 1px dashed #9bb3d3;
+      border-radius: 10px;
+      padding: 20px;
+      text-align: center;
+      background: #fbfdff;
+      color: #44536a;
+    }
+  </style>
+</head>
+<body>
+  <section class="board">
+    <div class="head">题库管理 / 总览</div>
+    <div class="shell">
+      <aside class="side">
+        <h4>习题库管理</h4>
+        <ul class="nav">
+          <li>生成习题</li>
+          <li>导入习题</li>
+          <li>习题库查看/编辑</li>
+        </ul>
+        <h4>试卷库管理</h4>
+        <ul class="nav">
+          <li>生成试卷</li>
+          <li>导入试卷</li>
+          <li>试卷库查看/编辑</li>
+        </ul>
+      </aside>
+      <main class="main">
+        <div class="panel">
+          <div class="title">主内容区：对应功能名称</div>
+          <div class="upload">功能操作区（根据左侧菜单动态切换）</div>
+        </div>
+      </main>
+    </div>
+  </section>
+
+  <section class="board">
+    <div class="head">题库管理 / 生成习题</div>
+    <div class="shell">
+      <aside class="side">
+        <h4>习题库管理</h4>
+        <ul class="nav">
+          <li class="current">生成习题</li>
+          <li>导入习题</li>
+          <li>习题库查看/编辑</li>
+        </ul>
+        <h4>试卷库管理</h4>
+        <ul class="nav"><li>生成试卷</li><li>导入试卷</li><li>试卷库查看/编辑</li></ul>
+      </aside>
+      <main class="main"><div class="panel">
+        <div class="title">生成习题</div>
+        <div class="field-inline">
+          <span class="field-label">课程</span><span class="select-box">请选择课程 <span>▼</span></span>
+          <span class="field-label">章节</span><span class="select-box">请选择章节 <span>▼</span></span>
+        </div>
+        <div class="hr"></div>
+        <div class="row">
+          <b>加入题库类型：</b>
+          <span class="radio"><span class="dot checked"></span>训练库（默认）</span>
+          <span class="radio"><span class="dot"></span>考试用题库</span>
+        </div>
+        <div class="hr"></div>
+        <div class="row"><b>题目类型配置：</b></div>
+        <table class="type-table">
+          <thead><tr><th>题型</th><th>最大数量</th><th>难度系数（0-1）</th></tr></thead>
+          <tbody>
+            <tr><td>单选题</td><td>10</td><td>0.8</td></tr>
+            <tr><td>多选题</td><td>10</td><td>0.8</td></tr>
+            <tr><td>判断题</td><td>10</td><td>0.8</td></tr>
+            <tr><td>填空题</td><td>10</td><td>0.8</td></tr>
+            <tr><td>问答题</td><td>5</td><td>0.8</td></tr>
+          </tbody>
+        </table>
+        <div class="row" style="margin-top:12px;"><span class="btn">重置</span><span class="btn">提交生成</span></div>
+      </div></main>
+    </div>
+  </section>
+
+  <section class="board">
+    <div class="head">题库管理 / 生成试卷</div>
+    <div class="shell">
+      <aside class="side">
+        <h4>习题库管理</h4><ul class="nav"><li>生成习题</li><li>导入习题</li><li>习题库查询/查看</li></ul>
+        <h4>试卷库管理</h4><ul class="nav"><li class="current">生成试卷（当前）</li><li>导入试卷</li><li>试卷库查询/编辑</li></ul>
+      </aside>
+      <main class="main"><div class="panel">
+        <div class="title">生成试卷</div>
+        <div class="row"><b>基础筛选：</b><span class="tag">课程</span><span class="tag">章节</span></div>
+        <div class="row"><b>基础信息：</b><span class="tag">试卷标题</span><span class="tag">导入试卷库类型</span><span class="tag">题库来源</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>难度配置：</b><span class="tag">整卷难度系数（可选，默认0.8）</span></div>
+        <div class="row"><b>题型分数配置：</b><span class="tag">单选2</span><span class="tag">多选4</span><span class="tag">判断1</span><span class="tag">填空2</span><span class="tag">问答10</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>题型数量 & 难度（多行）：</b></div>
+        <table>
+          <thead><tr><th>题型</th><th>数量</th><th>难度系数</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>单选题</td><td>10</td><td>0.8</td><td>删除</td></tr>
+            <tr><td>多选题</td><td>5</td><td>0.7</td><td>删除</td></tr>
+            <tr><td>判断题</td><td>10</td><td>0.9</td><td>删除</td></tr>
+          </tbody>
+        </table>
+        <div class="row"><span class="btn">添加题型配置</span><span class="btn">预览试卷</span><span class="btn">提交生成</span><span class="btn">下载Word</span></div>
+      </div></main>
+    </div>
+  </section>
+
+  <section class="board">
+    <div class="head">导入习题</div>
+    <div class="shell">
+      <aside class="side"><h4>习题库管理</h4><ul class="nav"><li>生成习题</li><li class="current">导入习题（当前）</li><li>习题库查看/编辑</li></ul></aside>
+      <main class="main"><div class="panel">
+        <div class="row"><b>基础筛选：</b><span class="tag">课程（必选）</span><span class="tag">章节（必选，可多选）</span><span class="tag">导入至习题库类型</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>导入规则：</b><span class="small">支持 .doc/.docx/.pdf；确认导入前状态为待审核</span></div>
+        <div class="upload">点击选择文件 / 拖拽上传（支持多文件）</div>
+        <div class="row"><span class="btn">选择文件</span><span class="btn">上传文件</span><span class="btn">清空文件</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>导入后习题预览：</b></div>
+        <table>
+          <thead><tr><th>序号</th><th>课程</th><th>章节</th><th>题型</th><th>题干</th><th>难度</th><th>知识点</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>计算机网络</td><td>第一章</td><td>单选题</td><td>XXX...</td><td>0.8</td><td>网络协议</td><td>待审核</td><td>编辑/删除</td></tr>
+            <tr><td>2</td><td>计算机网络</td><td>第二章</td><td>多选题</td><td>XXX...</td><td>0.7</td><td>路由</td><td>待审核</td><td>编辑/删除</td></tr>
+          </tbody>
+        </table>
+        <div class="row"><span class="btn">重置</span><span class="btn">确认导入（批量审核）</span></div>
+      </div></main>
+    </div>
+  </section>
+
+  <section class="board">
+    <div class="head">习题库查看/编辑</div>
+    <div class="shell">
+      <aside class="side"><h4>习题库管理</h4><ul class="nav"><li>生成习题</li><li>导入习题</li><li class="current">习题库查看/编辑（当前）</li></ul></aside>
+      <main class="main"><div class="panel">
+        <div class="row"><b>高级筛选：</b><span class="tag">课程</span><span class="tag">章节</span><span class="tag">题库类型</span><span class="tag">题目类型</span><span class="tag">难度系数区间</span><span class="tag">状态</span></div>
+        <div class="row"><span class="btn">查询</span><span class="btn">重置筛选</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>习题列表（分页/批量操作）：</b></div>
+        <table>
+          <thead><tr><th>序号</th><th>课程</th><th>章节</th><th>题型</th><th>难度</th><th>关联知识点</th><th>题库类型</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>计算机网络</td><td>第一章</td><td>单选题</td><td>0.8</td><td>网络协议</td><td>训练库</td><td>已审核</td><td>查看/编辑/保存/删除</td></tr>
+            <tr><td>2</td><td>高等数学</td><td>第二章</td><td>填空题</td><td>0.7</td><td>导数</td><td>考试用题库</td><td>待审核</td><td>查看/编辑/保存/删除</td></tr>
+          </tbody>
+        </table>
+        <div class="row"><span class="btn">批量删除</span><span class="btn">导出习题列表</span></div>
+      </div></main>
+    </div>
+  </section>
+
+  <section class="board">
+    <div class="head">导入试卷</div>
+    <div class="shell">
+      <aside class="side"><h4>试卷库管理</h4><ul class="nav"><li>生成试卷</li><li class="current">导入试卷（当前）</li><li>试卷库查看/编辑</li></ul></aside>
+      <main class="main"><div class="panel">
+        <div class="row"><b>基础筛选：</b><span class="tag">课程（必选）</span><span class="tag">章节（关联课程）</span><span class="tag">导入至试卷库类型</span></div>
+        <div class="hr"></div>
+        <div class="row"><b>导入规则：</b><span class="small">支持 .doc/.docx/.pdf；确认前状态为待审核</span></div>
+        <div class="upload">点击选择文件 / 拖拽上传（支持多文件）</div>
+        <div class="row"><span class="btn">选择文件</span><span class="btn">上传文件</span><span class="btn">清空文件</span></div>
+        <div class="hr"></div>
+        <table>
+          <thead><tr><th>序号</th><th>试卷标题</th><th>课程</th><th>试卷库类型</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>计算机网络期末试卷</td><td>计算机网络</td><td>训练库</td><td>待审核</td><td>编辑/删除</td></tr>
+            <tr><td>2</td><td>高等数学期中试卷</td><td>高等数学</td><td>正式题库</td><td>待审核</td><td>编辑/删除</td></tr>
+          </tbody>
+        </table>
+        <div class="row"><span class="btn">重置</span><span class="btn">确认导入（批量审核）</span></div>
+      </div></main>
+    </div>
+  </section>
+
+  <section class="board">
+    <div class="head">试卷库查看/编辑</div>
+    <div class="shell">
+      <aside class="side"><h4>试卷库管理</h4><ul class="nav"><li>生成试卷</li><li>导入试卷</li><li class="current">试卷库查看/编辑（当前）</li></ul></aside>
+      <main class="main"><div class="panel">
+        <div class="row"><b>高级筛选：</b><span class="tag">课程</span><span class="tag">章节</span><span class="tag">试卷库类型</span><span class="tag">整卷难度区间</span><span class="tag">标题关键字</span><span class="tag">状态</span></div>
+        <div class="row"><span class="btn">查询</span><span class="btn">重置筛选</span></div>
+        <div class="hr"></div>
+        <table>
+          <thead><tr><th>序号</th><th>试卷标题</th><th>课程</th><th>试卷库类型</th><th>整卷难度</th><th>题型构成</th><th>状态</th><th>操作</th></tr></thead>
+          <tbody>
+            <tr><td>1</td><td>计算机网络期末试卷</td><td>计算机网络</td><td>训练库</td><td>0.8</td><td>单选20/多选10...</td><td>已审核</td><td>查看/编辑/保存/下载Word/删除</td></tr>
+            <tr><td>2</td><td>高等数学期中试卷</td><td>高等数学</td><td>正式题库</td><td>0.7</td><td>填空15/问答5...</td><td>待审核</td><td>查看/编辑/保存/下载Word/删除</td></tr>
+          </tbody>
+        </table>
+        <div class="row"><span class="btn">批量删除</span><span class="btn">导出试卷列表</span></div>
+        <p class="small">下载Word时隐藏每题难度系数与知识点。</p>
+      </div></main>
+    </div>
+  </section>
+</body>
+</html>

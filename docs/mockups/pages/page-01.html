@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>题库管理页面原型</title>
+  <style>
+    :root {
+      --bg: #f2f5f9;
+      --card: #ffffff;
+      --line: #d9dee8;
+      --muted: #5f6b7a;
+      --title: #1f2a37;
+      --accent: #1f6feb;
+      --side: #eef3ff;
+    }
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      background: linear-gradient(135deg, #edf2ff, #f5f8fc 45%, #eefaf6);
+      font-family: "PingFang SC", "Microsoft YaHei", sans-serif;
+      color: var(--title);
+      padding: 28px;
+    }
+    .board {
+      width: 1380px;
+      margin: 0 auto 30px auto;
+      border: 1px solid var(--line);
+      border-radius: 14px;
+      background: var(--card);
+      box-shadow: 0 14px 36px rgba(9, 30, 66, 0.08);
+      overflow: hidden;
+    }
+    .head {
+      padding: 14px 20px;
+      border-bottom: 1px solid var(--line);
+      font-weight: 700;
+      font-size: 22px;
+      letter-spacing: .5px;
+    }
+    .shell {
+      display: grid;
+      grid-template-columns: 270px 1fr;
+      min-height: 620px;
+    }
+    .side {
+      background: var(--side);
+      border-right: 1px solid var(--line);
+      padding: 16px;
+    }
+    .side h4 {
+      margin: 10px 0 6px;
+      font-size: 16px;
+    }
+    .nav {
+      margin: 0;
+      padding-left: 16px;
+      color: #2f3c4f;
+      line-height: 1.9;
+      font-size: 14px;
+    }
+    .current { color: var(--accent); font-weight: 700; }
+    .main {
+      padding: 16px;
+      background: #fbfcff;
+    }
+    .panel {
+      border: 1px solid var(--line);
+      border-radius: 10px;
+      background: #fff;
+      padding: 16px;
+      min-height: 560px;
+    }
+    .title {
+      font-size: 20px;
+      font-weight: 700;
+      margin: 4px 0 14px;
+    }
+    .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; margin: 8px 0; font-size: 14px; }
+    .hr { border-top: 1px dashed var(--line); margin: 12px 0; }
+    .tag { border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px; background: #f8fbff; }
+    .btn { border: 1px solid #9db8ef; border-radius: 8px; padding: 6px 14px; background: #f3f8ff; }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      margin-top: 8px;
+      font-size: 13px;
+    }
+    th, td {
+      border: 1px solid var(--line);
+      padding: 7px 8px;
+      text-align: left;
+      vertical-align: top;
+    }
+    th { background: #f7faff; }
+    .small { font-size: 12px; color: var(--muted); }
+    .upload {
+      border: 1px dashed #9bb3d3;
+      border-radius: 10px;
+      padding: 20px;
+      text-align: center;
+      background: #fbfdff;
+      color: #44536a;
+    }
+  </style>
+</head>
+<body>
+<section class="board">
+    <div class="head">题库管理 / 总览</div>
+    <div class="shell">
+      <aside class="side">
+        <h4>习题库管理</h4>
+        <ul class="nav">
+          <li>生成习题</li>
+          <li>导入习题</li>
+          <li>习题库查看/编辑</li>
+        </ul>
+        <h4>试卷库管理</h4>
+        <ul class="nav">
+          <li>生成试卷</li>
+          <li>导入试卷</li>
+          <li>试卷库查看/编辑</li>
+        </ul>
+      </aside>
+      <main class="main">
+        <div class="panel">
+          <div class="title">主内容区：对应功能名称</div>
+          <div class="upload">功能操作区（根据左侧菜单动态切换）</div>
+        </div>
+      </main>
+    </div>
+  </section>
+</body>
+</html>
