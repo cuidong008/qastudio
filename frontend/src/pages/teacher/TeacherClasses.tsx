@@ -62,8 +62,8 @@ export default function TeacherClasses() {
   const [importResult, setImportResult] = useState<{ imported: number; not_found: string[]; message: string } | null>(null);
 
   const load = () => {
-    setLoading(true);
-    // 班级列表先返回先展示，课程列表并行拉取用于新建/编辑表单
+    // 首屏只请求班级列表，表格更快展示；课程列表在打开新建/编辑弹窗时再拉
+    if (classes.length === 0) setLoading(true);
     api.teacher.classes
       .list()
       .then((classList) => {
@@ -74,23 +74,39 @@ export default function TeacherClasses() {
         setClasses([]);
         setLoading(false);
       });
+  };
+
+  const [coursesLoading, setCoursesLoading] = useState(false);
+  const loadCoursesIfNeeded = () => {
+    if (courses.length > 0 || coursesLoading) return;
+    setCoursesLoading(true);
     api.teacher.courses
       .list()
       .then((courseList) => setCourses(courseList.map((c) => ({ id: c.id, name: c.name, code: c.code }))))
-      .catch(() => setCourses([]));
+      .catch(() => setCourses([]))
+      .finally(() => setCoursesLoading(false));
   };
 
   useEffect(() => {
     load();
   }, []);
 
+  // 新建时课程列表加载完成后自动选中第一项
+  useEffect(() => {
+    if (modal === "create" && courses.length > 0 && !form.course_id) {
+      setForm((f) => ({ ...f, course_id: String(courses[0].id) }));
+    }
+  }, [modal, courses, form.course_id]);
+
   const openCreate = () => {
+    loadCoursesIfNeeded();
     setForm({ name: "", term: "", course_id: courses[0] ? String(courses[0].id) : "" });
     setModal("create");
     setError("");
   };
 
   const openEdit = (c: ClassItem) => {
+    loadCoursesIfNeeded();
     setEditId(c.id);
     setForm({ name: c.name, term: c.term || "", course_id: c.course_id ? String(c.course_id) : "" });
     setModal("edit");
@@ -288,23 +304,27 @@ export default function TeacherClasses() {
         </span>
       </div>
 
-      {loading ? (
-        <p style={{ color: "var(--text-muted)" }}>加载中…</p>
-      ) : (
-        <div className="card" style={{ overflowX: "auto" }}>
-          <table style={{ width: "100%", borderCollapse: "collapse" }}>
-            <thead>
+      <div className="card" style={{ overflowX: "auto" }}>
+        <table style={{ width: "100%", borderCollapse: "collapse" }}>
+          <thead>
+            <tr style={{ borderBottom: "1px solid var(--border)" }}>
+              <th style={{ textAlign: "left", padding: "10px 12px" }}>ID</th>
+              <th style={{ textAlign: "left", padding: "10px 12px" }}>班级</th>
+              <th style={{ textAlign: "left", padding: "10px 12px" }}>学期</th>
+              <th style={{ textAlign: "left", padding: "10px 12px" }}>关联课程</th>
+              <th style={{ textAlign: "left", padding: "10px 12px" }}>学生数</th>
+              <th style={{ textAlign: "left", padding: "10px 12px" }}>操作</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading && classes.length === 0 ? (
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>ID</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>班级</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>学期</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>关联课程</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>学生数</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>操作</th>
+                <td colSpan={6} style={{ padding: "24px 12px", color: "var(--text-muted)", textAlign: "center" }}>
+                  加载中…
+                </td>
               </tr>
-            </thead>
-            <tbody>
-              {pagedClasses.map((c) => (
+            ) : (
+              pagedClasses.map((c) => (
                 <tr key={c.id} style={{ borderBottom: "1px solid var(--border)" }}>
                   <td style={{ padding: "10px 12px" }}>{c.id}</td>
                   <td style={{ padding: "10px 12px" }}>{c.name}</td>
@@ -329,7 +349,8 @@ export default function TeacherClasses() {
                     </button>
                   </td>
                 </tr>
-              ))}
+              ))
+            )}
             </tbody>
           </table>
           <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
@@ -358,7 +379,6 @@ export default function TeacherClasses() {
             </span>
           </div>
         </div>
-      )}
 
       {modal && (
         <div
@@ -380,7 +400,7 @@ export default function TeacherClasses() {
               <label>
                 <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>关联课程</span>
                 <select value={form.course_id} onChange={(e) => setForm((f) => ({ ...f, course_id: e.target.value }))} style={{ width: "100%" }}>
-                  <option value="">请选择课程</option>
+                  <option value="">{coursesLoading ? "加载课程中…" : "请选择课程"}</option>
                   {courses.map((c) => (
                     <option key={c.id} value={c.id}>
                       {c.name}

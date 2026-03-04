@@ -181,6 +181,11 @@ button,
 .nav-link.active span {
   color: var(--accent-hover) !important;
 }
+/* 当前页菜单项悬停时：与其它按钮一致，背景蓝、文字白 */
+.nav-link.active:hover,
+.nav-link.active:hover span {
+  color: #ffffff !important;
+}
 
 /* ===== Utility Classes ===== */
 .text-muted { color: var(--text-muted); }

@@ -464,13 +464,17 @@ export default function TeacherCourses() {
     setLoading(true);
     api.teacher.courses
       .list()
-      .then(async (rows) => {
+      .then((rows) => {
         setList(rows);
         listRef.current = rows;
-        await recoverCachedReindexTasks();
-        await syncActiveReindexTasks();
-        await recoverCachedQuestionTasks();
-        await syncActiveQuestionTasks();
+        setLoading(false);
+        // 课程表先展示，索引/习题任务状态在后台同步，不阻塞首屏
+        void (async () => {
+          await recoverCachedReindexTasks();
+          await syncActiveReindexTasks();
+          await recoverCachedQuestionTasks();
+          await syncActiveQuestionTasks();
+        })();
       })
       .catch(() => setList([]))
       .finally(() => setLoading(false));

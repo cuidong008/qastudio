@@ -62,6 +62,39 @@ def _migrate_class_course_owner(sync_conn):
         pass
 
 
+def _migrate_classes_owner_teacher_id_index(sync_conn):
+    """为 classes(owner_teacher_id) 创建索引，列表按教师过滤时走索引。新插入数据会自动入索引。"""
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_classes_owner_teacher_id ON classes(owner_teacher_id)"))
+    except Exception:
+        pass  # 索引已存在或数据库不支持 IF NOT EXISTS
+
+
+def _migrate_classes_student_count(sync_conn):
+    """为 classes 表增加 student_count 列并回填，列表查询直接读该列。增删学生时业务层同步更新。"""
+    try:
+        sync_conn.execute(text("ALTER TABLE classes ADD COLUMN student_count INTEGER NOT NULL DEFAULT 0"))
+    except Exception:
+        pass  # 列已存在
+    # 按 student_class_memberships 回填每个班级的真实人数
+    try:
+        sync_conn.execute(
+            text(
+                "UPDATE classes SET student_count = (SELECT COUNT(*) FROM student_class_memberships WHERE student_class_memberships.class_id = classes.id)"
+            )
+        )
+    except Exception:
+        pass
+
+
+def _migrate_classes_course_id_index(sync_conn):
+    """为 classes(course_id) 创建索引，列表 Class LEFT JOIN Course 时走索引。"""
+    try:
+        sync_conn.execute(text("CREATE INDEX IF NOT EXISTS ix_classes_course_id ON classes(course_id)"))
+    except Exception:
+        pass
+
+
 def _migrate_user_student_no(sync_conn):
     """为已有 users 表添加 student_no 列（SQLite）"""
     try:
@@ -671,6 +704,9 @@ async def init_db():
         await conn.run_sync(_migrate_course_owner_teacher_id)
         await conn.run_sync(_migrate_courses_remark)
         await conn.run_sync(_migrate_class_course_owner)
+        await conn.run_sync(_migrate_classes_owner_teacher_id_index)
+        await conn.run_sync(_migrate_classes_student_count)
+        await conn.run_sync(_migrate_classes_course_id_index)
         await conn.run_sync(_migrate_user_student_no)
         await conn.run_sync(_migrate_user_avatar_url)
         await conn.run_sync(_migrate_user_username_changed_at)

@@ -42,8 +42,9 @@ class Class(Base):
     id = Column(Integer, primary_key=True, autoincrement=True)
     name = Column(String(64), nullable=False)
     term = Column(String(32), nullable=True)  # 学期
-    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True)  # 班级关联课程
-    owner_teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True)  # 管理教师
+    course_id = Column(Integer, ForeignKey("courses.id"), nullable=True, index=True)  # 班级关联课程，列表 JOIN 用
+    owner_teacher_id = Column(Integer, ForeignKey("users.id"), nullable=True, index=True)  # 管理教师，列表按此过滤
+    student_count = Column(Integer, default=0, nullable=False)  # 冗余计数，增删学生时同步更新，列表查询免子查询
     created_at = Column(DateTime, default=datetime.utcnow)
 
 

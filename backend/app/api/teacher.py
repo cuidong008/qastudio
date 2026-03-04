@@ -5382,33 +5382,37 @@ async def list_teacher_classes(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
-    r = await db.execute(select(Class).where(Class.owner_teacher_id == user.id).order_by(Class.id))
-    rows = r.scalars().all()
-    course_ids = [c.course_id for c in rows if c.course_id is not None]
-    courses: dict[int, str] = {}
-    if course_ids:
-        r_course = await db.execute(select(Course).where(Course.id.in_(course_ids)))
-        courses = {c.id: c.name for c in r_course.scalars().all()}
-    counts: dict[int, int] = {}
-    if rows:
-        r_count = await db.execute(
-            select(StudentClassMembership.class_id, func.count(StudentClassMembership.student_id))
-            .where(StudentClassMembership.class_id.in_([c.id for c in rows]))
-            .group_by(StudentClassMembership.class_id)
+    # 只查列表需要的列，减少 ORM 与 I/O；单表 + LEFT JOIN courses 取 name
+    stmt = (
+        select(
+            Class.id,
+            Class.name,
+            Class.term,
+            Class.course_id,
+            Class.owner_teacher_id,
+            Class.student_count,
+            Class.created_at,
+            Course.name.label("course_name"),
         )
-        counts = {cid: cnt for cid, cnt in r_count.all()}
+        .select_from(Class)
+        .outerjoin(Course, Class.course_id == Course.id)
+        .where(Class.owner_teacher_id == user.id)
+        .order_by(Class.id)
+    )
+    r = await db.execute(stmt)
+    rows = r.all()
     return [
         TeacherClassOut(
-            id=c.id,
-            name=c.name,
-            term=c.term,
-            course_id=c.course_id,
-            course_name=courses.get(c.course_id) if c.course_id else None,
-            owner_teacher_id=c.owner_teacher_id,
-            student_count=counts.get(c.id, 0),
-            created_at=c.created_at.isoformat() if c.created_at else None,
+            id=row.id,
+            name=row.name,
+            term=row.term,
+            course_id=row.course_id,
+            course_name=row.course_name,
+            owner_teacher_id=row.owner_teacher_id,
+            student_count=int(row.student_count or 0),
+            created_at=row.created_at.isoformat() if row.created_at else None,
         )
-        for c in rows
+        for row in rows
     ]
 
 
@@ -5495,10 +5499,6 @@ async def update_teacher_class(
             )
     await db.commit()
     await db.refresh(c)
-    r_count = await db.execute(
-        select(func.count(StudentClassMembership.student_id)).where(StudentClassMembership.class_id == c.id)
-    )
-    student_count = r_count.scalar() or 0
     if not next_course and c.course_id is not None:
         r_course = await db.execute(select(Course).where(Course.id == c.course_id))
         next_course = r_course.scalar_one_or_none()
@@ -5509,7 +5509,7 @@ async def update_teacher_class(
         course_id=c.course_id,
         course_name=next_course.name if next_course else None,
         owner_teacher_id=c.owner_teacher_id,
-        student_count=student_count,
+        student_count=int(c.student_count or 0),
         created_at=c.created_at.isoformat() if c.created_at else None,
     )
 
@@ -5588,7 +5588,7 @@ async def assign_students_to_teacher_class(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
-    await _require_owned_class(db, user.id, class_id)
+    c = await _require_owned_class(db, user.id, class_id)
     ids = [i for i in body.student_ids if isinstance(i, int)]
     qry = select(User).where(User.role == UserRole.student.value)
     if ids:
@@ -5616,6 +5616,8 @@ async def assign_students_to_teacher_class(
         if not r_ex.scalar_one_or_none():
             db.add(StudentClassMembership(student_id=s.id, class_id=class_id))
             assigned += 1
+    if assigned > 0:
+        c.student_count = (c.student_count or 0) + assigned
     await db.commit()
     return {"ok": True, "assigned": assigned}
 
@@ -5628,7 +5630,7 @@ async def import_students_to_teacher_class(
     user: User = Depends(require_teacher),
 ):
     """通过上传填好的模版文件，按学号匹配用户表，将学生批量加入班级。匹配不到学号的行不导入。"""
-    await _require_owned_class(db, user.id, class_id)
+    c = await _require_owned_class(db, user.id, class_id)
     if not file.filename:
         raise HTTPException(status_code=400, detail="请选择文件")
     raw = await file.read()
@@ -5686,6 +5688,8 @@ async def import_students_to_teacher_class(
         db.add(StudentClassMembership(student_id=u.id, class_id=class_id))
         existing_ids.add(u.id)
         imported += 1
+    if imported > 0:
+        c.student_count = (c.student_count or 0) + imported
     await db.commit()
     return {
         "ok": True,
@@ -5703,7 +5707,7 @@ async def remove_student_from_teacher_class(
     db: AsyncSession = Depends(get_db),
     user: User = Depends(require_teacher),
 ):
-    await _require_owned_class(db, user.id, class_id)
+    c = await _require_owned_class(db, user.id, class_id)
     r = await db.execute(
         select(StudentClassMembership).where(
             StudentClassMembership.class_id == class_id,
@@ -5714,6 +5718,7 @@ async def remove_student_from_teacher_class(
     if not m:
         raise HTTPException(status_code=404, detail="该学生不在班级中")
     await db.delete(m)
+    c.student_count = max(0, (c.student_count or 0) - 1)
     await db.commit()
     return {"ok": True}
 

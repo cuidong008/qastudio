@@ -8,6 +8,9 @@ from .session import (
     _migrate_chapter_course_id,
     _migrate_course_owner_teacher_id,
     _migrate_class_course_owner,
+    _migrate_classes_owner_teacher_id_index,
+    _migrate_classes_student_count,
+    _migrate_classes_course_id_index,
     _migrate_user_student_no,
     _migrate_user_avatar_url,
     _backfill_student_class_memberships,
@@ -108,6 +111,9 @@ async def run_seed():
         await conn.run_sync(_migrate_chapter_course_id)
         await conn.run_sync(_migrate_course_owner_teacher_id)
         await conn.run_sync(_migrate_class_course_owner)
+        await conn.run_sync(_migrate_classes_owner_teacher_id_index)
+        await conn.run_sync(_migrate_classes_student_count)
+        await conn.run_sync(_migrate_classes_course_id_index)
         await conn.run_sync(_migrate_user_student_no)
         await conn.run_sync(_migrate_user_avatar_url)
         await conn.run_sync(_backfill_student_class_memberships)

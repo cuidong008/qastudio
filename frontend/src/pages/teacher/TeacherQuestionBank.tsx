@@ -56,6 +56,8 @@ const menuGroups: { title: string; items: MenuItem[] }[] = [
   },
 ];
 
+const EXERCISE_GENERATE_DEFAULTS_STORAGE_KEY = "qastudio.exerciseGenerateDefaults";
+
 const defaultTypeConfigs: QuestionTypeConfig[] = [
   { key: "single_choice", label: "单选题", max: 10, difficulty: 0.8 },
   { key: "multiple_choice", label: "多选题", max: 10, difficulty: 0.8 },
@@ -63,6 +65,49 @@ const defaultTypeConfigs: QuestionTypeConfig[] = [
   { key: "blank", label: "填空题", max: 10, difficulty: 0.8 },
   { key: "qa", label: "问答题", max: 5, difficulty: 0.8 },
 ];
+
+type ExerciseDefaultPerType = { max: number; difficulty: number };
+function loadSavedExerciseDefaults(): Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> | null {
+  try {
+    const raw = localStorage.getItem(EXERCISE_GENERATE_DEFAULTS_STORAGE_KEY);
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, { max?: number; difficulty?: number }>;
+    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+    const out: Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> = {};
+    for (const k of keys) {
+      const v = parsed[k];
+      if (v && typeof v.max === "number" && Number.isFinite(v.max) && typeof v.difficulty === "number" && Number.isFinite(v.difficulty)) {
+        out[k] = {
+          max: Math.max(0, Math.min(30, v.max)),
+          difficulty: Math.max(0, Math.min(1, v.difficulty)),
+        };
+      }
+    }
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
+function loadSavedExerciseDefaultsCompat(): Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> | null {
+  const fromNew = loadSavedExerciseDefaults();
+  if (fromNew) return fromNew;
+  try {
+    const raw = localStorage.getItem("qastudio.exerciseGenerateDefaultMax");
+    if (!raw) return null;
+    const parsed = JSON.parse(raw) as Record<string, number>;
+    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+    const out: Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> = {};
+    for (const k of keys) {
+      if (typeof parsed[k] === "number" && Number.isFinite(parsed[k])) {
+        out[k] = { max: Math.max(0, Math.min(30, parsed[k])), difficulty: 0.8 };
+      }
+    }
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
 
 const itemByKey = menuGroups.flatMap((g) => g.items).reduce<Record<QuestionBankPageKey, MenuItem>>(
   (acc, item) => {
@@ -91,6 +136,9 @@ function GenerateExercisesPanel() {
   const [exerciseDefaultRowsFromApi, setExerciseDefaultRowsFromApi] = useState<
     { type: string; max: number; difficulty: string }[] | null
   >(null);
+  const [savedExerciseDefaults, setSavedExerciseDefaults] = useState<Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> | null>(
+    () => loadSavedExerciseDefaultsCompat()
+  );
   const defaultExerciseTypeConfigs = useMemo(() => {
     if (!exerciseDefaultRowsFromApi?.length) return defaultTypeConfigs;
     const byType = Object.fromEntries(exerciseDefaultRowsFromApi.map((r) => [r.type, r]));
@@ -99,18 +147,27 @@ function GenerateExercisesPanel() {
       const fromApi = byType[key];
       if (!fromApi) return row;
       const difficultyNum = parseFloat(String(fromApi.difficulty));
+      const apiMax = Number.isFinite(fromApi.max) ? Math.max(0, Math.min(30, fromApi.max)) : row.max;
+      const apiDifficulty =
+        Number.isFinite(difficultyNum) && difficultyNum >= 0 && difficultyNum <= 1 ? difficultyNum : row.difficulty;
+      const saved = savedExerciseDefaults?.[key];
       return {
         key: row.key,
         label: row.label,
-        max: Number.isFinite(fromApi.max) ? Math.max(0, Math.min(30, fromApi.max)) : row.max,
-        difficulty:
-          Number.isFinite(difficultyNum) && difficultyNum >= 0 && difficultyNum <= 1
-            ? difficultyNum
-            : row.difficulty,
+        max: saved != null ? saved.max : apiMax,
+        difficulty: saved != null ? saved.difficulty : apiDifficulty,
       };
     });
-  }, [exerciseDefaultRowsFromApi]);
+  }, [exerciseDefaultRowsFromApi, savedExerciseDefaults]);
   const [typeConfigs, setTypeConfigs] = useState<QuestionTypeConfig[]>(defaultTypeConfigs);
+  const [generateSettingsModalOpen, setGenerateSettingsModalOpen] = useState(false);
+  const [generateSettingsDraft, setGenerateSettingsDraft] = useState<Record<QuestionTypeKey, { max: number; difficulty: number }>>({
+    single_choice: { max: 10, difficulty: 0.8 },
+    multiple_choice: { max: 10, difficulty: 0.8 },
+    judge: { max: 10, difficulty: 0.8 },
+    blank: { max: 10, difficulty: 0.8 },
+    qa: { max: 5, difficulty: 0.8 },
+  });
 
   useEffect(() => {
     api.teacher
@@ -251,6 +308,74 @@ function GenerateExercisesPanel() {
     setProgressPercent(0);
     setProgressText("");
     setProgressState("idle");
+  };
+
+  const openGenerateSettingsModal = () => {
+    const draft: Record<QuestionTypeKey, { max: number; difficulty: number }> = {
+      single_choice: {
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "single_choice")?.max ?? 10,
+        difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "single_choice")?.difficulty ?? 0.8,
+      },
+      multiple_choice: {
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "multiple_choice")?.max ?? 10,
+        difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "multiple_choice")?.difficulty ?? 0.8,
+      },
+      judge: {
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "judge")?.max ?? 10,
+        difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "judge")?.difficulty ?? 0.8,
+      },
+      blank: {
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "blank")?.max ?? 10,
+        difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "blank")?.difficulty ?? 0.8,
+      },
+      qa: {
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "qa")?.max ?? 5,
+        difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "qa")?.difficulty ?? 0.8,
+      },
+    };
+    setGenerateSettingsDraft(draft);
+    setGenerateSettingsModalOpen(true);
+  };
+
+  const saveGenerateSettings = () => {
+    const toSave: Record<QuestionTypeKey, ExerciseDefaultPerType> = { ...generateSettingsDraft };
+    localStorage.setItem(EXERCISE_GENERATE_DEFAULTS_STORAGE_KEY, JSON.stringify(toSave));
+    setSavedExerciseDefaults(toSave);
+    setTypeConfigs((prev) =>
+      prev.map((row) => ({
+        ...row,
+        max: generateSettingsDraft[row.key]?.max ?? row.max,
+        difficulty: generateSettingsDraft[row.key]?.difficulty ?? row.difficulty,
+      }))
+    );
+    setGenerateSettingsModalOpen(false);
+    toast("生成设置已保存", "success");
+  };
+
+  const clearGenerateSettingsOverrides = () => {
+    localStorage.removeItem(EXERCISE_GENERATE_DEFAULTS_STORAGE_KEY);
+    localStorage.removeItem("qastudio.exerciseGenerateDefaultMax");
+    setSavedExerciseDefaults(null);
+    if (exerciseDefaultRowsFromApi?.length) {
+      const byType = Object.fromEntries(exerciseDefaultRowsFromApi.map((r) => [r.type, r]));
+      const d = (k: QuestionTypeKey) => {
+        const r = byType[k];
+        const difficultyNum = parseFloat(String(r?.difficulty));
+        return {
+          max: Math.max(0, Math.min(30, r?.max ?? 10)),
+          difficulty:
+            Number.isFinite(difficultyNum) && difficultyNum >= 0 && difficultyNum <= 1 ? difficultyNum : 0.8,
+        };
+      };
+      setGenerateSettingsDraft({
+        single_choice: d("single_choice"),
+        multiple_choice: d("multiple_choice"),
+        judge: d("judge"),
+        blank: d("blank"),
+        qa: d("qa"),
+      });
+    }
+    toast("已恢复为配置文件中的初始值", "success");
   };
 
   const pollGenerateTasks = async (taskIds: number[]) => {
@@ -403,7 +528,105 @@ function GenerateExercisesPanel() {
 
   return (
     <>
-      <h2 style={{ marginTop: 0, marginBottom: 12, fontSize: 20, fontWeight: 700 }}>生成习题</h2>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>生成习题</h2>
+        <button type="button" className="btn-secondary" onClick={openGenerateSettingsModal}>
+          生成设置
+        </button>
+      </div>
+      {generateSettingsModalOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.4)",
+          }}
+          onClick={(e) => e.target === e.currentTarget && setGenerateSettingsModalOpen(false)}
+        >
+          <div
+            style={{
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              padding: 20,
+              minWidth: 360,
+              maxWidth: "90vw",
+              color: "var(--text-primary)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>生成设置</div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ marginBottom: 8, color: "var(--text-secondary)", fontSize: 14 }}>各题型默认：最大数量、难度系数</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 320 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>题型</th>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>最大数量</th>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>难度系数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((key) => {
+                      const label = defaultTypeConfigs.find((c) => c.key === key)!.label;
+                      return (
+                        <tr key={key}>
+                          <td style={{ border: "1px solid var(--border)", padding: 8 }}>{label}</td>
+                          <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                            <input
+                              type="number"
+                              min={0}
+                              max={30}
+                              step={1}
+                              value={generateSettingsDraft[key].max}
+                              onChange={(e) => {
+                                const v = Math.max(0, Math.min(30, Number(e.target.value) || 0));
+                                setGenerateSettingsDraft((prev) => ({ ...prev, [key]: { ...prev[key], max: v } }));
+                              }}
+                              style={{ width: 88, padding: "4px 8px" }}
+                            />
+                          </td>
+                          <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                            <input
+                              type="number"
+                              min={0}
+                              max={1}
+                              step={0.01}
+                              value={generateSettingsDraft[key].difficulty}
+                              onChange={(e) => {
+                                const v = Math.max(0, Math.min(1, Number(e.target.value) || 0));
+                                setGenerateSettingsDraft((prev) => ({ ...prev, [key]: { ...prev[key], difficulty: v } }));
+                              }}
+                              style={{ width: 88, padding: "4px 8px" }}
+                            />
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn-secondary" onClick={clearGenerateSettingsOverrides}>
+                恢复初始值
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setGenerateSettingsModalOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="btn-primary" onClick={saveGenerateSettings}>
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div
         style={{
           border: "1px solid var(--border)",
@@ -890,7 +1113,10 @@ function ImportExercisesPanel() {
 
   return (
     <>
-      <h2 style={{ marginTop: 0, marginBottom: 12, fontSize: 20, fontWeight: 700 }}>导入习题</h2>
+      <h2 style={{ marginTop: 0, marginBottom: 4, fontSize: 20, fontWeight: 700 }}>导入习题</h2>
+      <p style={{ margin: "0 0 12px", fontSize: 14, color: "var(--text-secondary)" }}>
+        可以自动识别试卷等文件中记录的习题和答案并导入
+      </p>
       <div
         style={{
           border: "1px solid var(--border)",
@@ -2410,6 +2636,49 @@ function ExerciseManagePanel() {
   );
 }
 
+const PAPER_GENERATE_DEFAULTS_STORAGE_KEY = "qastudio.paperGenerateDefaults";
+
+type PaperDefaultPerType = { count: number; difficulty: number; score: number };
+function loadSavedPaperDefaults(): Partial<Record<QuestionTypeKey, PaperDefaultPerType>> | null {
+  try {
+    const raw = localStorage.getItem(PAPER_GENERATE_DEFAULTS_STORAGE_KEY);
+    if (raw) {
+      const parsed = JSON.parse(raw) as Record<string, { count?: number; difficulty?: number; score?: number }>;
+      const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+      const out: Partial<Record<QuestionTypeKey, PaperDefaultPerType>> = {};
+      for (const k of keys) {
+        const v = parsed[k];
+        if (
+          v &&
+          typeof v.count === "number" && Number.isFinite(v.count) &&
+          typeof v.difficulty === "number" && Number.isFinite(v.difficulty) &&
+          typeof v.score === "number" && Number.isFinite(v.score)
+        ) {
+          out[k] = {
+            count: Math.max(0, Math.min(100, v.count)),
+            difficulty: Math.max(0, Math.min(1, v.difficulty)),
+            score: Math.max(0, v.score),
+          };
+        }
+      }
+      if (Object.keys(out).length) return out;
+    }
+    const rawLegacy = localStorage.getItem("qastudio.paperGenerateDefaultCount");
+    if (!rawLegacy) return null;
+    const parsed = JSON.parse(rawLegacy) as Record<string, number>;
+    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+    const out: Partial<Record<QuestionTypeKey, PaperDefaultPerType>> = {};
+    for (const k of keys) {
+      if (typeof parsed[k] === "number" && Number.isFinite(parsed[k])) {
+        out[k] = { count: Math.max(0, Math.min(100, parsed[k])), difficulty: 0.8, score: 2 };
+      }
+    }
+    return Object.keys(out).length ? out : null;
+  } catch {
+    return null;
+  }
+}
+
 const FALLBACK_PAPER_DEFAULT_CONFIGS: Array<{ id: number; type: QuestionTypeKey; count: number; difficulty: string; score: number }> = [
   { id: 1, type: "single_choice", count: 10, difficulty: "0.8", score: 2 },
   { id: 2, type: "multiple_choice", count: 10, difficulty: "0.8", score: 4 },
@@ -2451,20 +2720,38 @@ function GeneratePapersPanel() {
   const [questionSource, setQuestionSource] = useState<"local" | "internet">("local");
   const [overallDifficulty, setOverallDifficulty] = useState<string>("0.8");
   const [defaultRowsFromApi, setDefaultRowsFromApi] = useState<{ type: string; count: number; difficulty: string; score: number }[] | null>(null);
+  const [savedPaperDefaults, setSavedPaperDefaults] = useState<Partial<Record<QuestionTypeKey, PaperDefaultPerType>> | null>(
+    () => loadSavedPaperDefaults()
+  );
   const defaultConfigs = useMemo(() => {
     if (!defaultRowsFromApi || !defaultRowsFromApi.length) return FALLBACK_PAPER_DEFAULT_CONFIGS;
-    return defaultRowsFromApi.map((row, i) => ({
-      id: i + 1,
-      type: row.type as QuestionTypeKey,
-      count: row.count,
-      difficulty: String(row.difficulty),
-      score: row.score,
-    }));
-  }, [defaultRowsFromApi]);
+    return defaultRowsFromApi.map((row, i) => {
+      const type = row.type as QuestionTypeKey;
+      const saved = savedPaperDefaults?.[type];
+      return {
+        id: i + 1,
+        type,
+        count: Math.max(
+          0,
+          Math.min(100, saved != null ? saved.count : row.count)
+        ),
+        difficulty: saved != null ? String(saved.difficulty) : String(row.difficulty),
+        score: saved != null ? saved.score : row.score,
+      };
+    });
+  }, [defaultRowsFromApi, savedPaperDefaults]);
   const [configs, setConfigs] = useState<Array<{ id: number; type: QuestionTypeKey; count: number; difficulty: string; score: number }>>(
     () => FALLBACK_PAPER_DEFAULT_CONFIGS
   );
   const nextConfigIdRef = useRef(6);
+  const [paperSettingsModalOpen, setPaperSettingsModalOpen] = useState(false);
+  const [paperSettingsDraft, setPaperSettingsDraft] = useState<Record<QuestionTypeKey, { count: number; difficulty: number; score: number }>>({
+    single_choice: { count: 10, difficulty: 0.8, score: 2 },
+    multiple_choice: { count: 10, difficulty: 0.8, score: 4 },
+    judge: { count: 10, difficulty: 0.8, score: 1 },
+    blank: { count: 10, difficulty: 0.8, score: 2 },
+    qa: { count: 5, difficulty: 0.8, score: 10 },
+  });
   const isValidDifficultyText = (value: string) => /^\d*(\.\d{0,2})?$/.test(value);
   const typeLabelMap: Record<QuestionTypeKey, string> = {
     single_choice: "单选题",
@@ -2483,16 +2770,9 @@ function GeneratePapersPanel() {
 
   useEffect(() => {
     if (!defaultRowsFromApi || !defaultRowsFromApi.length) return;
-    const next = defaultRowsFromApi.map((row, i) => ({
-      id: i + 1,
-      type: row.type as QuestionTypeKey,
-      count: row.count,
-      difficulty: String(row.difficulty),
-      score: row.score,
-    }));
-    setConfigs(next);
-    nextConfigIdRef.current = next.length + 1;
-  }, [defaultRowsFromApi]);
+    setConfigs([...defaultConfigs]);
+    nextConfigIdRef.current = defaultConfigs.length + 1;
+  }, [defaultRowsFromApi, defaultConfigs]);
 
   useEffect(() => {
     setLoadingCourses(true);
@@ -2566,6 +2846,75 @@ function GeneratePapersPanel() {
     setConfigs([...defaultConfigs]);
     setChapterIds(chapters.map((x) => x.id));
     setPreviewResult(null);
+  };
+
+  const openPaperSettingsModal = () => {
+    const draft: Record<QuestionTypeKey, { count: number; difficulty: number; score: number }> = {
+      single_choice: (() => {
+        const r = defaultConfigs.find((x) => x.type === "single_choice");
+        return { count: r?.count ?? 10, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 2 };
+      })(),
+      multiple_choice: (() => {
+        const r = defaultConfigs.find((x) => x.type === "multiple_choice");
+        return { count: r?.count ?? 10, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 4 };
+      })(),
+      judge: (() => {
+        const r = defaultConfigs.find((x) => x.type === "judge");
+        return { count: r?.count ?? 10, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 1 };
+      })(),
+      blank: (() => {
+        const r = defaultConfigs.find((x) => x.type === "blank");
+        return { count: r?.count ?? 10, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 2 };
+      })(),
+      qa: (() => {
+        const r = defaultConfigs.find((x) => x.type === "qa");
+        return { count: r?.count ?? 5, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 10 };
+      })(),
+    };
+    setPaperSettingsDraft(draft);
+    setPaperSettingsModalOpen(true);
+  };
+
+  const savePaperSettings = () => {
+    const toSave: Record<QuestionTypeKey, PaperDefaultPerType> = { ...paperSettingsDraft };
+    localStorage.setItem(PAPER_GENERATE_DEFAULTS_STORAGE_KEY, JSON.stringify(toSave));
+    setSavedPaperDefaults(toSave);
+    setConfigs((prev) =>
+      prev.map((row) => {
+        const d = paperSettingsDraft[row.type];
+        return d
+          ? { ...row, count: d.count, difficulty: String(d.difficulty), score: d.score }
+          : row;
+      })
+    );
+    setPaperSettingsModalOpen(false);
+    toast("生成设置已保存", "success");
+  };
+
+  const clearPaperSettingsOverrides = () => {
+    localStorage.removeItem(PAPER_GENERATE_DEFAULTS_STORAGE_KEY);
+    localStorage.removeItem("qastudio.paperGenerateDefaultCount");
+    setSavedPaperDefaults(null);
+    if (defaultRowsFromApi?.length) {
+      const byType = Object.fromEntries(defaultRowsFromApi.map((r) => [r.type, r]));
+      const d = (k: QuestionTypeKey) => {
+        const r = byType[k];
+        const diff = parseFloat(String(r?.difficulty));
+        return {
+          count: Math.max(0, Math.min(100, r?.count ?? 10)),
+          difficulty: Number.isFinite(diff) && diff >= 0 && diff <= 1 ? diff : 0.8,
+          score: Number(r?.score) ?? 2,
+        };
+      };
+      setPaperSettingsDraft({
+        single_choice: d("single_choice"),
+        multiple_choice: d("multiple_choice"),
+        judge: d("judge"),
+        blank: d("blank"),
+        qa: d("qa"),
+      });
+    }
+    toast("已恢复为配置文件中的初始值", "success");
   };
 
   const validate = () => {
@@ -2672,7 +3021,116 @@ function GeneratePapersPanel() {
 
   return (
     <>
-      <h2 style={{ marginTop: 0, marginBottom: 12, fontSize: 20, fontWeight: 700 }}>生成试卷</h2>
+      <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", marginBottom: 12, gap: 12 }}>
+        <h2 style={{ margin: 0, fontSize: 20, fontWeight: 700 }}>生成试卷</h2>
+        <button type="button" className="btn-secondary" onClick={openPaperSettingsModal}>
+          生成设置
+        </button>
+      </div>
+      {paperSettingsModalOpen && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            zIndex: 1000,
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            background: "rgba(0,0,0,0.4)",
+          }}
+          onClick={(e) => e.target === e.currentTarget && setPaperSettingsModalOpen(false)}
+        >
+          <div
+            style={{
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              borderRadius: 12,
+              padding: 20,
+              minWidth: 360,
+              maxWidth: "90vw",
+              color: "var(--text-primary)",
+              boxShadow: "0 8px 24px rgba(0,0,0,0.15)",
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div style={{ fontSize: 18, fontWeight: 700, marginBottom: 16 }}>生成设置</div>
+            <div style={{ marginBottom: 16 }}>
+              <div style={{ marginBottom: 8, color: "var(--text-secondary)", fontSize: 14 }}>各题型默认：数量、难度系数、每题分数</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 400 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>题型</th>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>数量</th>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>难度系数</th>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>每题分数</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((key) => (
+                      <tr key={key}>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{typeLabelMap[key]}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          <input
+                            type="number"
+                            min={0}
+                            max={100}
+                            step={1}
+                            value={paperSettingsDraft[key].count}
+                            onChange={(e) => {
+                              const v = Math.max(0, Math.min(100, Number(e.target.value) || 0));
+                              setPaperSettingsDraft((prev) => ({ ...prev, [key]: { ...prev[key], count: v } }));
+                            }}
+                            style={{ width: 72, padding: "4px 8px" }}
+                          />
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          <input
+                            type="number"
+                            min={0}
+                            max={1}
+                            step={0.01}
+                            value={paperSettingsDraft[key].difficulty}
+                            onChange={(e) => {
+                              const v = Math.max(0, Math.min(1, Number(e.target.value) || 0));
+                              setPaperSettingsDraft((prev) => ({ ...prev, [key]: { ...prev[key], difficulty: v } }));
+                            }}
+                            style={{ width: 72, padding: "4px 8px" }}
+                          />
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          <input
+                            type="number"
+                            min={0}
+                            step={0.1}
+                            value={paperSettingsDraft[key].score}
+                            onChange={(e) => {
+                              const v = Math.max(0, Number(e.target.value) || 0);
+                              setPaperSettingsDraft((prev) => ({ ...prev, [key]: { ...prev[key], score: v } }));
+                            }}
+                            style={{ width: 72, padding: "4px 8px" }}
+                          />
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+            <div style={{ display: "flex", justifyContent: "flex-end", gap: 8, flexWrap: "wrap" }}>
+              <button type="button" className="btn-secondary" onClick={clearPaperSettingsOverrides}>
+                恢复初始值
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setPaperSettingsModalOpen(false)}>
+                取消
+              </button>
+              <button type="button" className="btn-primary" onClick={savePaperSettings}>
+                保存
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
       <div
         style={{
           border: "1px solid var(--border)",

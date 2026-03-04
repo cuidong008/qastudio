@@ -52,7 +52,7 @@ export default function Login() {
             color: "var(--text-primary)",
           }}
         >
-          计算机网络基础 · 课程智能体
+          电子商务学院 · 课程智能体
         </h1>
         <p
           style={{
