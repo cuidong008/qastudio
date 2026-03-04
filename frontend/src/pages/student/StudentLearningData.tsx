@@ -69,7 +69,7 @@ const PAGE_SIZE_OPTIONS = [10, 20, 30, 50] as const;
 
 export default function StudentLearningData({
   inWorkspace = false,
-  onGoQa,
+  onGoQa: _onGoQa,
   courseId: initialCourseId,
 }: {
   inWorkspace?: boolean;
@@ -156,7 +156,6 @@ export default function StudentLearningData({
     if (chapterList.length === 0 && courseId != null) {
       chapterList.push({ id: 0, title: "全部" });
     }
-    const chapterMap = new Map(chapters.map((ch) => [ch.id, ch.title]));
     for (const r of rawData) {
       let chList: { id: number; title: string }[];
       if (courseId != null) {

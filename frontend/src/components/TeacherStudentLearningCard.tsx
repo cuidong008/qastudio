@@ -270,8 +270,6 @@ export default function TeacherStudentLearningCard({
     );
   }
 
-  const timeRange = getTimeRange(period, customStart, customEnd);
-
   return (
     <div className="teacher-learning-card" style={{ padding: 12, background: "var(--bg-subtle)", borderRadius: 8, marginTop: 8 }}>
       <p style={{ margin: "0 0 12px", fontSize: 13 }}>

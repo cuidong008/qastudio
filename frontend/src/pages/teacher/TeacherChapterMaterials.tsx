@@ -383,7 +383,7 @@ export default function TeacherChapterMaterials(props: TeacherChapterMaterialsPr
                       doc.parse_status === "processing" ||
                       docTaskByDoc[doc.id]?.status === "pending" ||
                       docTaskByDoc[doc.id]?.status === "running";
-                    const singleChapter = (doc.chapter_ids?.length ?? 0) === 1;
+                    const singleChapter = doc.chapter_id != null;
                     const canParse = doc.source_type === "pdf_upload" && !isProcessing;
                     return (
                       <tr

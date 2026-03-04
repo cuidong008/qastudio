@@ -705,6 +705,7 @@ export default function TeacherCourses() {
       blank_difficulty_score: 0.8,
     });
   };
+  void openGenerateQuestionsModal; // 保留供后续 UI 挂载使用
 
   const pollQuestionTask = async (chapterId: number, taskId: number, courseId: number | null) => {
     if (taskId <= 0) return;
