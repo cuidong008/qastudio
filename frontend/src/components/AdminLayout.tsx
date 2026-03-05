@@ -21,7 +21,14 @@ export default function AdminLayout() {
   if (!user || user.role !== "admin") return null;
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        ...(isQaHome ? { height: "100vh", overflow: "hidden" } : {}),
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <header
         style={{
           background: "var(--bg-surface)",
@@ -43,7 +50,7 @@ export default function AdminLayout() {
           <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
             {user.display_name || user.username}（管理员）
           </span>
-          <Link to="/teacher" className="btn-ghost" style={{ padding: "8px 14px", minHeight: 36 }}>教师端</Link>
+          <Link to="/teacher" className="btn-ghost" style={{ padding: "8px 14px", minHeight: 36, borderRadius: "var(--radius-md)" }}>教师端</Link>
           <button
             type="button"
             className="btn-ghost"
@@ -57,7 +64,7 @@ export default function AdminLayout() {
       <main
         style={{
           flex: 1,
-          ...(isQaHome ? { padding: 0, maxWidth: "none", margin: 0 } : { padding: 24, maxWidth: 1200, margin: "0 auto", width: "100%" }),
+          ...(isQaHome ? { padding: 0, maxWidth: "none", margin: 0, minHeight: 0 } : { padding: 24, maxWidth: 1200, margin: "0 auto", width: "100%" }),
         }}
       >
         <Outlet />

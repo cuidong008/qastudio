@@ -930,7 +930,7 @@ export default function InClass({ variant = "student" }: { variant?: InClassVari
   };
 
   return (
-    <div className={`student-chat-shell${variant === "teacher" || variant === "teaching_leader" ? " student-chat-shell--teacher" : ""}`}>
+    <div className={`student-chat-shell${variant === "teacher" || variant === "teaching_leader" || variant === "admin" ? " student-chat-shell--teacher" : ""}`}>
       <style>{`
         .student-chat-shell .student-chat-message-meta .student-chat-message-meta-actions {
           display: inline-flex; gap: 4px; align-items: center;

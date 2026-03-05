@@ -372,7 +372,7 @@ table td .btn-ghost:hover:not(:disabled) {
   overflow: hidden;
 }
 
-/* 仅教师端问答页：填满 main 避免 100vh 溢出，学生端保持上方面积 100vh */
+/* 教师端/管理员问答页：填满 main 避免 100vh 溢出，学生端保持 100vh */
 .student-chat-shell.student-chat-shell--teacher {
   min-height: 0;
   height: 100%;
