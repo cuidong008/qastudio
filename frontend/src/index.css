@@ -130,8 +130,9 @@ button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
   cursor: not-allowed;
 }
 
+/* 次要按钮：浅灰底 + 边框，与主按钮区分且易识别 */
 .btn-secondary {
-  background: var(--bg-elevated);
+  background: var(--bg-muted);
   color: var(--text-primary);
   border: 1px solid var(--border);
 }
@@ -141,11 +142,21 @@ button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
   color: var(--text-primary);
 }
 
+/* 幽灵按钮：极浅灰底便于识别，悬停时更明显 */
 .btn-ghost {
-  background: transparent;
+  background: var(--bg-hover);
   color: var(--text-secondary);
 }
 .btn-ghost:hover:not(:disabled) {
+  background: var(--accent-hover-bg);
+  color: var(--text-primary);
+}
+
+/* 表格操作列内按钮保持无底色，避免多按钮时显得拥挤 */
+table td .btn-ghost {
+  background: transparent;
+}
+table td .btn-ghost:hover:not(:disabled) {
   background: var(--accent-hover-bg);
   color: var(--text-primary);
 }
@@ -328,13 +339,15 @@ button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
   filter: brightness(1.05);
 }
 
+/* 下载等次要操作：浅灰底，与“观看/查看”主色按钮区分 */
 .btn-material-download {
-  background: transparent;
+  background: var(--bg-muted);
   color: var(--text-primary);
-  border: 1px solid rgba(0, 0, 0, 0.15);
+  border: 1px solid var(--border);
 }
 .btn-material-download:hover:not(:disabled) {
   background: var(--bg-hover);
+  border-color: var(--text-muted);
 }
 
 .material-tag {
@@ -551,11 +564,13 @@ button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
   gap: 4px;
 }
 
-.student-chat-session-actions .btn-ghost {
-  min-height: 28px;
-  min-width: 0;
-  padding: 4px 8px;
-  font-size: 12px;
+/* 左侧会话行「重命名」「删除」与问题下「编辑」同款小按钮（用 btn-ghost-sm 排除全局大按钮） */
+.student-chat-session-actions .btn-ghost,
+.student-chat-session-actions .btn-ghost-sm {
+  min-height: 28px !important;
+  min-width: 0 !important;
+  padding: 4px 8px !important;
+  font-size: 12px !important;
 }
 
 .student-chat-session-empty {

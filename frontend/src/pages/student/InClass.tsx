@@ -1016,11 +1016,11 @@ export default function InClass({ variant = "student" }: { variant?: InClassVari
                       </button>
                       <div className="student-chat-session-actions">
                         {renameSessionId !== session.id && (
-                          <button type="button" className="btn-ghost" onClick={() => startRename(session)}>
+                          <button type="button" className="btn-ghost btn-ghost-sm" onClick={() => startRename(session)}>
                             重命名
                           </button>
                         )}
-                        <button type="button" className="btn-ghost" onClick={() => handleDeleteSession(session.id)}>
+                        <button type="button" className="btn-ghost btn-ghost-sm" onClick={() => handleDeleteSession(session.id)}>
                           删除
                         </button>
                       </div>
