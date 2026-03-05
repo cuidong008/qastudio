@@ -579,6 +579,16 @@ export default function TeacherLearningData() {
     }));
   }, [detailTableRawFromApi, detailStudentId]);
 
+  /** 学情章节表仅展示在「按课程+学生」接口中出现的用户（与学情课程统计一致），避免非学生角色（如 admin）出现在章节表 */
+  const studentIdsInDetailTable = useMemo(
+    () => new Set(detailTableRawFromApi.map((r) => r.student_id)),
+    [detailTableRawFromApi]
+  );
+  const chapterTableStudentList = useMemo(() => {
+    const list = classId != null ? classStudents : students;
+    return list.filter((s) => studentIdsInDetailTable.has(s.id));
+  }, [classId, classStudents, students, studentIdsInDetailTable]);
+
   const classNamesByCourseStudent = useMemo(() => {
     const m: Record<string, string> = {};
     detailTableRawFromApi.forEach((r) => { m[`${r.course_id}-${r.student_id}`] = r.class_name; });
@@ -732,11 +742,11 @@ export default function TeacherLearningData() {
 
   // 学情课程统计详细表使用 detailTableRowsFromApi（后端按课程+学生维度接口），不再使用前端聚合的 learningDetailRowsNoChapter
 
-  // 学情章节统计详细表：使用 statsChapter，保留章节维度；班级与预习完成率与学情课程统计一致，按 (课程,学生) 从接口映射取
+  // 学情章节统计详细表：使用 statsChapter，保留章节维度；仅展示在 detailTableRawFromApi 中出现的用户（与学情课程统计一致，避免 admin 等非学生角色出现）
   const learningDetailRowsChapter: LearningDetailRow[] = useMemo(() => {
     const s = statsChapter ?? stats;
     const rows: LearningDetailRow[] = [];
-    const baseStudentList = classId != null ? classStudents : students;
+    const baseStudentList = chapterTableStudentList;
     const studentList = detailChapterStudentId != null ? baseStudentList.filter((stu) => stu.id === detailChapterStudentId) : baseStudentList;
     const maxStudents = 50;
     const avgAccuracy = s?.answer_accuracy_rate ?? 0;
@@ -851,7 +861,7 @@ export default function TeacherLearningData() {
       });
     }
     return rows;
-  }, [courses, chapters, students, classStudents, courseId, chapterId, classId, detailChapterStudentId, stats, statsChapter, courseStats, chapterStats, allChaptersByCourseId, allCourseChapterStats, classNamesByCourseStudent, previewCompletedChapterIds, completedCountByCourseStudentChapter, completedCountByCourseStudent, weakPointsByCourseStudent, weakPointsByCourseStudentChapter]);
+  }, [courses, chapters, chapterTableStudentList, courseId, chapterId, classId, detailChapterStudentId, stats, statsChapter, courseStats, chapterStats, allChaptersByCourseId, allCourseChapterStats, classNamesByCourseStudent, previewCompletedChapterIds, completedCountByCourseStudentChapter, completedCountByCourseStudent, weakPointsByCourseStudent, weakPointsByCourseStudentChapter]);
 
   const detailTotal = detailTableRowsFromApi.length;
   const detailPaginated = useMemo(
@@ -1396,7 +1406,7 @@ export default function TeacherLearningData() {
               <span style={{ color: "var(--text-muted)" }}>学生</span>
               <select value={detailChapterStudentId ?? ""} onChange={(e) => setDetailChapterStudentId(e.target.value ? Number(e.target.value) : undefined)} style={{ minWidth: 160 }}>
                 <option value="">全部</option>
-                {studentsForFilter.map((s) => (
+                {chapterTableStudentList.map((s) => (
                   <option key={s.id} value={s.id}>{s.display_name || s.username}（{s.student_no || s.id}）</option>
                 ))}
               </select>

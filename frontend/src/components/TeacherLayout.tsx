@@ -1,5 +1,5 @@
 import { ReactNode, useEffect } from "react";
-import { NavLink, useNavigate } from "react-router-dom";
+import { NavLink, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
 export default function TeacherLayout({
@@ -16,6 +16,9 @@ export default function TeacherLayout({
 }) {
   const { user, logout } = useAuth();
   const navigate = useNavigate();
+  const location = useLocation();
+  /** 问答首页不显示顶部菜单，仅通过页面内底部按钮进入其他页 */
+  const hideHeader = location.pathname === "/teacher/qa";
 
   const redirectTo =
     requireAuth && !user
@@ -39,43 +42,45 @@ export default function TeacherLayout({
         flexDirection: "column",
       }}
     >
-      <header
-        style={{
-          background: "var(--bg-surface)",
-          borderBottom: "1px solid var(--border)",
-          padding: "14px 24px",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-          flexWrap: "wrap",
-          gap: 12,
-        }}
-      >
-        <nav style={{ display: "flex", gap: 8 }}>
-          <NavLink to="/teacher/qa" className="nav-link"><span>问答首页</span></NavLink>
-          <NavLink to="/teacher/learning-data" className="nav-link"><span>学情概览</span></NavLink>
-          <NavLink to="/teacher/courses" className="nav-link"><span>我的课程</span></NavLink>
-          <NavLink to="/teacher/classes" className="nav-link" onMouseEnter={() => { import("../pages/teacher/TeacherClasses"); }}><span>我的班级</span></NavLink>
-          <NavLink to="/teacher/pipeline" className="nav-link"><span>课件流水线</span></NavLink>
-          <NavLink to="/teacher/question-bank" className="nav-link" end={false}><span>题库管理</span></NavLink>
-        </nav>
-        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-          <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
-            {user?.display_name || user?.username}（{user?.role === "teaching_leader" ? "教研组长" : "教师"}）
-          </span>
-          <button
-            type="button"
-            className="btn-ghost"
-            onClick={() => {
-              logout();
-              navigate("/login");
-            }}
-            style={{ padding: "8px 14px", minHeight: 36 }}
-          >
-            退出
-          </button>
-        </div>
-      </header>
+      {!hideHeader && (
+        <header
+          style={{
+            background: "var(--bg-surface)",
+            borderBottom: "1px solid var(--border)",
+            padding: "14px 24px",
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            flexWrap: "wrap",
+            gap: 12,
+          }}
+        >
+          <nav style={{ display: "flex", gap: 8 }}>
+            <NavLink to="/teacher/qa" className="nav-link"><span>问答首页</span></NavLink>
+            <NavLink to="/teacher/learning-data" className="nav-link"><span>学情概览</span></NavLink>
+            <NavLink to="/teacher/courses" className="nav-link"><span>我的课程</span></NavLink>
+            <NavLink to="/teacher/classes" className="nav-link" onMouseEnter={() => { import("../pages/teacher/TeacherClasses"); }}><span>我的班级</span></NavLink>
+            <NavLink to="/teacher/pipeline" className="nav-link"><span>课件流水线</span></NavLink>
+            <NavLink to="/teacher/question-bank" className="nav-link" end={false}><span>题库管理</span></NavLink>
+          </nav>
+          <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
+              {user?.display_name || user?.username}（{user?.role === "teaching_leader" ? "教研组长" : "教师"}）
+            </span>
+            <button
+              type="button"
+              className="btn-ghost"
+              onClick={() => {
+                logout();
+                navigate("/login");
+              }}
+              style={{ padding: "8px 14px", minHeight: 36 }}
+            >
+              退出
+            </button>
+          </div>
+        </header>
+      )}
       <main
         style={{
           flex: 1,

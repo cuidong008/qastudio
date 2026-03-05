@@ -5771,9 +5771,13 @@ async def list_student_admin_classes(
 
 
 async def _user_ids_by_class(db: AsyncSession, class_id: int | None):
-    """若指定 class_id，返回该班级用户 id 列表；否则返回全部学生用户 id 列表。学情统计仅统计学生角色。"""
+    """若指定 class_id，返回该班级中仅学生角色的用户 id 列表；否则返回全部学生用户 id 列表。学情统计仅统计学生角色。"""
     if class_id is not None:
-        r = await db.execute(select(StudentClassMembership.student_id).where(StudentClassMembership.class_id == class_id))
+        r = await db.execute(
+            select(StudentClassMembership.student_id)
+            .join(User, User.id == StudentClassMembership.student_id)
+            .where(StudentClassMembership.class_id == class_id, User.role == UserRole.student.value)
+        )
         return [row[0] for row in r.all()]
     r = await db.execute(select(User.id).where(User.role == UserRole.student.value))
     return [row[0] for row in r.all()]
@@ -5785,14 +5789,15 @@ async def _course_student_pairs_for_overview(
     class_id: int | None,
     user: User,
 ) -> list[tuple[int, int]]:
-    """与学情课程统计详细表一致的 (course_id, student_id) 集合：来自 Class + StudentClassMembership，用于概览 AI 提问数/无关数与详情表合计一致。"""
+    """与学情课程统计详细表一致的 (course_id, student_id) 集合：来自 Class + StudentClassMembership，仅包含学生角色，用于概览 AI 提问数/无关数与详情表合计一致。"""
     if not scoped_course_ids:
         return []
     q = (
         select(Class.course_id, StudentClassMembership.student_id)
         .select_from(Class)
         .join(StudentClassMembership, StudentClassMembership.class_id == Class.id)
-        .where(Class.course_id.in_(scoped_course_ids))
+        .join(User, User.id == StudentClassMembership.student_id)
+        .where(Class.course_id.in_(scoped_course_ids), User.role == UserRole.student.value)
     )
     if _is_teacher_scoped(user):
         q = q.where(Class.owner_teacher_id == user.id)
@@ -6439,7 +6444,7 @@ async def stats_by_course_student(
     if not scoped_course_ids:
         return []
 
-    # (course_id, student_id) -> (class_name, course_name, student_no, student_name)
+    # (course_id, student_id) -> (class_name, course_name, student_no, student_name)，仅包含学生角色
     q_pairs = (
         select(
             Class.course_id,
@@ -6448,7 +6453,8 @@ async def stats_by_course_student(
         )
         .select_from(Class)
         .join(StudentClassMembership, StudentClassMembership.class_id == Class.id)
-        .where(Class.course_id.in_(scoped_course_ids))
+        .join(User, User.id == StudentClassMembership.student_id)
+        .where(Class.course_id.in_(scoped_course_ids), User.role == UserRole.student.value)
     )
     if _is_teacher_scoped(user):
         q_pairs = q_pairs.where(Class.owner_teacher_id == user.id)
