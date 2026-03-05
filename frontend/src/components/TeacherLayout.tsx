@@ -31,7 +31,14 @@ export default function TeacherLayout({
   if (redirectTo) return null;
 
   return (
-    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+    <div
+      style={{
+        minHeight: "100vh",
+        ...(fullBleed ? { height: "100vh", overflow: "hidden" } : {}),
+        display: "flex",
+        flexDirection: "column",
+      }}
+    >
       <header
         style={{
           background: "var(--bg-surface)",
@@ -72,6 +79,7 @@ export default function TeacherLayout({
       <main
         style={{
           flex: 1,
+          ...(fullBleed ? { minHeight: 0 } : {}),
           padding: fullBleed ? 0 : 24,
           maxWidth: fluid || fullBleed ? "none" : 1000,
           margin: "0 auto",
