@@ -1,4 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from "react";
+import { useNavigate } from "react-router-dom";
 import { api } from "../../api/client";
 import { toast } from "../../utils/toast";
 
@@ -124,6 +125,7 @@ const removeCachedReindexTask = (taskId: number) => {
 };
 
 export default function TeacherCourses() {
+  const navigate = useNavigate();
   const [list, setList] = useState<CourseItem[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
@@ -843,10 +845,8 @@ export default function TeacherCourses() {
                         className="btn-ghost"
                         style={{ marginRight: 8 }}
                         onClick={() =>
-                          window.open(
-                            `/teacher/course-materials?courseId=${c.id}&courseName=${encodeURIComponent(c.name)}`,
-                            "_blank",
-                            "noopener,noreferrer"
+                          navigate(
+                            `/teacher/course-materials?courseId=${c.id}&courseName=${encodeURIComponent(c.name)}`
                           )
                         }
                       >
@@ -882,7 +882,7 @@ export default function TeacherCourses() {
                       <td colSpan={5} style={{ padding: "12px 24px", background: "var(--bg-muted)", borderBottom: "1px solid var(--border)" }}>
                         <div style={{ marginBottom: 6, fontWeight: 600 }}>章节列表</div>
                         <p style={{ marginTop: 0, marginBottom: 12, color: "var(--text-muted)", fontSize: 13 }}>
-                          点每个章节右侧“资料（讲义/视频）”进入独立资料页面，再分别上传 PDF 讲义和教学视频。
+                          点每个章节右侧“资料（讲义/视频）”可在当前页进入资料管理，上传 PDF 讲义和教学视频。
                         </p>
                         <div style={{ display: "flex", gap: 8, marginBottom: 12, flexWrap: "wrap" }}>
                           <input
@@ -914,7 +914,7 @@ export default function TeacherCourses() {
                                   style={{ fontSize: 13 }}
                                   onClick={() => {
                                     const target = `/teacher/chapter-materials?chapterId=${ch.id}&chapterTitle=${encodeURIComponent(ch.title)}&courseName=${encodeURIComponent(c.name)}`;
-                                    window.open(target, "_blank", "noopener,noreferrer");
+                                    navigate(target);
                                   }}
                                 >
                                   资料（讲义/视频）
