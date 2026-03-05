@@ -9,6 +9,9 @@
   --bg-card: #ffffff;
   --bg-muted: #f8f8f8;
   --bg-hover: rgba(0, 0, 0, 0.05);
+  /* 按钮用灰底（稍深一点，便于识别可点击） */
+  --btn-muted-bg: #f0f0f0;
+  --btn-ghost-bg: rgba(0, 0, 0, 0.08);
 
   /* Text — 主标题/正文/次要均为纯黑，辅助为浅灰黑 */
   --text-primary: #000000;
@@ -132,7 +135,7 @@ button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
 
 /* 次要按钮：浅灰底 + 边框，与主按钮区分且易识别 */
 .btn-secondary {
-  background: var(--bg-muted);
+  background: var(--btn-muted-bg);
   color: var(--text-primary);
   border: 1px solid var(--border);
 }
@@ -142,9 +145,9 @@ button:not(.btn-ghost-sm):not(.chat-meta-btn):not([data-chat-meta-btn]),
   color: var(--text-primary);
 }
 
-/* 幽灵按钮：极浅灰底便于识别，悬停时更明显 */
+/* 幽灵按钮：浅灰底便于识别，悬停时更明显 */
 .btn-ghost {
-  background: var(--bg-hover);
+  background: var(--btn-ghost-bg);
   color: var(--text-secondary);
 }
 .btn-ghost:hover:not(:disabled) {
@@ -341,7 +344,7 @@ table td .btn-ghost:hover:not(:disabled) {
 
 /* 下载等次要操作：浅灰底，与“观看/查看”主色按钮区分 */
 .btn-material-download {
-  background: var(--bg-muted);
+  background: var(--btn-muted-bg);
   color: var(--text-primary);
   border: 1px solid var(--border);
 }
