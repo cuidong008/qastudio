@@ -56,6 +56,10 @@ export default function AdminUsers() {
       setError("请填写用户名");
       return;
     }
+    if (!studentNo) {
+      setError("请填写学号/工号");
+      return;
+    }
     if (list.some((u) => u.username === username)) {
       setError("用户名已存在");
       return;
@@ -82,7 +86,11 @@ export default function AdminUsers() {
     if (editId == null) return;
     setError("");
     const studentNo = form.student_no.trim();
-    if (studentNo && list.some((u) => u.student_no === studentNo && u.id !== editId)) {
+    if (!studentNo) {
+      setError("请填写学号/工号");
+      return;
+    }
+    if (list.some((u) => u.student_no === studentNo && u.id !== editId)) {
       setError("学号/工号已存在");
       return;
     }
