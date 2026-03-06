@@ -3,7 +3,7 @@ from pydantic_settings import BaseSettings
 
 
 class Settings(BaseSettings):
-    app_name: str = "计算机网络基础课程智能体"
+    app_name: str = "课程智能体"
     debug: bool = False
     database_url: str = "sqlite+aiosqlite:///./qastudio.db"
     secret_key: str = "change-me-in-production"

@@ -6,7 +6,7 @@ services:
     ports:
       - "8000:8000"
     environment:
-      - APP_NAME=计算机网络基础课程智能体
+      - APP_NAME=课程智能体
       - DEBUG=false
       - DATABASE_URL=sqlite+aiosqlite:////data/qastudio.db
       - SECRET_KEY=${SECRET_KEY:-asdfaksdfjasdfkasljdkfasjklfasjklf}

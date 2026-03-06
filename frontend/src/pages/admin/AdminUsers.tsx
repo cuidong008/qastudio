@@ -49,15 +49,29 @@ export default function AdminUsers() {
     setError("");
   };
   const submitCreate = () => {
-    setSaving(true);
     setError("");
+    const username = form.username.trim();
+    const studentNo = form.student_no.trim();
+    if (!username) {
+      setError("请填写用户名");
+      return;
+    }
+    if (list.some((u) => u.username === username)) {
+      setError("用户名已存在");
+      return;
+    }
+    if (studentNo && list.some((u) => u.student_no === studentNo)) {
+      setError("学号/工号已存在");
+      return;
+    }
+    setSaving(true);
     api.admin.users
       .create({
-        username: form.username.trim(),
+        username,
         password: form.password || "123456",
         role: form.role,
         display_name: form.display_name.trim() || undefined,
-        student_no: form.student_no.trim() || undefined,
+        student_no: studentNo || undefined,
         admin_class_or_dept: form.admin_class_or_dept.trim() || undefined,
       })
       .then(() => { setModal(null); load(); })
@@ -66,13 +80,18 @@ export default function AdminUsers() {
   };
   const submitEdit = () => {
     if (editId == null) return;
-    setSaving(true);
     setError("");
+    const studentNo = form.student_no.trim();
+    if (studentNo && list.some((u) => u.student_no === studentNo && u.id !== editId)) {
+      setError("学号/工号已存在");
+      return;
+    }
+    setSaving(true);
     const body: { password?: string; role?: string; display_name?: string; student_no?: string; admin_class_or_dept?: string } = {};
     if (form.password) body.password = form.password;
     body.role = form.role;
     body.display_name = form.display_name.trim() || undefined;
-    body.student_no = form.student_no.trim() || undefined;
+    body.student_no = studentNo || undefined;
     body.admin_class_or_dept = form.admin_class_or_dept.trim() || undefined;
     api.admin.users
       .update(editId, body)
@@ -259,12 +278,12 @@ export default function AdminUsers() {
                 />
               </label>
               <label>
-                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>{form.role === "teacher" || form.role === "teaching_leader" ? "工号" : "学号"}</span>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>学号/工号</span>
                 <input
                   type="text"
                   value={form.student_no}
                   onChange={(e) => setForm((f) => ({ ...f, student_no: e.target.value }))}
-                  placeholder={form.role === "teacher" || form.role === "teaching_leader" ? "输入工号" : "输入学生学号"}
+                  placeholder="输入学号/工号"
                   style={{ width: "100%", padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6 }}
                 />
               </label>
