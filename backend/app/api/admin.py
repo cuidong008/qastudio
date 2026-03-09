@@ -93,6 +93,8 @@ class RAGConfigOut(BaseModel):
     rerank_top_n: int
     no_answer_threshold: float
     llm_max_tokens: int
+    exercise_generate_max_tokens: int
+    paper_semantic_dedup_conf_threshold: float
     llm_temperature: float
 
 
@@ -135,6 +137,8 @@ class RAGConfigUpdateIn(BaseModel):
     rerank_top_n: int | None = None
     no_answer_threshold: float | None = None
     llm_max_tokens: int | None = None
+    exercise_generate_max_tokens: int | None = None
+    paper_semantic_dedup_conf_threshold: float | None = None
     llm_temperature: float | None = None
 
 

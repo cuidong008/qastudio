@@ -393,6 +393,17 @@ class TeacherPaperGenerateConfigIn(BaseModel):
     score: float = Field(default=0, ge=0, le=100)
 
 
+class TeacherPaperPreviewQuestionIn(BaseModel):
+    question_type: str = Field(min_length=1, max_length=32)
+    question_text: str = Field(min_length=1, max_length=10000)
+    options: list[str] = Field(default_factory=list)
+    correct_answer: str = Field(default="", max_length=1000)
+    explanation: str | None = None
+    difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    score: float = Field(default=0, ge=0, le=100)
+    source: str = Field(default="local", min_length=1, max_length=20)
+
+
 class TeacherGeneratePaperIn(BaseModel):
     course_id: int
     chapter_ids: list[int] = Field(default_factory=list, min_length=1)
@@ -402,6 +413,7 @@ class TeacherGeneratePaperIn(BaseModel):
     overall_difficulty: float | None = Field(default=None, ge=0, le=1, multiple_of=0.01)
     configs: list[TeacherPaperGenerateConfigIn] = Field(default_factory=list, min_length=1)
     save_to_bank: bool = True
+    preview_questions_override: list[TeacherPaperPreviewQuestionIn] | None = None
 
 
 class TeacherPaperInsufficientOut(BaseModel):
@@ -614,6 +626,17 @@ class TeacherImportQuestionsPreviewOut(BaseModel):
     chapter_ids: list[int]
     question_bank_type: str
     parsed_count: int
+    items: list[TeacherImportQuestionPreviewItemOut]
+
+
+class TeacherGenerateQuestionsPreviewOut(BaseModel):
+    course_id: int
+    chapter_id: int
+    question_bank_type: str
+    output_count: int
+    generated_count: int
+    by_type: dict[str, int]
+    skipped: int
     items: list[TeacherImportQuestionPreviewItemOut]
 
 
@@ -850,6 +873,19 @@ def _extract_json_payload(raw: str) -> list[dict]:
     return []
 
 
+def _summarize_llm_raw_for_log(raw: object, head_chars: int = 800, tail_chars: int = 400) -> tuple[int, str, str]:
+    text = str(raw or "")
+    compact = re.sub(r"\s+", " ", text).strip()
+    if not compact:
+        return 0, "", ""
+    head = compact[:max(0, int(head_chars))]
+    if len(compact) > tail_chars:
+        tail = compact[-max(0, int(tail_chars)):]
+    else:
+        tail = compact
+    return len(compact), head, tail
+
+
 def _to_question_type(value: str) -> str | None:
     s = (value or "").strip().lower()
     if s in {"single_choice", "single", "choice", "mcq", "select", "单选", "单选题", "选择题"}:
@@ -1071,6 +1107,64 @@ def _difficulty_limits(total: int) -> dict[str, int]:
         remain -= 1
         i += 1
     return base
+
+
+def _plan_question_generation_batches(
+    limits: dict[str, int],
+    output_token_budget: int,
+) -> list[dict[str, int]]:
+    """
+    按题型顺序规划分批，尽量不拆分单个题型到多批。
+    仅当某题型自身超出单批预算时，才强制拆分该题型。
+    """
+    type_order = ["single_choice", "multiple_choice", "judge", "blank", "qa"]
+    # 经验值：用于估算单题输出 token 成本（含 JSON 结构与字段开销）
+    per_question_token_est = {
+        "single_choice": 170,
+        "multiple_choice": 185,
+        "judge": 95,
+        "blank": 90,
+        "qa": 120,
+    }
+    budget = max(200, int(output_token_budget))
+    batches: list[dict[str, int]] = []
+    current = {k: 0 for k in type_order}
+    current_cost = 0
+
+    def _flush():
+        nonlocal current, current_cost
+        total = sum(current.values())
+        if total > 0:
+            batches.append({k: int(v) for k, v in current.items() if int(v) > 0})
+        current = {k: 0 for k in type_order}
+        current_cost = 0
+
+    for q_type in type_order:
+        remain = max(0, int(limits.get(q_type, 0)))
+        if remain <= 0:
+            continue
+        unit_cost = max(1, int(per_question_token_est.get(q_type, 120)))
+        while remain > 0:
+            full_cost = remain * unit_cost
+            # 当前批可容纳该题型全部剩余：整块放入，不拆分。
+            if current_cost + full_cost <= budget:
+                current[q_type] += remain
+                current_cost += full_cost
+                remain = 0
+                continue
+            # 当前批已有题，且放不下该题型全部：先结批，下一批再尝试整块放入。
+            if current_cost > 0:
+                _flush()
+                continue
+            # 当前批为空但该题型自身超预算：必须拆分该题型。
+            fit = max(1, budget // unit_cost)
+            take = max(1, min(remain, fit))
+            current[q_type] += take
+            current_cost += take * unit_cost
+            remain -= take
+            _flush()
+    _flush()
+    return batches
 
 
 def _normalize_multi_answer(value: object) -> str:
@@ -3087,7 +3181,8 @@ async def _generate_questions_for_chapter(
     chapter: Chapter,
     course: Course,
     body: TeacherGenerateQuestionsIn,
-) -> tuple[dict[str, int], int]:
+    dry_run: bool = False,
+) -> tuple[dict[str, int], int, list[TeacherImportQuestionPreviewItemOut], int]:
     question_bank_type = _normalize_question_bank_type(body.question_bank_type)
     type_difficulty_score = {
         "single_choice": _normalize_difficulty_score(body.single_choice_difficulty_score),
@@ -3158,35 +3253,10 @@ async def _generate_questions_for_chapter(
 
     settings = get_rag_settings()
     llm = get_llm(settings)
-    diff_limits = _difficulty_limits(sum([body.single_choice_max, body.multiple_choice_max, body.judge_max, body.qa_max, body.blank_max]))
-    prompt = _build_generate_questions_prompt(
-        chapter_title=chapter.title,
-        context=context,
-        single_choice_max=body.single_choice_max,
-        multiple_choice_max=body.multiple_choice_max,
-        judge_max=body.judge_max,
-        qa_max=body.qa_max,
-        blank_max=body.blank_max,
-        question_bank_type=question_bank_type,
-        single_choice_difficulty_score=type_difficulty_score["single_choice"],
-        multiple_choice_difficulty_score=type_difficulty_score["multiple_choice"],
-        judge_difficulty_score=type_difficulty_score["judge"],
-        qa_difficulty_score=type_difficulty_score["qa"],
-        blank_difficulty_score=type_difficulty_score["blank"],
-        diff_basic_target=diff_limits["basic"],
-        diff_applied_target=diff_limits["applied"],
-        diff_extended_target=diff_limits["extended"],
+    llm_max_tokens = max(
+        1400,
+        int(getattr(settings, "exercise_generate_max_tokens", 4096) or settings.llm_max_tokens or 512),
     )
-    raw = await asyncio.to_thread(
-        llm.generate,
-        prompt,
-        max_tokens=max(1400, int(settings.llm_max_tokens or 512)),
-        temperature=0.2,
-    )
-    candidates = _extract_json_payload(raw)
-    if not candidates:
-        raise RuntimeError("模型返回结果无法解析，请重试")
-
     limits = {
         "single_choice": body.single_choice_max,
         "multiple_choice": body.multiple_choice_max,
@@ -3195,29 +3265,62 @@ async def _generate_questions_for_chapter(
         "blank": body.blank_max,
     }
     total_expected = sum(limits.values())
+    diff_limits = _difficulty_limits(total_expected)
+    batch_output_budget = max(600, int(llm_max_tokens * 0.65))
+    planned_batches = _plan_question_generation_batches(limits, batch_output_budget)
+    if not planned_batches:
+        planned_batches = [{k: int(v) for k, v in limits.items() if int(v) > 0}]
+    logger.info(
+        "question_generate_batch_plan course_id=%s chapter_id=%s total_expected=%s llm_max_tokens=%s batch_budget=%s batches=%s",
+        course.id,
+        chapter.id,
+        total_expected,
+        llm_max_tokens,
+        batch_output_budget,
+        planned_batches,
+    )
+
+    model_output_count = 0
     created_by_type: dict[str, int] = {"single_choice": 0, "multiple_choice": 0, "judge": 0, "qa": 0, "blank": 0}
     created_by_diff: dict[str, int] = {"basic": 0, "applied": 0, "extended": 0}
+    preview_items: list[TeacherImportQuestionPreviewItemOut] = []
     skipped = 0
 
     r_existing = await db.execute(select(Question.question_text).where(Question.chapter_id == chapter.id))
     existing_keys = {_normalize_text_key(row[0]) for row in r_existing.all() if (row[0] or "").strip()}
 
-    def _try_add_item(item: dict, enforce_diff_limit: bool = True) -> bool:
+    def _mark_skipped(candidate_idx: int | None, skipped_candidate_indices: set[int]):
+        nonlocal skipped
+        if candidate_idx is None:
+            skipped += 1
+            return
+        if candidate_idx in skipped_candidate_indices:
+            return
+        skipped_candidate_indices.add(candidate_idx)
+        skipped += 1
+
+    def _try_add_item(
+        item: dict,
+        enforce_diff_limit: bool,
+        candidate_idx: int | None,
+        accepted_candidate_indices: set[int],
+        skipped_candidate_indices: set[int],
+    ) -> bool:
         nonlocal skipped
         q_type = _to_question_type(str(item.get("type") or ""))
         if not q_type:
-            skipped += 1
+            _mark_skipped(candidate_idx, skipped_candidate_indices)
             return False
         if created_by_type[q_type] >= limits[q_type]:
             return False
         q_text_raw = str(item.get("question_text") or "").strip()
         if not q_text_raw:
-            skipped += 1
+            _mark_skipped(candidate_idx, skipped_candidate_indices)
             return False
         q_text = q_text_raw
         key = _normalize_text_key(q_text)
         if key in existing_keys:
-            skipped += 1
+            _mark_skipped(candidate_idx, skipped_candidate_indices)
             return False
 
         pre_explanation = str(item.get("explanation") or "").strip() or None
@@ -3228,33 +3331,37 @@ async def _generate_questions_for_chapter(
             return False
         options_text: str | None = None
         correct_answer: str | None = None
+        preview_options: list[str] = []
         if q_type == "single_choice":
             opts = _normalize_choice_options(item.get("options"))
             ans = _normalize_choice_answer(item.get("correct_answer"), opts)
             if len(opts) != 4 or not ans:
-                skipped += 1
+                _mark_skipped(candidate_idx, skipped_candidate_indices)
                 return False
             options_text = json.dumps([f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)], ensure_ascii=False)
             correct_answer = ans
+            preview_options = opts
         elif q_type == "multiple_choice":
             opts = _normalize_choice_options(item.get("options"))
             ans = _normalize_multi_answer(item.get("correct_answer"))
             if len(opts) != 4 or len([x for x in ans.split(",") if x]) < 2:
-                skipped += 1
+                _mark_skipped(candidate_idx, skipped_candidate_indices)
                 return False
             options_text = json.dumps([f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)], ensure_ascii=False)
             correct_answer = ans
+            preview_options = opts
         elif q_type == "judge":
             ans = _normalize_judge_answer(item.get("correct_answer"))
             if not ans:
-                skipped += 1
+                _mark_skipped(candidate_idx, skipped_candidate_indices)
                 return False
             options_text = json.dumps(["A. 正确", "B. 错误"], ensure_ascii=False)
             correct_answer = ans
+            preview_options = ["正确", "错误"]
         else:
             ans = _trim_answer(item.get("correct_answer"))
             if not ans:
-                skipped += 1
+                _mark_skipped(candidate_idx, skipped_candidate_indices)
                 return False
             correct_answer = ans
 
@@ -3262,57 +3369,143 @@ async def _generate_questions_for_chapter(
         explanation = raw_explanation or f"参考答案：{correct_answer}"
 
         now_ts = datetime.utcnow()
-        db.add(
-            Question(
-                course_id=course.id,
-                chapter_id=chapter.id,
-                question_bank_type=question_bank_type,
-                difficulty_score=type_difficulty_score[q_type],
-                difficulty=difficulty,
-                question_type=q_type,
-                question_text=q_text,
-                options=options_text,
-                correct_answer=correct_answer,
-                explanation=explanation,
-                knowledge_point_ids=knowledge_point_ids,
-                is_active=True,
-                is_approved=False,
-                generated_time=now_ts,
-                edited_time=now_ts,
+        if not dry_run:
+            db.add(
+                Question(
+                    course_id=course.id,
+                    chapter_id=chapter.id,
+                    question_bank_type=question_bank_type,
+                    difficulty_score=type_difficulty_score[q_type],
+                    difficulty=difficulty,
+                    question_type=q_type,
+                    question_text=q_text,
+                    options=options_text,
+                    correct_answer=correct_answer,
+                    explanation=explanation,
+                    knowledge_point_ids=knowledge_point_ids,
+                    is_active=True,
+                    is_approved=False,
+                    generated_time=now_ts,
+                    edited_time=now_ts,
+                )
             )
-        )
+        else:
+            preview_items.append(
+                TeacherImportQuestionPreviewItemOut(
+                    chapter_id=chapter.id,
+                    chapter_title=chapter.title,
+                    question_type=q_type,
+                    question_text=q_text,
+                    options=preview_options,
+                    correct_answer=correct_answer,
+                    explanation=explanation,
+                    difficulty_score=type_difficulty_score[q_type],
+                )
+            )
         created_by_type[q_type] += 1
         created_by_diff[difficulty] += 1
         existing_keys.add(key)
+        if candidate_idx is not None:
+            accepted_candidate_indices.add(candidate_idx)
         return True
 
-    for item in candidates:
-        _try_add_item(item, enforce_diff_limit=True)
+    for batch_idx, batch_limits in enumerate(planned_batches, start=1):
+        batch_total = sum(int(v) for v in batch_limits.values())
+        if batch_total <= 0:
+            continue
+        batch_diff_limits = _difficulty_limits(batch_total)
+        prompt = _build_generate_questions_prompt(
+            chapter_title=chapter.title,
+            context=context,
+            single_choice_max=int(batch_limits.get("single_choice", 0)),
+            multiple_choice_max=int(batch_limits.get("multiple_choice", 0)),
+            judge_max=int(batch_limits.get("judge", 0)),
+            qa_max=int(batch_limits.get("qa", 0)),
+            blank_max=int(batch_limits.get("blank", 0)),
+            question_bank_type=question_bank_type,
+            single_choice_difficulty_score=type_difficulty_score["single_choice"],
+            multiple_choice_difficulty_score=type_difficulty_score["multiple_choice"],
+            judge_difficulty_score=type_difficulty_score["judge"],
+            qa_difficulty_score=type_difficulty_score["qa"],
+            blank_difficulty_score=type_difficulty_score["blank"],
+            diff_basic_target=batch_diff_limits["basic"],
+            diff_applied_target=batch_diff_limits["applied"],
+            diff_extended_target=batch_diff_limits["extended"],
+        )
+        raw, finish_reason = await asyncio.to_thread(
+            llm.generate_with_meta,
+            prompt,
+            max_tokens=llm_max_tokens,
+            temperature=0.2,
+        )
+        candidates = _extract_json_payload(raw)
+        if not candidates:
+            raw_text = str(raw or "")
+            finish = str(finish_reason or "").strip().lower()
+            logger.warning(
+                "question_generate_parse_failed course_id=%s chapter_id=%s batch=%s/%s finish_reason=%s max_tokens=%s raw_len=%s raw_preview=%r batch_limits=%s",
+                course.id,
+                chapter.id,
+                batch_idx,
+                len(planned_batches),
+                finish_reason,
+                llm_max_tokens,
+                len(raw_text),
+                raw_text[:240],
+                batch_limits,
+            )
+            if finish == "length":
+                raise RuntimeError("模型输出被截断（length），请降低题量或提高 max_tokens 后重试")
+            raise RuntimeError("模型返回结果无法解析，请重试")
+        model_output_count += len(candidates)
+
+        accepted_candidate_indices: set[int] = set()
+        skipped_candidate_indices: set[int] = set()
+        for idx, item in enumerate(candidates):
+            _try_add_item(
+                item=item,
+                enforce_diff_limit=True,
+                candidate_idx=idx,
+                accepted_candidate_indices=accepted_candidate_indices,
+                skipped_candidate_indices=skipped_candidate_indices,
+            )
+            if sum(created_by_type.values()) >= total_expected:
+                break
         if sum(created_by_type.values()) >= total_expected:
             break
 
-    # 若因难度配额导致未凑齐题量，第二轮放宽配额补齐
-    if sum(created_by_type.values()) < total_expected:
-        for item in candidates:
-            _try_add_item(item, enforce_diff_limit=False)
+        # 若因难度配额导致该批未充分利用，再放宽难度配额补齐。
+        for idx, item in enumerate(candidates):
+            if idx in accepted_candidate_indices:
+                continue
+            _try_add_item(
+                item=item,
+                enforce_diff_limit=False,
+                candidate_idx=idx,
+                accepted_candidate_indices=accepted_candidate_indices,
+                skipped_candidate_indices=skipped_candidate_indices,
+            )
             if sum(created_by_type.values()) >= total_expected:
                 break
-    await db.flush()
-    # 强制覆盖：每个知识点至少保留 1 道题；缺失时自动补充知识点专项题。
-    await _ensure_each_kp_has_question(
-        db=db,
-        chapter=chapter,
-        course=course,
-        kp_rows=kp_rows,
-        existing_keys=existing_keys,
-        created_by_type=created_by_type,
-        created_by_diff=created_by_diff,
-        question_bank_type=question_bank_type,
-        default_difficulty_score=type_difficulty_score["qa"],
-        qa_limit=body.qa_max,
-    )
-    await db.commit()
-    return created_by_type, skipped
+        if sum(created_by_type.values()) >= total_expected:
+            break
+    if not dry_run:
+        await db.flush()
+        # 强制覆盖：每个知识点至少保留 1 道题；缺失时自动补充知识点专项题。
+        await _ensure_each_kp_has_question(
+            db=db,
+            chapter=chapter,
+            course=course,
+            kp_rows=kp_rows,
+            existing_keys=existing_keys,
+            created_by_type=created_by_type,
+            created_by_diff=created_by_diff,
+            question_bank_type=question_bank_type,
+            default_difficulty_score=type_difficulty_score["qa"],
+            qa_limit=body.qa_max,
+        )
+        await db.commit()
+    return created_by_type, skipped, preview_items, model_output_count
 
 
 async def _run_question_generation_task(task_id: int):
@@ -3336,7 +3529,7 @@ async def _run_question_generation_task(task_id: int):
             chapter, course = row[0], row[1]
             params = json.loads(task.request_payload or "{}")
             body = TeacherGenerateQuestionsIn(**params)
-            created_by_type, skipped = await _generate_questions_for_chapter(db, chapter, course, body)
+            created_by_type, skipped, _, _ = await _generate_questions_for_chapter(db, chapter, course, body)
             task.status = "success"
             task.result_payload = json.dumps(
                 {
@@ -3377,6 +3570,32 @@ async def create_generate_teacher_chapter_questions_task(
     await db.refresh(task)
     background_tasks.add_task(_run_question_generation_task, task.id)
     return TeacherGenerateTaskOut(task_id=task.id, status=task.status)
+
+
+@router.post("/chapters/{chapter_id}/questions/generate-preview", response_model=TeacherGenerateQuestionsPreviewOut)
+async def generate_teacher_chapter_questions_preview(
+    chapter_id: int,
+    body: TeacherGenerateQuestionsIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    chapter, course = await _require_owned_chapter(db, user.id, chapter_id)
+    total_expected = body.single_choice_max + body.multiple_choice_max + body.judge_max + body.qa_max + body.blank_max
+    if total_expected <= 0:
+        raise HTTPException(status_code=400, detail="请至少设置一种题型数量大于 0")
+    normalized_bank_type = _normalize_question_bank_type(body.question_bank_type)
+    body = body.model_copy(update={"question_bank_type": normalized_bank_type})
+    created_by_type, skipped, items, model_output_count = await _generate_questions_for_chapter(db, chapter, course, body, dry_run=True)
+    return TeacherGenerateQuestionsPreviewOut(
+        course_id=course.id,
+        chapter_id=chapter.id,
+        question_bank_type=normalized_bank_type,
+        output_count=int(model_output_count),
+        generated_count=int(sum(created_by_type.values())),
+        by_type=created_by_type,
+        skipped=int(skipped),
+        items=items,
+    )
 
 
 @router.get("/questions/tasks/{task_id}", response_model=TeacherGenerateTaskStatusOut)
@@ -3487,6 +3706,205 @@ JSON 格式：
 }}"""
 
 
+PAPER_DEDUP_RESERVE_MAX = 20
+PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT = 0.85
+
+
+def _build_paper_semantic_dedup_prompt(items: list[dict]) -> str:
+    payload = []
+    for idx, item in enumerate(items, start=1):
+        payload.append(
+            {
+                "idx": idx,
+                "question_type": str(item.get("question_type") or "").strip(),
+                "question_text": str(item.get("question_text") or "").strip()[:240],
+                "options": [str(x or "").strip()[:80] for x in (item.get("options") or [])[:4]],
+                "correct_answer": str(item.get("correct_answer") or "").strip()[:64],
+            }
+        )
+    return f"""你是试卷去重审核助手。请识别“语义重复题”。
+
+语义重复定义（满足其一即可）：
+1) 考查知识点与题目条件本质相同，仅换说法；
+2) 解题思路与正确答案等价，学生作答能力要求基本一致。
+
+不算重复：
+1) 同知识点但题设条件明显不同；
+2) 题型不同且作答能力要求明显不同。
+
+请尽量保守，只有在“高度确定重复”时才判重复。
+仅输出 JSON，不要解释。格式：
+{{
+  "duplicates": [
+    {{
+      "keep_idx": 1,
+      "drop_idxs": [3, 5],
+      "confidence": 0.93,
+      "reason": "重复原因简述"
+    }}
+  ]
+}}
+
+待判定题目列表：
+{json.dumps(payload, ensure_ascii=False)}
+"""
+
+
+def _paper_dedup_reserve_count(count: int) -> int:
+    c = max(0, int(count))
+    half = (c + 1) // 2
+    return min(PAPER_DEDUP_RESERVE_MAX, max(5, half))
+
+
+def _extract_paper_semantic_dedup_drop_indices(
+    raw: str,
+    total: int,
+    conf_threshold: float = PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT,
+) -> set[int]:
+    text = (raw or "").strip()
+    if not text or total <= 1:
+        return set()
+    candidates = [text]
+    for pat in (r"\{[\s\S]*\}", r"\[[\s\S]*\]"):
+        for m in re.finditer(pat, text):
+            candidates.append(m.group(0))
+    obj = None
+    for c in candidates:
+        try:
+            obj = json.loads(c)
+            break
+        except Exception:
+            continue
+    if obj is None:
+        return set()
+    out: set[int] = set()
+    rows = []
+    if isinstance(obj, dict):
+        if isinstance(obj.get("duplicates"), list):
+            rows = obj["duplicates"]
+        elif isinstance(obj.get("drop_indices"), list):
+            rows = [{"keep_idx": -1, "drop_idxs": obj.get("drop_indices", []), "confidence": 1.0, "reason": "fallback"}]
+    elif isinstance(obj, list):
+        rows = obj
+    for row in rows:
+        if isinstance(row, int):
+            if 1 <= row <= total:
+                out.add(row - 1)
+            continue
+        if not isinstance(row, dict):
+            continue
+        try:
+            conf = float(row.get("confidence", 0))
+        except Exception:
+            conf = 0.0
+        if conf < conf_threshold:
+            continue
+        keep_idx = int(row.get("keep_idx", -1)) if str(row.get("keep_idx", "")).strip() else -1
+        drop_idxs = row.get("drop_idxs")
+        if not isinstance(drop_idxs, list):
+            continue
+        for x in drop_idxs:
+            try:
+                n = int(x)
+            except Exception:
+                continue
+            if 1 <= n <= total and n != keep_idx:
+                out.add(n - 1)
+    return out
+
+
+def _dedup_paper_questions_by_text(items: list[dict]) -> tuple[list[dict], int]:
+    seen: set[str] = set()
+    out: list[dict] = []
+    removed = 0
+    for item in items:
+        key = _normalize_text_key(str(item.get("question_text") or ""))
+        if not key:
+            out.append(item)
+            continue
+        if key in seen:
+            removed += 1
+            continue
+        seen.add(key)
+        out.append(item)
+    return out, removed
+
+
+async def _dedup_paper_questions_by_semantic(
+    items: list[dict],
+    llm,
+    max_tokens: int,
+    conf_threshold: float = PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT,
+) -> tuple[list[dict], int]:
+    if len(items) <= 1:
+        return items, 0
+    prompt = _build_paper_semantic_dedup_prompt(items)
+    try:
+        raw = await asyncio.to_thread(
+            llm.generate,
+            prompt,
+            max_tokens=max(600, int(max_tokens)),
+            temperature=0.0,
+        )
+        drop_indices = _extract_paper_semantic_dedup_drop_indices(raw, len(items), conf_threshold=conf_threshold)
+        if not drop_indices:
+            return items, 0
+        out = [item for i, item in enumerate(items) if i not in drop_indices]
+        return out, len(items) - len(out)
+    except Exception as e:
+        logger.warning("paper_semantic_dedup_failed err=%s", str(e)[:300])
+        return items, 0
+
+
+def _sanitize_paper_question_item(item: dict) -> dict:
+    return {k: v for k, v in item.items() if not str(k).startswith("_")}
+
+
+def _normalize_internet_paper_candidate_item(
+    item: dict,
+    q_type: str,
+    target_diff: float,
+    score: float,
+) -> dict | None:
+    q_text = str(item.get("question_text") or "").strip()
+    if not q_text:
+        return None
+    options: list[str] = []
+    answer = _trim_answer(item.get("correct_answer"), max_len=32)
+    if q_type == "single_choice":
+        opts = _normalize_choice_options(item.get("options"))
+        ans = _normalize_choice_answer(item.get("correct_answer"), opts)
+        if len(opts) != 4 or not ans:
+            return None
+        options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
+        answer = ans
+    elif q_type == "multiple_choice":
+        opts = _normalize_choice_options(item.get("options"))
+        ans = _normalize_multi_answer(item.get("correct_answer"))
+        if len(opts) != 4 or len([x for x in ans.split(",") if x]) < 2:
+            return None
+        options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
+        answer = ans
+    elif q_type == "judge":
+        ans = _normalize_judge_answer(item.get("correct_answer"))
+        if not ans:
+            return None
+        options = ["A. 正确", "B. 错误"]
+        answer = ans
+    elif not answer:
+        return None
+    return {
+        "question_type": q_type,
+        "question_text": q_text,
+        "options": options,
+        "correct_answer": answer,
+        "explanation": str(item.get("explanation") or "").strip() or None,
+        "difficulty_score": _normalize_difficulty_score(item.get("difficulty_score"), target_diff),
+        "score": score,
+        "source": "internet",
+    }
+
+
 async def _pick_local_questions_for_paper(
     db: AsyncSession,
     course_id: int,
@@ -3494,15 +3912,25 @@ async def _pick_local_questions_for_paper(
     configs: list[dict],
     overall_difficulty: float | None,
 ) -> tuple[list[dict], list[dict]]:
-    selected_ids: set[int] = set()
-    preview_questions: list[dict] = []
-    insufficient_types: list[dict] = []
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
 
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    semantic_max_tokens = max(1200, min(2600, int(settings.llm_max_tokens or 512)))
+    semantic_conf_threshold = _normalize_difficulty_score(
+        getattr(settings, "paper_semantic_dedup_conf_threshold", PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT),
+        PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT,
+    )
+    desired_by_type: dict[str, int] = {}
+    available_by_type: dict[str, int] = {}
+    pool_by_type: dict[str, list[dict]] = {}
     for row in configs:
         q_type = row["type"]
         count = int(row["count"])
         if count <= 0:
             continue
+        desired_by_type[q_type] = count
         target_diff = _normalize_difficulty_score(overall_difficulty if overall_difficulty is not None else row.get("difficulty", 0.8))
         r = await db.execute(
             select(Question)
@@ -3516,32 +3944,97 @@ async def _pick_local_questions_for_paper(
             )
             .order_by(Question.id.desc())
         )
-        rows = [q for q in r.scalars().all() if q.id not in selected_ids]
+        rows = list(r.scalars().all())
         rows.sort(key=lambda q: (abs(_normalize_difficulty_score(q.difficulty_score, 0.8) - target_diff), -int(q.id)))
-        picked = rows[:count]
+        available_by_type[q_type] = len(rows)
+        pool_by_type[q_type] = [
+            {
+                "question_type": q_type,
+                "question_text": q.question_text,
+                "options": _parse_question_options(q.options),
+                "correct_answer": q.correct_answer,
+                "explanation": q.explanation,
+                "difficulty_score": _normalize_difficulty_score(q.difficulty_score, target_diff),
+                "score": float(row.get("score") or 0),
+                "source": "local",
+                "_qid": int(q.id),
+            }
+            for q in rows
+        ]
+
+    reserve_by_type = {
+        q_type: _paper_dedup_reserve_count(count)
+        for q_type, count in desired_by_type.items()
+    }
+    take_by_type = {
+        q_type: min(len(pool_by_type.get(q_type, [])), count + reserve_by_type.get(q_type, 5))
+        for q_type, count in desired_by_type.items()
+    }
+    picked_by_type: dict[str, list[dict]] = {q_type: [] for q_type in desired_by_type.keys()}
+
+    for _round in range(6):
+        staged: list[dict] = []
+        for row in configs:
+            q_type = row["type"]
+            if q_type not in desired_by_type:
+                continue
+            take_n = int(take_by_type.get(q_type, 0))
+            staged.extend(pool_by_type.get(q_type, [])[:take_n])
+        staged, _ = _dedup_paper_questions_by_text(staged)
+        staged, _ = await _dedup_paper_questions_by_semantic(
+            staged,
+            llm=llm,
+            max_tokens=semantic_max_tokens,
+            conf_threshold=semantic_conf_threshold,
+        )
+
+        next_picked_by_type: dict[str, list[dict]] = {q_type: [] for q_type in desired_by_type.keys()}
+        for item in staged:
+            q_type = str(item.get("question_type") or "")
+            if q_type not in desired_by_type:
+                continue
+            if len(next_picked_by_type[q_type]) >= desired_by_type[q_type]:
+                continue
+            next_picked_by_type[q_type].append(item)
+        picked_by_type = next_picked_by_type
+
+        missing_items = [
+            (q_type, desired_by_type[q_type] - len(picked_by_type.get(q_type, [])))
+            for q_type in desired_by_type.keys()
+            if desired_by_type[q_type] - len(picked_by_type.get(q_type, [])) > 0
+        ]
+        if not missing_items:
+            break
+        expanded = False
+        for q_type, missing in missing_items:
+            current_take = int(take_by_type.get(q_type, 0))
+            pool_size = len(pool_by_type.get(q_type, []))
+            if current_take >= pool_size:
+                continue
+            inc = max(1, int(reserve_by_type.get(q_type, 5)))
+            take_by_type[q_type] = min(pool_size, current_take + inc)
+            expanded = True
+        if not expanded:
+            break
+
+    preview_questions: list[dict] = []
+    insufficient_types: list[dict] = []
+    for row in configs:
+        q_type = row["type"]
+        count = desired_by_type.get(q_type, 0)
+        if count <= 0:
+            continue
+        picked = picked_by_type.get(q_type, [])[:count]
         if len(picked) < count:
             insufficient_types.append(
                 {
                     "question_type": q_type,
                     "requested": count,
-                    "available": len(rows),
+                    "available": available_by_type.get(q_type, 0),
                     "missing": count - len(picked),
                 }
             )
-        for q in picked:
-            selected_ids.add(int(q.id))
-            preview_questions.append(
-                {
-                    "question_type": q_type,
-                    "question_text": q.question_text,
-                    "options": _parse_question_options(q.options),
-                    "correct_answer": q.correct_answer,
-                    "explanation": q.explanation,
-                    "difficulty_score": _normalize_difficulty_score(q.difficulty_score, target_diff),
-                    "score": float(row.get("score") or 0),
-                    "source": "local",
-                }
-            )
+        preview_questions.extend([_sanitize_paper_question_item(x) for x in picked])
     return preview_questions, insufficient_types
 
 
@@ -3557,29 +4050,184 @@ async def _generate_internet_questions_for_paper(
 
     settings = get_rag_settings()
     llm = get_llm(settings)
-    prompt = _build_generate_paper_prompt(
-        course_name=course_name,
-        chapter_titles=chapter_titles,
-        paper_title=paper_title,
-        overall_difficulty=overall_difficulty,
-        configs=configs,
+    semantic_max_tokens = max(1200, min(2600, int(settings.llm_max_tokens or 512)))
+    gen_max_tokens = max(4096, int(settings.llm_max_tokens or 512))
+    semantic_conf_threshold = _normalize_difficulty_score(
+        getattr(settings, "paper_semantic_dedup_conf_threshold", PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT),
+        PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT,
     )
-    raw = await asyncio.to_thread(
-        llm.generate,
-        prompt,
-        max_tokens=max(2200, int(settings.llm_max_tokens or 512)),
-        temperature=0.2,
-    )
-    candidates = _extract_json_payload(raw)
-    if not candidates:
-        raise RuntimeError("互联网题库生成失败：模型返回结果无法解析")
-
-    grouped: dict[str, list[dict]] = {"single_choice": [], "multiple_choice": [], "judge": [], "blank": [], "qa": []}
-    for item in candidates:
-        q_type = _to_question_type(str(item.get("type") or ""))
-        if not q_type:
+    # 估算生成输出 token，用于判定是否需要按题型分批调用模型。
+    generation_token_est = {
+        "single_choice": 190,
+        "multiple_choice": 300,
+        "judge": 105,
+        "blank": 100,
+        "qa": 140,
+    }
+    reserve_by_type = {
+        str(row.get("type") or ""): _paper_dedup_reserve_count(int(row.get("count") or 0))
+        for row in configs
+    }
+    prompt_limits_for_plan = {
+        str(row.get("type") or ""): int(row.get("count") or 0) + reserve_by_type.get(str(row.get("type") or ""), 5) if int(row.get("count") or 0) > 0 else 0
+        for row in configs
+    }
+    estimated_output_tokens = 0
+    for q_type, count in prompt_limits_for_plan.items():
+        if int(count) <= 0:
             continue
-        grouped[q_type].append(item)
+        estimated_output_tokens += int(count) * int(generation_token_est.get(q_type, 120))
+    batch_output_budget = max(800, int(gen_max_tokens * 0.65))
+
+    planned_batches: list[dict[str, int]] = []
+    if estimated_output_tokens > batch_output_budget:
+        planned_batches = _plan_question_generation_batches(prompt_limits_for_plan, batch_output_budget)
+    if not planned_batches:
+        planned_batches = [{k: int(v) for k, v in prompt_limits_for_plan.items() if int(v) > 0}]
+
+    logger.info(
+        "internet_paper_batch_plan course_name=%r paper_title=%r gen_max_tokens=%s estimated_tokens=%s batch_budget=%s batch_count=%s batches=%s",
+        (course_name or "")[:80],
+        (paper_title or "")[:80],
+        gen_max_tokens,
+        estimated_output_tokens,
+        batch_output_budget,
+        len(planned_batches),
+        planned_batches,
+    )
+
+    def _shrink_batch_limits(limits: dict[str, int]) -> dict[str, int]:
+        ordered_types = ["single_choice", "multiple_choice", "judge", "blank", "qa"]
+        out: dict[str, int] = {}
+        changed = False
+        for q_type in ordered_types:
+            n = int(limits.get(q_type, 0))
+            if n <= 0:
+                continue
+            if n > 1:
+                shrunk = max(1, (n + 1) // 2)
+                if shrunk < n:
+                    changed = True
+                out[q_type] = shrunk
+            else:
+                out[q_type] = 1
+        if changed:
+            return out
+        return {k: int(v) for k, v in limits.items() if int(v) > 0}
+
+    max_batch_attempts = 4
+    grouped: dict[str, list[dict]] = {"single_choice": [], "multiple_choice": [], "judge": [], "blank": [], "qa": []}
+    for batch_idx, initial_batch_limits in enumerate(planned_batches, start=1):
+        current_limits = {k: int(v) for k, v in initial_batch_limits.items() if int(v) > 0}
+        if sum(current_limits.values()) <= 0:
+            continue
+
+        batch_ok = False
+        last_reason = ""
+        for attempt in range(1, max_batch_attempts + 1):
+            batch_prompt_configs: list[dict] = []
+            for row in configs:
+                q_type = str(row.get("type") or "")
+                batch_count = int(current_limits.get(q_type, 0))
+                if batch_count <= 0:
+                    continue
+                batch_prompt_configs.append({**row, "count": batch_count})
+            if not batch_prompt_configs:
+                break
+
+            prompt = _build_generate_paper_prompt(
+                course_name=course_name,
+                chapter_titles=chapter_titles,
+                paper_title=paper_title,
+                overall_difficulty=overall_difficulty,
+                configs=batch_prompt_configs,
+            )
+            try:
+                raw = await asyncio.to_thread(
+                    llm.generate,
+                    prompt,
+                    max_tokens=gen_max_tokens,
+                    temperature=0.2,
+                )
+            except Exception as e:
+                last_reason = f"llm_call:{str(e)[:180]}"
+                logger.warning(
+                    "internet_paper_batch_retry course_name=%r paper_title=%r batch=%s/%s attempt=%s/%s reason=%r limits=%s",
+                    (course_name or "")[:80],
+                    (paper_title or "")[:80],
+                    batch_idx,
+                    len(planned_batches),
+                    attempt,
+                    max_batch_attempts,
+                    last_reason,
+                    current_limits,
+                )
+                if attempt < max_batch_attempts:
+                    next_limits = _shrink_batch_limits(current_limits)
+                    if next_limits == current_limits:
+                        break
+                    current_limits = next_limits
+                    continue
+                break
+
+            candidates = _extract_json_payload(raw)
+            if candidates:
+                raw_len = len(str(raw or ""))
+                logger.info(
+                    "internet_paper_batch_generated course_name=%r paper_title=%r batch=%s/%s attempt=%s/%s requested=%s parsed_candidates=%s raw_len=%s",
+                    (course_name or "")[:80],
+                    (paper_title or "")[:80],
+                    batch_idx,
+                    len(planned_batches),
+                    attempt,
+                    max_batch_attempts,
+                    current_limits,
+                    len(candidates),
+                    raw_len,
+                )
+                for item in candidates:
+                    q_type = _to_question_type(str(item.get("type") or ""))
+                    if not q_type:
+                        continue
+                    grouped[q_type].append(item)
+                batch_ok = True
+                break
+
+            raw_len, raw_head, raw_tail = _summarize_llm_raw_for_log(raw)
+            last_reason = "parse_failed"
+            logger.warning(
+                "internet_paper_generate_parse_failed course_name=%r paper_title=%r batch=%s/%s attempt=%s/%s prompt_len=%s raw_len=%s raw_head=%r raw_tail=%r batch_limits=%s",
+                (course_name or "")[:80],
+                (paper_title or "")[:80],
+                batch_idx,
+                len(planned_batches),
+                attempt,
+                max_batch_attempts,
+                len(prompt or ""),
+                raw_len,
+                raw_head,
+                raw_tail,
+                current_limits,
+            )
+            if attempt < max_batch_attempts:
+                next_limits = _shrink_batch_limits(current_limits)
+                if next_limits == current_limits:
+                    break
+                current_limits = next_limits
+                continue
+            break
+
+        if not batch_ok:
+            logger.error(
+                "internet_paper_batch_retry_exhausted course_name=%r paper_title=%r batch=%s/%s initial_limits=%s final_limits=%s last_reason=%r",
+                (course_name or "")[:80],
+                (paper_title or "")[:80],
+                batch_idx,
+                len(planned_batches),
+                initial_batch_limits,
+                current_limits,
+                last_reason,
+            )
 
     preview_questions: list[dict] = []
     insufficient_types: list[dict] = []
@@ -3588,57 +4236,43 @@ async def _generate_internet_questions_for_paper(
         count = int(row["count"])
         if count <= 0:
             continue
-        pool = grouped.get(q_type, [])
-        picked = pool[:count]
+        target_diff = _normalize_difficulty_score(overall_difficulty if overall_difficulty is not None else row.get("difficulty", 0.8))
+        score = float(row.get("score") or 0)
+        raw_pool = grouped.get(q_type, [])
+        normalized_pool: list[dict] = []
+        for item in raw_pool:
+            normalized = _normalize_internet_paper_candidate_item(item, q_type=q_type, target_diff=target_diff, score=score)
+            if normalized:
+                normalized_pool.append(normalized)
+        reserve = int(reserve_by_type.get(q_type, 5))
+        take_n = min(len(normalized_pool), count + reserve)
+        picked: list[dict] = []
+        for _round in range(6):
+            candidates_slice = normalized_pool[:take_n]
+            candidates_slice, _ = _dedup_paper_questions_by_text(candidates_slice)
+            candidates_slice, _ = await _dedup_paper_questions_by_semantic(
+                candidates_slice,
+                llm=llm,
+                max_tokens=semantic_max_tokens,
+                conf_threshold=semantic_conf_threshold,
+            )
+            picked = candidates_slice[:count]
+            if len(picked) >= count or take_n >= len(normalized_pool):
+                break
+            take_n = min(
+                len(normalized_pool),
+                take_n + max(1, reserve),
+            )
         if len(picked) < count:
             insufficient_types.append(
                 {
                     "question_type": q_type,
                     "requested": count,
-                    "available": len(pool),
+                    "available": len(normalized_pool),
                     "missing": count - len(picked),
                 }
             )
-        target_diff = _normalize_difficulty_score(overall_difficulty if overall_difficulty is not None else row.get("difficulty", 0.8))
-        for item in picked:
-            q_text = str(item.get("question_text") or "").strip()
-            if not q_text:
-                continue
-            options: list[str] = []
-            answer = _trim_answer(item.get("correct_answer"), max_len=32)
-            if q_type == "single_choice":
-                opts = _normalize_choice_options(item.get("options"))
-                ans = _normalize_choice_answer(item.get("correct_answer"), opts)
-                if len(opts) != 4 or not ans:
-                    continue
-                options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
-                answer = ans
-            elif q_type == "multiple_choice":
-                opts = _normalize_choice_options(item.get("options"))
-                ans = _normalize_multi_answer(item.get("correct_answer"))
-                if len(opts) != 4 or len([x for x in ans.split(",") if x]) < 2:
-                    continue
-                options = [f"{chr(ord('A') + i)}. {x}" for i, x in enumerate(opts)]
-                answer = ans
-            elif q_type == "judge":
-                ans = _normalize_judge_answer(item.get("correct_answer"))
-                if not ans:
-                    continue
-                options = ["A. 正确", "B. 错误"]
-                answer = ans
-
-            preview_questions.append(
-                {
-                    "question_type": q_type,
-                    "question_text": q_text,
-                    "options": options,
-                    "correct_answer": answer,
-                    "explanation": str(item.get("explanation") or "").strip() or None,
-                    "difficulty_score": _normalize_difficulty_score(item.get("difficulty_score"), target_diff),
-                    "score": float(row.get("score") or 0),
-                    "source": "internet",
-                }
-            )
+        preview_questions.extend([_sanitize_paper_question_item(x) for x in picked])
     return preview_questions, insufficient_types
 
 
@@ -3692,7 +4326,33 @@ async def generate_teacher_paper(
     question_source = _normalize_question_source(body.question_source)
     target_overall_difficulty = _normalize_difficulty_score(body.overall_difficulty, 0.8) if body.overall_difficulty is not None else None
 
-    if question_source == "local":
+    has_preview_override = body.preview_questions_override is not None
+    if has_preview_override:
+        preview_questions: list[dict] = []
+        for item in body.preview_questions_override or []:
+            q_type = _to_question_type(item.question_type) or "qa"
+            q_text = item.question_text.strip()
+            if not q_text:
+                continue
+            opts = [str(x).strip() for x in (item.options or []) if str(x).strip()]
+            preview_questions.append(
+                _sanitize_paper_question_item(
+                    {
+                        "question_type": q_type,
+                        "question_text": q_text,
+                        "options": opts,
+                        "correct_answer": (item.correct_answer or "").strip(),
+                        "explanation": (item.explanation or "").strip() or None,
+                        "difficulty_score": _normalize_difficulty_score(item.difficulty_score, 0.8),
+                        "score": max(0.0, float(item.score or 0.0)),
+                        "source": _normalize_question_source(item.source),
+                    }
+                )
+            )
+        if not preview_questions:
+            raise HTTPException(status_code=400, detail="提交试卷库前请至少保留一道题目")
+        insufficient_types: list[dict] = []
+    elif question_source == "local":
         preview_questions, insufficient_types = await _pick_local_questions_for_paper(
             db=db,
             course_id=course.id,
@@ -3713,7 +4373,9 @@ async def generate_teacher_paper(
     total_score = round(sum(float(x.get("score") or 0) for x in preview_questions), 2)
     weighted_difficulty_sum = sum(float(x.get("score") or 0) * _normalize_difficulty_score(x.get("difficulty_score"), 0.8) for x in preview_questions)
     computed_overall_difficulty = round((weighted_difficulty_sum / total_score), 2) if total_score > 0 else 0.0
-    if is_partial and question_source == "local":
+    if has_preview_override and body.save_to_bank:
+        message = "试卷已提交到试卷库"
+    elif is_partial and question_source == "local":
         message = "题库里的习题数量不够生成试卷，请先生成习题"
     elif is_partial:
         message = "试卷未完全生成，已返回可预览内容"
@@ -3721,7 +4383,7 @@ async def generate_teacher_paper(
         message = "试卷生成成功"
 
     paper_id: int | None = None
-    if body.save_to_bank and (not is_partial):
+    if body.save_to_bank and ((not is_partial) or has_preview_override):
         paper = Paper(
             course_id=course.id,
             title=body.paper_title.strip(),
@@ -3729,7 +4391,7 @@ async def generate_teacher_paper(
             paper_bank_type=paper_bank_type,
             question_source=question_source,
             status="pending",
-            is_partial=False,
+            is_partial=bool(is_partial),
             total_score=total_score,
             request_payload=json.dumps(
                 {

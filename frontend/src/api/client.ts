@@ -75,6 +75,8 @@ export type RagConfig = {
   rerank_top_n: number;
   no_answer_threshold: number;
   llm_max_tokens: number;
+  exercise_generate_max_tokens: number;
+  paper_semantic_dedup_conf_threshold: number;
   llm_temperature: number;
 };
 
@@ -493,6 +495,45 @@ export const api = {
           `/teacher/chapters/${chapterId}/questions/generate`,
           { method: "POST", body }
         ),
+      generateChapterQuestionsPreview: (
+        chapterId: number,
+        body: {
+          single_choice_max: number;
+          multiple_choice_max: number;
+          judge_max: number;
+          qa_max: number;
+          blank_max: number;
+          question_bank_type: "training" | "exam";
+          single_choice_difficulty_score: number;
+          multiple_choice_difficulty_score: number;
+          judge_difficulty_score: number;
+          qa_difficulty_score: number;
+          blank_difficulty_score: number;
+          knowledge_point_ids?: number[];
+        }
+      ) =>
+        request<{
+          course_id: number;
+          chapter_id: number;
+          question_bank_type: "training" | "exam";
+          output_count: number;
+          generated_count: number;
+          by_type: Record<string, number>;
+          skipped: number;
+          items: {
+            chapter_id: number | null;
+            chapter_title: string | null;
+            question_type: string;
+            question_text: string;
+            options: string[];
+            correct_answer: string;
+            explanation: string | null;
+            difficulty_score: number | null;
+          }[];
+        }>(
+          `/teacher/chapters/${chapterId}/questions/generate-preview`,
+          { method: "POST", body }
+        ),
       generatePaper: (
         body: {
           course_id: number;
@@ -503,6 +544,16 @@ export const api = {
           overall_difficulty?: number | null;
           configs: { type: string; count: number; difficulty?: number | null; score: number }[];
           save_to_bank: boolean;
+          preview_questions_override?: {
+            question_type: string;
+            question_text: string;
+            options: string[];
+            correct_answer: string;
+            explanation: string | null;
+            difficulty_score: number;
+            score: number;
+            source: "local" | "internet";
+          }[];
         }
       ) =>
         request<{

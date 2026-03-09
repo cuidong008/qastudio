@@ -153,6 +153,8 @@ export default function AdminRag() {
       rerank_top_n: form.rerank_top_n,
       no_answer_threshold: form.no_answer_threshold,
       llm_max_tokens: form.llm_max_tokens,
+      exercise_generate_max_tokens: form.exercise_generate_max_tokens,
+      paper_semantic_dedup_conf_threshold: form.paper_semantic_dedup_conf_threshold,
       llm_temperature: form.llm_temperature,
     };
     api.admin.rag
@@ -458,16 +460,41 @@ export default function AdminRag() {
             ))}
           </select>
         </div>
+        <div style={{ display: "flex", gap: 16, flexWrap: "wrap", marginBottom: 12 }}>
+          <div style={blockStyle}>
+            <label style={labelStyle}>生成习题长度 max_tokens</label>
+            <input
+              type="number"
+              style={{ ...inputStyle, width: 100 }}
+              value={c.exercise_generate_max_tokens ?? 4096}
+              onChange={(e) => update("exercise_generate_max_tokens", parseInt(e.target.value, 10) || 4096)}
+              min={1}
+              max={8192}
+            />
+          </div>
+          <div style={blockStyle}>
+            <label style={labelStyle}>试卷语义去重阈值</label>
+            <input
+              type="number"
+              step={0.01}
+              style={{ ...inputStyle, width: 100 }}
+              value={c.paper_semantic_dedup_conf_threshold ?? 0.85}
+              onChange={(e) => update("paper_semantic_dedup_conf_threshold", parseFloat(e.target.value) || 0.85)}
+              min={0}
+              max={1}
+            />
+          </div>
+        </div>
         <div style={{ display: "flex", gap: 16, flexWrap: "wrap" }}>
           <div style={blockStyle}>
-            <label style={labelStyle}>生成长度 max_tokens</label>
+            <label style={labelStyle}>其它操作生成长度 max_tokens</label>
             <input
               type="number"
               style={{ ...inputStyle, width: 100 }}
               value={c.llm_max_tokens ?? 512}
               onChange={(e) => update("llm_max_tokens", parseInt(e.target.value, 10) || 512)}
               min={1}
-              max={4096}
+              max={8192}
             />
           </div>
           <div style={blockStyle}>

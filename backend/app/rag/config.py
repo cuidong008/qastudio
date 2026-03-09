@@ -68,6 +68,8 @@ class RAGSettings(BaseSettings):
 
     # ----- 生成参数 -----
     llm_max_tokens: int = 512
+    exercise_generate_max_tokens: int = 4096
+    paper_semantic_dedup_conf_threshold: float = 0.85
     llm_temperature: float = 0.3
 
     class Config:
@@ -95,8 +97,9 @@ def _coerce(value: str, field_name: str) -> str | int | float | bool:
         "hyde_max_tokens",
         "rerank_top_n",
         "llm_max_tokens",
+        "exercise_generate_max_tokens",
     }
-    float_fields = {"llm_temperature", "hyde_temperature", "no_answer_threshold"}
+    float_fields = {"llm_temperature", "hyde_temperature", "no_answer_threshold", "paper_semantic_dedup_conf_threshold"}
     bool_fields = {
         "enabled",
         "hybrid_enabled",

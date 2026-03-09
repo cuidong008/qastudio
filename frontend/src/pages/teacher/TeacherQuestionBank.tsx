@@ -168,6 +168,57 @@ function GenerateExercisesPanel() {
     blank: { max: 10, difficulty: 0.8 },
     qa: { max: 5, difficulty: 0.8 },
   });
+  const [previewRows, setPreviewRows] = useState<
+    {
+      id: number;
+      courseName: string;
+      chapterId: number;
+      chapterName: string;
+      questionType: string;
+      questionTypeKey: QuestionTypeKey;
+      questionText: string;
+      options: string[];
+      correctAnswer: string;
+      explanation: string;
+      difficultyScore: number | null;
+    }[]
+  >([]);
+  const [previewCurrentPage, setPreviewCurrentPage] = useState(1);
+  const [previewPageSize, setPreviewPageSize] = useState(10);
+  const [confirmingImport, setConfirmingImport] = useState(false);
+  const [previewModalMode, setPreviewModalMode] = useState<"view" | "edit">("view");
+  const [editingPreviewRowId, setEditingPreviewRowId] = useState<number | null>(null);
+  const [previewQuestionTypeDraft, setPreviewQuestionTypeDraft] = useState<QuestionTypeKey>("single_choice");
+  const [previewChapterIdDraft, setPreviewChapterIdDraft] = useState<number | "">("");
+  const [previewQuestionTextDraft, setPreviewQuestionTextDraft] = useState("");
+  const [previewOptionsDraft, setPreviewOptionsDraft] = useState("");
+  const [previewAnswerDraft, setPreviewAnswerDraft] = useState("");
+  const [previewExplanationDraft, setPreviewExplanationDraft] = useState("");
+  const [previewDifficultyScoreDraft, setPreviewDifficultyScoreDraft] = useState("");
+  const [chapterGenerateStats, setChapterGenerateStats] = useState<
+    {
+      chapterId: number;
+      chapterName: string;
+      requestedTotal: number;
+      modelOutputCount: number;
+      generatedCount: number;
+      skipped: number;
+      requestedByType: Record<QuestionTypeKey, number>;
+      generatedByType: Record<QuestionTypeKey, number>;
+    }[]
+  >([]);
+  const previewTotalPages = Math.max(1, Math.ceil(previewRows.length / previewPageSize));
+  const pagedPreviewRows = useMemo(() => {
+    const start = (previewCurrentPage - 1) * previewPageSize;
+    return previewRows.slice(start, start + previewPageSize);
+  }, [previewRows, previewCurrentPage, previewPageSize]);
+  const questionTypeLabel: Record<QuestionTypeKey, string> = {
+    single_choice: "单选题",
+    multiple_choice: "多选题",
+    judge: "判断题",
+    blank: "填空题",
+    qa: "问答题",
+  };
 
   useEffect(() => {
     api.teacher
@@ -305,10 +356,20 @@ function GenerateExercisesPanel() {
     setTypeConfigs(defaultExerciseTypeConfigs);
     setChapterId(chapters.length ? "all" : "");
     setKnowledgePointIds(knowledgePoints.map((x) => x.id));
+    setEditingPreviewRowId(null);
+    setPreviewRows([]);
+    setPreviewCurrentPage(1);
+    setPreviewPageSize(10);
+    setChapterGenerateStats([]);
     setProgressPercent(0);
     setProgressText("");
     setProgressState("idle");
   };
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(previewRows.length / previewPageSize));
+    setPreviewCurrentPage((p) => Math.min(p, maxPage));
+  }, [previewRows.length, previewPageSize]);
 
   const openGenerateSettingsModal = () => {
     const draft: Record<QuestionTypeKey, { max: number; difficulty: number }> = {
@@ -378,55 +439,6 @@ function GenerateExercisesPanel() {
     toast("已恢复为配置文件中的初始值", "success");
   };
 
-  const pollGenerateTasks = async (taskIds: number[]) => {
-    const total = taskIds.length;
-    const startedAt = Date.now();
-    const timeoutMs = 10 * 60 * 1000;
-    while (true) {
-      const details = await Promise.all(
-        taskIds.map((id) =>
-          api.teacher.courses.getQuestionTask(id).catch((e: any) => ({
-            id,
-            status: "failed",
-            error_message: e?.message || "任务状态查询失败",
-          }))
-        )
-      );
-      const successCount = details.filter((x: any) => x.status === "success").length;
-      const failedRows = details.filter((x: any) => x.status === "failed");
-      const runningCount = details.filter((x: any) => x.status === "running" || x.status === "pending").length;
-      const doneCount = successCount + failedRows.length;
-      setProgressPercent(Math.max(1, Math.min(99, Math.round((doneCount / total) * 100))));
-      setProgressText(`生成中：已完成 ${doneCount}/${total} 个章节任务（运行中 ${runningCount}）`);
-
-      if (failedRows.length > 0) {
-        const reasonText = failedRows
-          .slice(0, 3)
-          .map((x: any) => x.error_message || "未知错误")
-          .join("；");
-        setProgressState("failed");
-        setProgressPercent(Math.round((doneCount / total) * 100));
-        setProgressText(`生成失败：${reasonText}`);
-        toast(`生成失败：${reasonText}`, "error");
-        return;
-      }
-      if (successCount === total) {
-        setProgressState("success");
-        setProgressPercent(100);
-        setProgressText(`生成成功：已完成 ${successCount}/${total} 个章节任务`);
-        toast("生成成功", "success");
-        return;
-      }
-      if (Date.now() - startedAt > timeoutMs) {
-        setProgressState("failed");
-        setProgressText("生成失败：任务超时，请稍后重试");
-        toast("生成失败：任务超时，请稍后重试", "error");
-        return;
-      }
-      await new Promise((r) => setTimeout(r, 2000));
-    }
-  };
-
   const submitGenerate = async () => {
     if (!courseId) {
       toast("请先选择课程", "error");
@@ -470,9 +482,32 @@ function GenerateExercisesPanel() {
     setSubmitting(true);
     setProgressState("running");
     setProgressPercent(1);
-    setProgressText("正在提交生成任务...");
+    setProgressText("正在生成预览...");
+    setChapterGenerateStats([]);
     try {
-      const taskIds: number[] = [];
+      const generatedRows: {
+        id: number;
+        courseName: string;
+        chapterId: number;
+        chapterName: string;
+        questionType: string;
+        questionTypeKey: QuestionTypeKey;
+        questionText: string;
+        options: string[];
+        correctAnswer: string;
+        explanation: string;
+        difficultyScore: number | null;
+      }[] = [];
+      const statsRows: {
+        chapterId: number;
+        chapterName: string;
+        requestedTotal: number;
+        modelOutputCount: number;
+        generatedCount: number;
+        skipped: number;
+        requestedByType: Record<QuestionTypeKey, number>;
+        generatedByType: Record<QuestionTypeKey, number>;
+      }[] = [];
       const chapterCount = targetChapterIds.length;
       const distribute = (total: number, count: number) => {
         const base = Math.floor(total / count);
@@ -484,8 +519,12 @@ function GenerateExercisesPanel() {
       const judgePlan = distribute(maxByType.judge_max, chapterCount);
       const qaPlan = distribute(maxByType.qa_max, chapterCount);
       const blankPlan = distribute(maxByType.blank_max, chapterCount);
+      const courseName = courses.find((x) => x.id === courseId)?.name || "未知课程";
+      let idSeed = Date.now();
+      let submittedChapters = 0;
 
       for (let i = 0; i < chapterCount; i += 1) {
+        setProgressText(`正在生成预览：第 ${i + 1} / ${chapterCount} 个章节`);
         const chapterKnowledgePointIds = knowledgePointIds.filter(
           (kpId) => knowledgePoints.find((kp) => kp.id === kpId)?.chapterId === targetChapterIds[i]
         );
@@ -505,18 +544,71 @@ function GenerateExercisesPanel() {
           chapterTaskPayload.qa_max +
           chapterTaskPayload.blank_max;
         if (perChapterTotal <= 0) continue;
-        const task = await api.teacher.courses.generateChapterQuestions(targetChapterIds[i], chapterTaskPayload);
-        taskIds.push(task.task_id);
+        const resp = await api.teacher.courses.generateChapterQuestionsPreview(targetChapterIds[i], chapterTaskPayload);
+        const chapterName = chapters.find((x) => x.id === targetChapterIds[i])?.title || `章节${targetChapterIds[i]}`;
+        const generatedByType: Record<QuestionTypeKey, number> = {
+          single_choice: Number(resp.by_type?.single_choice || 0),
+          multiple_choice: Number(resp.by_type?.multiple_choice || 0),
+          judge: Number(resp.by_type?.judge || 0),
+          blank: Number(resp.by_type?.blank || 0),
+          qa: Number(resp.by_type?.qa || 0),
+        };
+        const requestedByType: Record<QuestionTypeKey, number> = {
+          single_choice: chapterTaskPayload.single_choice_max,
+          multiple_choice: chapterTaskPayload.multiple_choice_max,
+          judge: chapterTaskPayload.judge_max,
+          blank: chapterTaskPayload.blank_max,
+          qa: chapterTaskPayload.qa_max,
+        };
+        statsRows.push({
+          chapterId: targetChapterIds[i],
+          chapterName,
+          requestedTotal: perChapterTotal,
+          modelOutputCount: Number(resp.output_count || 0),
+          generatedCount: Number(resp.generated_count || 0),
+          skipped: Number(resp.skipped || 0),
+          requestedByType,
+          generatedByType,
+        });
+        for (const item of resp.items || []) {
+          const typeKey = (
+            ["single_choice", "multiple_choice", "judge", "blank", "qa"].includes(item.question_type)
+              ? item.question_type
+              : "qa"
+          ) as QuestionTypeKey;
+          generatedRows.push({
+            id: idSeed++,
+            courseName,
+            chapterId: targetChapterIds[i],
+            chapterName: item.chapter_title || chapterName,
+            questionType: questionTypeLabel[typeKey] || typeKey,
+            questionTypeKey: typeKey,
+            questionText: item.question_text || "",
+            options: Array.isArray(item.options) ? item.options.map((x) => String(x || "")) : [],
+            correctAnswer: item.correct_answer || "",
+            explanation: item.explanation || "",
+            difficultyScore:
+              item.difficulty_score != null && Number.isFinite(Number(item.difficulty_score))
+                ? Number(Number(item.difficulty_score).toFixed(2))
+                : null,
+          });
+        }
+        submittedChapters += 1;
+        setProgressPercent(Math.max(1, Math.min(99, Math.round((submittedChapters / chapterCount) * 100))));
       }
-      if (!taskIds.length) {
+      setChapterGenerateStats(statsRows);
+      if (!submittedChapters) {
         throw new Error("题型数量配置过小，无法分配到所选章节，请调整后重试");
       }
-      setProgressText(
-        targetChapterIds.length > 1
-          ? `任务已提交：共 ${targetChapterIds.length} 个章节（任务ID：${taskIds.join("、")}）`
-          : `任务已提交（任务ID：${taskIds[0]}）`
-      );
-      await pollGenerateTasks(taskIds);
+      if (!generatedRows.length) {
+        throw new Error("未生成可预览题目，请调整参数后重试");
+      }
+      setPreviewRows(generatedRows);
+      setPreviewCurrentPage(1);
+      setProgressState("success");
+      setProgressPercent(100);
+      setProgressText(`预览生成完成：共 ${generatedRows.length} 道题，请确认后导入题库`);
+      toast(`已生成预览 ${generatedRows.length} 道题`, "success");
     } catch (e: any) {
       setProgressState("failed");
       setProgressText(e?.message || "提交生成失败");
@@ -524,6 +616,100 @@ function GenerateExercisesPanel() {
     } finally {
       setSubmitting(false);
     }
+  };
+
+  const confirmImportGenerated = async () => {
+    if (!courseId) return toast("请先选择课程", "error");
+    if (!previewRows.length) return toast("预览表格为空，请先生成预览", "error");
+    const items = previewRows.map((row) => ({
+      chapter_id: row.chapterId,
+      question_type: row.questionTypeKey,
+      question_text: row.questionText,
+      options: row.options || [],
+      correct_answer: row.correctAnswer,
+      explanation: row.explanation || null,
+      difficulty_score: row.difficultyScore,
+    }));
+    setConfirmingImport(true);
+    try {
+      const res = await api.teacher.courses.importQuestionsConfirm({
+        course_id: courseId,
+        question_bank_type: bankType,
+        items,
+      });
+      toast(res.message || `已导入 ${res.imported_count} 道题目`, "success");
+      // 仅刷新生成结果区，保留基础筛选区已选项
+      setPreviewRows([]);
+      setPreviewCurrentPage(1);
+      setChapterGenerateStats([]);
+      setProgressPercent(0);
+      setProgressText("");
+      setProgressState("idle");
+    } catch (e: any) {
+      toast(e?.message || "导入失败", "error");
+    } finally {
+      setConfirmingImport(false);
+    }
+  };
+
+  const openPreviewModal = (rowId: number, mode: "view" | "edit") => {
+    const row = previewRows.find((x) => x.id === rowId);
+    if (!row) return;
+    setPreviewModalMode(mode);
+    setEditingPreviewRowId(rowId);
+    setPreviewQuestionTypeDraft(row.questionTypeKey);
+    setPreviewChapterIdDraft(row.chapterId);
+    setPreviewQuestionTextDraft(row.questionText || "");
+    setPreviewOptionsDraft((row.options || []).join("\n"));
+    setPreviewAnswerDraft(row.correctAnswer || "");
+    setPreviewExplanationDraft(row.explanation || "");
+    setPreviewDifficultyScoreDraft(row.difficultyScore != null ? String(row.difficultyScore) : "");
+  };
+
+  const savePreviewRow = () => {
+    if (!editingPreviewRowId) return;
+    const qText = previewQuestionTextDraft.trim();
+    const ans = previewAnswerDraft.trim();
+    if (!qText) return toast("题目内容不能为空", "error");
+    if (!ans) return toast("答案不能为空", "error");
+    const optionsList = previewOptionsDraft
+      .split("\n")
+      .map((x) => x.trim())
+      .filter((x) => !!x);
+    const needOptions = previewQuestionTypeDraft === "single_choice" || previewQuestionTypeDraft === "multiple_choice";
+    if (needOptions && optionsList.length < 2) return toast("选择题至少需要2个选项", "error");
+    const diffStr = previewDifficultyScoreDraft.trim();
+    const difficultyScore: number | null =
+      diffStr === ""
+        ? null
+        : (() => {
+            const d = Number(diffStr);
+            if (!Number.isFinite(d) || d < 0 || d > 1) return null;
+            return Number(d.toFixed(2));
+          })();
+    if (diffStr !== "" && difficultyScore === null) return toast("难度系数需在 0~1 或留空", "error");
+    const draftChapterId = previewChapterIdDraft === "" ? null : Number(previewChapterIdDraft);
+    const nextChapter = draftChapterId ? chapters.find((x) => x.id === draftChapterId) : null;
+    setPreviewRows((prev) =>
+      prev.map((x) =>
+        x.id === editingPreviewRowId
+          ? {
+              ...x,
+              chapterId: nextChapter?.id ?? x.chapterId,
+              chapterName: nextChapter?.title || x.chapterName,
+              questionTypeKey: previewQuestionTypeDraft,
+              questionType: questionTypeLabel[previewQuestionTypeDraft],
+              questionText: qText,
+              options: needOptions ? optionsList : [],
+              correctAnswer: ans,
+              explanation: previewExplanationDraft.trim(),
+              difficultyScore: difficultyScore ?? null,
+            }
+          : x
+      )
+    );
+    toast("预览数据已更新", "success");
+    setEditingPreviewRowId(null);
   };
 
   return (
@@ -736,7 +922,12 @@ function GenerateExercisesPanel() {
         </div>
 
         <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14 }}>
-          <div style={{ fontWeight: 700, marginBottom: 10 }}>【题目类型配置】</div>
+          <div style={{ display: "flex", alignItems: "center", gap: 10, flexWrap: "wrap", marginBottom: 10 }}>
+            <div style={{ fontWeight: 700 }}>【题目类型配置】</div>
+            <div style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+              大模型单次生成最大数量有限制，设置的数量请不要过大
+            </div>
+          </div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 520 }}>
               <thead>
@@ -803,7 +994,244 @@ function GenerateExercisesPanel() {
             <div style={{ marginTop: 6, fontSize: 12, color: "var(--text-muted)" }}>{progressPercent}%</div>
           </div>
         )}
+
+        {!!chapterGenerateStats.length && (
+          <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14 }}>
+            <div style={{ fontWeight: 700, marginBottom: 8 }}>【按章节生成统计】</div>
+            <div style={{ overflowX: "auto" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 920 }}>
+                <thead>
+                  <tr>
+                    {["章节", "请求总数", "模型产出", "预览生成", "跳过(校验/去重)", "单选", "多选", "判断", "填空", "问答"].map((h) => (
+                      <th key={h} style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {chapterGenerateStats.map((s) => (
+                    <tr key={s.chapterId}>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.chapterName}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.requestedTotal}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.modelOutputCount}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.generatedCount}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.skipped}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.requestedByType.single_choice} → {s.generatedByType.single_choice}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.requestedByType.multiple_choice} → {s.generatedByType.multiple_choice}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.requestedByType.judge} → {s.generatedByType.judge}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.requestedByType.blank} → {s.generatedByType.blank}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{s.requestedByType.qa} → {s.generatedByType.qa}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </div>
+        )}
+
+        <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14 }}>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>【生成后习题预览】</div>
+          <div style={{ color: "var(--text-secondary)", fontSize: 14, marginBottom: 8 }}>未点击“确认导入题库”前，不会写入习题库。</div>
+          <div style={{ overflowX: "auto" }}>
+            <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 920 }}>
+              <thead>
+                <tr>
+                  {["序号", "课程", "章节", "题型", "题干", "选项", "答案", "解析", "难度系数", "操作"].map((h) => (
+                    <th key={h} style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
+                      {h}
+                    </th>
+                  ))}
+                </tr>
+              </thead>
+              <tbody>
+                {pagedPreviewRows.map((row, idx) => (
+                  <tr key={row.id}>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{(previewCurrentPage - 1) * previewPageSize + idx + 1}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.courseName}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.chapterName}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.questionType}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.questionText}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.options.length ? row.options.join("；") : "-"}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.correctAnswer || "-"}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.explanation || "-"}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.difficultyScore != null ? row.difficultyScore.toFixed(2) : ""}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                      <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ minHeight: 30, padding: "4px 8px" }}
+                          onClick={() => openPreviewModal(row.id, "view")}
+                        >
+                          查看
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ minHeight: 30, padding: "4px 8px" }}
+                          onClick={() => openPreviewModal(row.id, "edit")}
+                        >
+                          编辑
+                        </button>
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ minHeight: 30, padding: "4px 8px" }}
+                          onClick={() => setPreviewRows((prev) => prev.filter((x) => x.id !== row.id))}
+                        >
+                          删除
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+                {!previewRows.length && (
+                  <tr>
+                    <td colSpan={10} style={{ border: "1px solid var(--border)", padding: 12, color: "var(--text-muted)" }}>
+                      暂无预览数据，请先点击“提交生成”。
+                    </td>
+                  </tr>
+                )}
+              </tbody>
+            </table>
+          </div>
+          <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>每页显示</span>
+            <select
+              value={String(previewPageSize)}
+              onChange={(e) => {
+                const n = Math.max(1, Math.min(100, Number(e.target.value || 10)));
+                setPreviewPageSize(n);
+                setPreviewCurrentPage(1);
+              }}
+            >
+              {[10, 20, 30, 50, 100].map((n) => (
+                <option key={n} value={n}>
+                  {n}
+                </option>
+              ))}
+            </select>
+            <button type="button" className="btn-secondary" onClick={() => setPreviewCurrentPage((p) => Math.max(1, p - 1))} disabled={previewCurrentPage <= 1}>
+              上一页
+            </button>
+            <button type="button" className="btn-secondary" onClick={() => setPreviewCurrentPage((p) => Math.min(previewTotalPages, p + 1))} disabled={previewCurrentPage >= previewTotalPages}>
+              下一页
+            </button>
+            <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+              第 {previewCurrentPage} / {previewTotalPages} 页，共 {previewRows.length} 条
+            </span>
+          </div>
+        </div>
+
+        <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14, display: "flex", gap: 10 }}>
+          <button type="button" className="btn-primary" onClick={confirmImportGenerated} disabled={confirmingImport || !previewRows.length}>
+            {confirmingImport ? "导入中..." : "确认导入题库"}
+          </button>
+        </div>
       </div>
+      {editingPreviewRowId !== null && (() => {
+        const row = previewRows.find((x) => x.id === editingPreviewRowId);
+        if (!row) return null;
+        return (
+          <div
+            style={{
+              position: "fixed",
+              inset: 0,
+              background: "rgba(0, 0, 0, 0.55)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              zIndex: 2000,
+              padding: 16,
+            }}
+            onClick={() => setEditingPreviewRowId(null)}
+          >
+            <div className="card" style={{ width: "min(760px, 100%)", maxHeight: "85vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+              <h3 style={{ marginTop: 0, marginBottom: 10 }}>{previewModalMode === "edit" ? "编辑习题" : "查看习题"}</h3>
+              <div style={{ display: "grid", gridTemplateColumns: "100px minmax(0,1fr)", rowGap: 10, columnGap: 10 }}>
+                <div style={{ color: "var(--text-secondary)" }}>课程</div>
+                <div>{row.courseName}</div>
+                <div style={{ color: "var(--text-secondary)" }}>章节</div>
+                {previewModalMode === "edit" ? (
+                  <select value={previewChapterIdDraft === "" ? "" : String(previewChapterIdDraft)} onChange={(e) => setPreviewChapterIdDraft(e.target.value ? Number(e.target.value) : "")}>
+                    {!chapters.length && <option value="">暂无章节</option>}
+                    {chapters.map((ch) => (
+                      <option key={ch.id} value={ch.id}>
+                        {ch.title}
+                      </option>
+                    ))}
+                  </select>
+                ) : (
+                  <div>{row.chapterName}</div>
+                )}
+                <div style={{ color: "var(--text-secondary)" }}>题型</div>
+                {previewModalMode === "edit" ? (
+                  <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                    {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((k) => (
+                      <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                        <input type="radio" name="generate-preview-question-type" checked={previewQuestionTypeDraft === k} onChange={() => setPreviewQuestionTypeDraft(k)} />
+                        {questionTypeLabel[k]}
+                      </label>
+                    ))}
+                  </div>
+                ) : (
+                  <div>{row.questionType}</div>
+                )}
+                <div style={{ color: "var(--text-secondary)" }}>题目内容</div>
+                {previewModalMode === "edit" ? (
+                  <textarea value={previewQuestionTextDraft} onChange={(e) => setPreviewQuestionTextDraft(e.target.value)} rows={4} style={{ width: "100%" }} />
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{row.questionText}</div>
+                )}
+                <div style={{ color: "var(--text-secondary)" }}>选项</div>
+                {previewModalMode === "edit" ? (
+                  <textarea value={previewOptionsDraft} onChange={(e) => setPreviewOptionsDraft(e.target.value)} rows={4} placeholder="每行一个选项" style={{ width: "100%" }} />
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{row.options.length ? row.options.join("\n") : "-"}</div>
+                )}
+                <div style={{ color: "var(--text-secondary)" }}>答案</div>
+                {previewModalMode === "edit" ? (
+                  <textarea value={previewAnswerDraft} onChange={(e) => setPreviewAnswerDraft(e.target.value)} rows={3} style={{ width: "100%" }} />
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{row.correctAnswer || "-"}</div>
+                )}
+                <div style={{ color: "var(--text-secondary)" }}>难度系数</div>
+                {previewModalMode === "edit" ? (
+                  <input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={previewDifficultyScoreDraft}
+                    onChange={(e) => setPreviewDifficultyScoreDraft(e.target.value)}
+                    placeholder="0~1，留空表示未识别"
+                    style={{ width: 160 }}
+                  />
+                ) : (
+                  <div>{row.difficultyScore != null ? row.difficultyScore.toFixed(2) : ""}</div>
+                )}
+                <div style={{ color: "var(--text-secondary)" }}>解析</div>
+                {previewModalMode === "edit" ? (
+                  <textarea value={previewExplanationDraft} onChange={(e) => setPreviewExplanationDraft(e.target.value)} rows={4} style={{ width: "100%" }} />
+                ) : (
+                  <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{row.explanation || "-"}</div>
+                )}
+              </div>
+              <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button type="button" className="btn-secondary" onClick={() => setEditingPreviewRowId(null)}>
+                  关闭
+                </button>
+                {previewModalMode === "edit" && (
+                  <button type="button" className="btn-primary" onClick={savePreviewRow}>
+                    保存修改
+                  </button>
+                )}
+              </div>
+            </div>
+          </div>
+        );
+      })()}
     </>
   );
 }
@@ -1535,6 +1963,7 @@ function ExerciseManagePanel() {
   const [currentPage, setCurrentPage] = useState(1);
   const [selectedIds, setSelectedIds] = useState<number[]>([]);
   const [pageSize, setPageSize] = useState(10);
+  const [generatedTimeSortOrder, setGeneratedTimeSortOrder] = useState<"none" | "asc" | "desc">("none");
   const [autoQueried, setAutoQueried] = useState(false);
 
   const typeLabel: Record<QuestionTypeKey, string> = {
@@ -1545,11 +1974,30 @@ function ExerciseManagePanel() {
     qa: "问答题",
   };
 
-  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const sortedRows = useMemo(() => {
+    if (generatedTimeSortOrder === "none") return rows;
+    const toTs = (value: string | null) => {
+      if (!value) return Number.NaN;
+      const normalized = /^\d{4}-\d{2}-\d{2}\s/.test(value) ? value.replace(" ", "T") : value;
+      const ts = Date.parse(normalized);
+      return Number.isFinite(ts) ? ts : Number.NaN;
+    };
+    return [...rows].sort((a, b) => {
+      const aTs = toTs(a.generatedTime);
+      const bTs = toTs(b.generatedTime);
+      const aValid = Number.isFinite(aTs);
+      const bValid = Number.isFinite(bTs);
+      if (!aValid && !bValid) return 0;
+      if (!aValid) return 1;
+      if (!bValid) return -1;
+      return generatedTimeSortOrder === "asc" ? aTs - bTs : bTs - aTs;
+    });
+  }, [rows, generatedTimeSortOrder]);
+  const totalPages = Math.max(1, Math.ceil(sortedRows.length / pageSize));
   const pagedRows = useMemo(() => {
     const start = (currentPage - 1) * pageSize;
-    return rows.slice(start, start + pageSize);
-  }, [rows, currentPage, pageSize]);
+    return sortedRows.slice(start, start + pageSize);
+  }, [sortedRows, currentPage, pageSize]);
   const truncateByHanCount = (text: string, maxHan: number) => {
     let hanCount = 0;
     let truncated = false;
@@ -1683,6 +2131,7 @@ function ExerciseManagePanel() {
     setDifficultyMax(1);
     setChapterIds(chapters.map((x) => x.id));
     setKnowledgePointIds(knowledgePoints.map((x) => x.id));
+    setGeneratedTimeSortOrder("none");
     setCurrentPage(1);
     setSelectedIds([]);
     setPageSize(10);
@@ -2222,7 +2671,7 @@ function ExerciseManagePanel() {
         <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14 }}>
           <div style={{ fontWeight: 700, marginBottom: 8 }}>【习题列表】</div>
           <div style={{ overflowX: "auto" }}>
-              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 980, tableLayout: "fixed" }}>
+              <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1080, tableLayout: "fixed" }}>
                 <colgroup>
                   <col style={{ width: 36 }} />
                   <col style={{ width: 48 }} />
@@ -2237,6 +2686,7 @@ function ExerciseManagePanel() {
                   <col style={{ width: "auto" }} />
                   <col style={{ width: "auto" }} />
                   <col style={{ width: "auto" }} />
+                  <col style={{ width: "clamp(3em, 8vw, 5em)" }} />
                   <col style={{ width: "auto" }} />
                 </colgroup>
                 <thead>
@@ -2244,11 +2694,33 @@ function ExerciseManagePanel() {
                     <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
                       <input type="checkbox" checked={allCurrentSelected} onChange={(e) => toggleSelectAllCurrent(e.target.checked)} />
                     </th>
-                    {["序号", "题目内容", "选项", "答案", "解析", "章节", "关联知识点", "题型", "难度系数", "备注", "题库类型", "状态", "操作"].map((h) => (
+                    {["序号", "题目内容", "选项", "答案", "解析", "章节", "关联知识点", "题型", "难度系数", "备注", "题库类型", "状态"].map((h) => (
                       <th key={h} style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
                         {h}
                       </th>
                     ))}
+                    <th
+                      style={{
+                        textAlign: "left",
+                        border: "1px solid var(--border)",
+                        padding: 8,
+                        color: "var(--text-secondary)",
+                        width: "clamp(3em, 8vw, 5em)",
+                        maxWidth: "5em",
+                        whiteSpace: "normal",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      <button
+                        type="button"
+                        className="btn-ghost"
+                        style={{ minHeight: "auto", padding: 0, color: "inherit", fontWeight: 600 }}
+                        onClick={() => setGeneratedTimeSortOrder((prev) => (prev === "none" ? "desc" : prev === "desc" ? "asc" : "none"))}
+                      >
+                        生成时间{generatedTimeSortOrder === "none" ? "" : generatedTimeSortOrder === "desc" ? " ↓" : " ↑"}
+                      </button>
+                    </th>
+                    <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>操作</th>
                   </tr>
               </thead>
               <tbody>
@@ -2275,6 +2747,32 @@ function ExerciseManagePanel() {
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.remark}</td>
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.bankType === "training" ? "训练库" : "考试库"}</td>
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.status === "pending" ? "待审核" : "已审核"}</td>
+                    <td
+                      style={{
+                        border: "1px solid var(--border)",
+                        padding: 8,
+                        fontSize: 12,
+                        lineHeight: 1.25,
+                        width: "clamp(3em, 8vw, 5em)",
+                        maxWidth: "5em",
+                        whiteSpace: "normal",
+                        overflowWrap: "anywhere",
+                      }}
+                    >
+                      {(() => {
+                        if (!row.generatedTime) return "-";
+                        const normalized = /^\d{4}-\d{2}-\d{2}\s/.test(row.generatedTime) ? row.generatedTime.replace(" ", "T") : row.generatedTime;
+                        const ts = Date.parse(normalized);
+                        if (!Number.isFinite(ts)) return row.generatedTime;
+                        const dt = new Date(ts);
+                        return (
+                          <>
+                            <div>{dt.toLocaleDateString()}</div>
+                            <div style={{ color: "var(--text-secondary)" }}>{dt.toLocaleTimeString()}</div>
+                          </>
+                        );
+                      })()}
+                    </td>
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>
                       <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
                         <button
@@ -2353,7 +2851,7 @@ function ExerciseManagePanel() {
                 ))}
                 {!rows.length && (
                   <tr>
-                    <td colSpan={14} style={{ border: "1px solid var(--border)", padding: 12, color: "var(--text-muted)" }}>
+                    <td colSpan={15} style={{ border: "1px solid var(--border)", padding: 12, color: "var(--text-muted)" }}>
                       暂无数据，请先设置筛选条件后点击“查询”。
                     </td>
                   </tr>
@@ -2686,30 +3184,47 @@ const FALLBACK_PAPER_DEFAULT_CONFIGS: Array<{ id: number; type: QuestionTypeKey;
   { id: 4, type: "blank", count: 10, difficulty: "0.8", score: 2 },
   { id: 5, type: "qa", count: 5, difficulty: "0.8", score: 10 },
 ];
+const OPTION_PREFIX_RE = /^\s*[A-Z][\.\)．、]\s*/;
+const formatOptionsForDisplay = (options: string[]) =>
+  (options || []).length
+    ? options
+        .map((opt, i) => {
+          const text = String(opt || "").trim();
+          if (!text) return `${String.fromCharCode(65 + i)}.`;
+          return OPTION_PREFIX_RE.test(text) ? text : `${String.fromCharCode(65 + i)}. ${text}`;
+        })
+        .join("\n")
+    : "-";
+
+type PaperPreviewQuestionRow = {
+  id: number;
+  questionType: string;
+  questionText: string;
+  options: string[];
+  correctAnswer: string;
+  explanation: string | null;
+  difficultyScore: number;
+  score: number;
+  source: "local" | "internet";
+};
+
+type PaperPreviewResult = {
+  paperId: number | null;
+  isPartial: boolean;
+  status: string;
+  message: string;
+  insufficientTypes: { questionType: string; requested: number; available: number; missing: number }[];
+  previewQuestions: PaperPreviewQuestionRow[];
+  totalScore: number;
+  overallDifficulty: number;
+};
 
 function GeneratePapersPanel() {
   const [loadingCourses, setLoadingCourses] = useState(false);
   const [loadingChapters, setLoadingChapters] = useState(false);
   const [submitting, setSubmitting] = useState(false);
-  const [previewResult, setPreviewResult] = useState<{
-    paperId: number | null;
-    isPartial: boolean;
-    status: string;
-    message: string;
-    insufficientTypes: { questionType: string; requested: number; available: number; missing: number }[];
-    previewQuestions: {
-      questionType: string;
-      questionText: string;
-      options: string[];
-      correctAnswer: string;
-      explanation: string | null;
-      difficultyScore: number;
-      score: number;
-      source: "local" | "internet";
-    }[];
-    totalScore: number;
-    overallDifficulty: number;
-  } | null>(null);
+  const [confirmingSubmit, setConfirmingSubmit] = useState(false);
+  const [previewResult, setPreviewResult] = useState<PaperPreviewResult | null>(null);
 
   const [courses, setCourses] = useState<CourseItem[]>([]);
   const [chapters, setChapters] = useState<ChapterItem[]>([]);
@@ -2752,6 +3267,12 @@ function GeneratePapersPanel() {
     blank: { count: 10, difficulty: 0.8, score: 2 },
     qa: { count: 5, difficulty: 0.8, score: 10 },
   });
+  const previewQuestionIdRef = useRef(1);
+  const [previewCurrentPage, setPreviewCurrentPage] = useState(1);
+  const [previewPageSize, setPreviewPageSize] = useState(10);
+  const [previewModalMode, setPreviewModalMode] = useState<"view" | "edit">("view");
+  const [editingPreviewRowId, setEditingPreviewRowId] = useState<number | null>(null);
+  const [previewDraft, setPreviewDraft] = useState<PaperPreviewQuestionRow | null>(null);
   const isValidDifficultyText = (value: string) => /^\d*(\.\d{0,2})?$/.test(value);
   const typeLabelMap: Record<QuestionTypeKey, string> = {
     single_choice: "单选题",
@@ -2760,6 +3281,12 @@ function GeneratePapersPanel() {
     blank: "填空题",
     qa: "问答题",
   };
+  const previewRows = previewResult?.previewQuestions || [];
+  const previewTotalPages = Math.max(1, Math.ceil(previewRows.length / previewPageSize));
+  const pagedPreviewRows = useMemo(() => {
+    const start = (previewCurrentPage - 1) * previewPageSize;
+    return previewRows.slice(start, start + previewPageSize);
+  }, [previewRows, previewCurrentPage, previewPageSize]);
 
   useEffect(() => {
     api.teacher
@@ -2823,6 +3350,47 @@ function GeneratePapersPanel() {
   const toggleChapter = (id: number) => {
     setChapterIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
+  const normalizePreviewQuestionType = (value: string): QuestionTypeKey =>
+    (["single_choice", "multiple_choice", "judge", "blank", "qa"].includes(value) ? value : "qa") as QuestionTypeKey;
+  const computePreviewStats = (rows: PaperPreviewQuestionRow[]) => {
+    const totalScore = Number(rows.reduce((sum, row) => sum + (Number.isFinite(row.score) ? row.score : 0), 0).toFixed(2));
+    if (totalScore <= 0) {
+      return { totalScore: 0, overallDifficulty: 0 };
+    }
+    const weighted = rows.reduce(
+      (sum, row) => sum + (Number.isFinite(row.score) ? row.score : 0) * (Number.isFinite(row.difficultyScore) ? row.difficultyScore : 0.8),
+      0
+    );
+    return { totalScore, overallDifficulty: Number((weighted / totalScore).toFixed(2)) };
+  };
+  const mapPreviewQuestionsFromApi = (
+    rows: {
+      question_type: string;
+      question_text: string;
+      options: string[];
+      correct_answer: string;
+      explanation: string | null;
+      difficulty_score: number;
+      score: number;
+      source: "local" | "internet";
+    }[]
+  ): PaperPreviewQuestionRow[] =>
+    rows.map((x) => ({
+      id: previewQuestionIdRef.current++,
+      questionType: x.question_type,
+      questionText: x.question_text,
+      options: Array.isArray(x.options) ? x.options.map((opt) => String(opt || "")) : [],
+      correctAnswer: x.correct_answer || "",
+      explanation: x.explanation,
+      difficultyScore: Number.isFinite(Number(x.difficulty_score)) ? Number(x.difficulty_score) : 0.8,
+      score: Number.isFinite(Number(x.score)) ? Number(x.score) : 0,
+      source: x.source === "internet" ? "internet" : "local",
+    }));
+
+  useEffect(() => {
+    const maxPage = Math.max(1, Math.ceil(previewRows.length / previewPageSize));
+    setPreviewCurrentPage((p) => Math.min(p, maxPage));
+  }, [previewRows.length, previewPageSize]);
 
   const updateConfig = (id: number, patch: Partial<{ type: QuestionTypeKey; count: number; difficulty: string; score: number }>) => {
     setConfigs((prev) => prev.map((x) => (x.id === id ? { ...x, ...patch } : x)));
@@ -2846,6 +3414,10 @@ function GeneratePapersPanel() {
     setConfigs([...defaultConfigs]);
     setChapterIds(chapters.map((x) => x.id));
     setPreviewResult(null);
+    setEditingPreviewRowId(null);
+    setPreviewDraft(null);
+    setPreviewCurrentPage(1);
+    setPreviewPageSize(10);
   };
 
   const openPaperSettingsModal = () => {
@@ -2937,14 +3509,33 @@ function GeneratePapersPanel() {
     return "";
   };
 
-  const callGeneratePaper = async (saveToBank: boolean) => {
+  const callGeneratePaper = async (saveToBank: boolean, previewOverride?: PaperPreviewQuestionRow[]) => {
     const err = validate();
     if (err) {
       toast(err, "error");
       return null;
     }
 
-    const payload = {
+    const payload: {
+      course_id: number;
+      chapter_ids: number[];
+      paper_title: string;
+      paper_bank_type: "training" | "formal";
+      question_source: "local" | "internet";
+      overall_difficulty: number | null;
+      configs: { type: string; count: number; difficulty: number | null; score: number }[];
+      save_to_bank: boolean;
+      preview_questions_override?: {
+        question_type: string;
+        question_text: string;
+        options: string[];
+        correct_answer: string;
+        explanation: string | null;
+        difficulty_score: number;
+        score: number;
+        source: "local" | "internet";
+      }[];
+    } = {
       course_id: Number(courseId),
       chapter_ids: chapterIds,
       paper_title: paperTitle.trim(),
@@ -2958,10 +3549,22 @@ function GeneratePapersPanel() {
         score: row.score,
       })),
       save_to_bank: saveToBank,
-    } as const;
+    };
+    if (previewOverride) {
+      payload.preview_questions_override = previewOverride.map((row) => ({
+        question_type: normalizePreviewQuestionType(row.questionType),
+        question_text: row.questionText,
+        options: row.options,
+        correct_answer: row.correctAnswer,
+        explanation: row.explanation,
+        difficulty_score: row.difficultyScore,
+        score: row.score,
+        source: row.source,
+      }));
+    }
 
     const resp = await api.teacher.courses.generatePaper(payload);
-    const mapped = {
+    const mapped: PaperPreviewResult = {
       paperId: resp.paper_id,
       isPartial: resp.is_partial,
       status: resp.status,
@@ -2972,27 +3575,19 @@ function GeneratePapersPanel() {
         available: x.available,
         missing: x.missing,
       })),
-      previewQuestions: resp.preview_questions.map((x) => ({
-        questionType: x.question_type,
-        questionText: x.question_text,
-        options: x.options || [],
-        correctAnswer: x.correct_answer,
-        explanation: x.explanation,
-        difficultyScore: x.difficulty_score,
-        score: x.score,
-        source: x.source,
-      })),
+      previewQuestions: mapPreviewQuestionsFromApi(resp.preview_questions),
       totalScore: resp.total_score,
       overallDifficulty: resp.overall_difficulty,
     };
     setPreviewResult(mapped);
+    setPreviewCurrentPage(1);
     if (mapped.isPartial) {
       const lackText = mapped.insufficientTypes
         .map((x) => `${typeLabelMap[x.questionType as QuestionTypeKey] || x.questionType}缺少${x.missing}题`)
         .join("；");
       toast(`${mapped.message}${lackText ? `（${lackText}）` : ""}`, "error");
     } else {
-      toast(saveToBank ? `试卷生成成功（ID：${mapped.paperId ?? "-"})` : "试卷预览已生成", "success");
+      toast(saveToBank ? `${mapped.message}（ID：${mapped.paperId ?? "-"}）` : "试卷预览已生成", "success");
     }
     return mapped;
   };
@@ -3001,14 +3596,14 @@ function GeneratePapersPanel() {
     if (submitting) return;
     setSubmitting(true);
     try {
-      await callGeneratePaper(true);
+      await callGeneratePaper(false);
     } catch (e: any) {
-      toast(e?.message || "提交生成失败", "error");
+      toast(e?.message || "生成预览失败", "error");
       setPreviewResult({
         paperId: null,
         isPartial: true,
         status: "error",
-        message: (e as Error)?.message || "提交生成失败",
+        message: (e as Error)?.message || "生成预览失败",
         insufficientTypes: [],
         previewQuestions: [],
         totalScore: 0,
@@ -3016,6 +3611,77 @@ function GeneratePapersPanel() {
       });
     } finally {
       setSubmitting(false);
+    }
+  };
+
+  const openPreviewModal = (rowId: number, mode: "view" | "edit") => {
+    const row = previewRows.find((x) => x.id === rowId);
+    if (!row) return;
+    setPreviewModalMode(mode);
+    setEditingPreviewRowId(rowId);
+    setPreviewDraft({ ...row, options: [...row.options] });
+  };
+
+  const savePreviewRow = () => {
+    if (!previewDraft || editingPreviewRowId == null) return;
+    const questionText = previewDraft.questionText.trim();
+    if (!questionText) return toast("题目内容不能为空", "error");
+    const difficulty = Number(previewDraft.difficultyScore);
+    if (!Number.isFinite(difficulty) || difficulty < 0 || difficulty > 1) return toast("难度系数需在 0~1", "error");
+    const score = Number(previewDraft.score);
+    if (!Number.isFinite(score) || score < 0) return toast("每题分数需大于等于 0", "error");
+    const options = (previewDraft.options || []).map((x) => x.trim()).filter(Boolean);
+    const answer = previewDraft.correctAnswer.trim();
+    setPreviewResult((prev) => {
+      if (!prev) return prev;
+      const nextRows = prev.previewQuestions.map((row) =>
+        row.id === editingPreviewRowId
+          ? {
+              ...row,
+              questionType: normalizePreviewQuestionType(previewDraft.questionType),
+              questionText,
+              options,
+              correctAnswer: answer,
+              explanation: (previewDraft.explanation || "").trim() || null,
+              difficultyScore: Number(difficulty.toFixed(2)),
+              score: Number(score),
+            }
+          : row
+      );
+      const stats = computePreviewStats(nextRows);
+      return { ...prev, previewQuestions: nextRows, ...stats };
+    });
+    toast("预览题目已更新", "success");
+    setEditingPreviewRowId(null);
+    setPreviewDraft(null);
+  };
+
+  const deletePreviewRow = (rowId: number) => {
+    setPreviewResult((prev) => {
+      if (!prev) return prev;
+      const nextRows = prev.previewQuestions.filter((x) => x.id !== rowId);
+      const stats = computePreviewStats(nextRows);
+      return { ...prev, previewQuestions: nextRows, ...stats };
+    });
+    if (editingPreviewRowId === rowId) {
+      setEditingPreviewRowId(null);
+      setPreviewDraft(null);
+    }
+  };
+
+  const submitToPaperBank = async () => {
+    if (confirmingSubmit) return;
+    if (!previewRows.length) {
+      toast("预览为空，请先生成试卷预览", "error");
+      return;
+    }
+    setConfirmingSubmit(true);
+    try {
+      await callGeneratePaper(true, previewRows);
+    } catch (e: any) {
+      toast(e?.message || "提交到试卷库失败", "error");
+    } finally {
+      setConfirmingSubmit(false);
     }
   };
 
@@ -3348,7 +4014,7 @@ function GeneratePapersPanel() {
             重置
           </button>
           <button type="button" className="btn-primary" onClick={submitGenerate} disabled={submitting}>
-            {submitting ? "提交中..." : "提交生成"}
+            {submitting ? "生成中..." : "提交生成"}
           </button>
         </div>
 
@@ -3366,6 +4032,7 @@ function GeneratePapersPanel() {
               )}
             </div>
             <div style={{ color: "var(--text-secondary)", marginBottom: 8 }}>{previewResult.message}</div>
+            <div style={{ color: "var(--text-secondary)", fontSize: 14, marginBottom: 8 }}>未点击“提交到试卷库”前，不会写入试卷库。</div>
             {!!previewResult.insufficientTypes.length && (
               <div style={{ marginBottom: 8, color: "#ef4444", fontSize: 13 }}>
                 缺题明细：
@@ -3378,7 +4045,7 @@ function GeneratePapersPanel() {
               <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 920 }}>
                 <thead>
                   <tr>
-                    {["序号", "题型", "题目内容", "选项", "答案", "解析", "难度系数", "每题分数", "来源"].map((h) => (
+                    {["序号", "题型", "题目内容", "选项", "答案", "解析", "难度系数", "每题分数", "来源", "操作"].map((h) => (
                       <th key={h} style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
                         {h}
                       </th>
@@ -3386,9 +4053,9 @@ function GeneratePapersPanel() {
                   </tr>
                 </thead>
                 <tbody>
-                  {previewResult.previewQuestions.map((row, idx) => (
-                    <tr key={`${row.questionType}-${idx}`}>
-                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{idx + 1}</td>
+                  {pagedPreviewRows.map((row, idx) => (
+                    <tr key={row.id}>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>{(previewCurrentPage - 1) * previewPageSize + idx + 1}</td>
                       <td style={{ border: "1px solid var(--border)", padding: 8 }}>{typeLabelMap[row.questionType as QuestionTypeKey] || row.questionType}</td>
                       <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.questionText}</td>
                       <td style={{ border: "1px solid var(--border)", padding: 8, whiteSpace: "pre-wrap" }}>
@@ -3399,11 +4066,39 @@ function GeneratePapersPanel() {
                       <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.difficultyScore.toFixed(2)}</td>
                       <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.score}</td>
                       <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.source === "local" ? "本地题库" : "互联网"}</td>
+                      <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                        <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                          <button
+                            type="button"
+                            className="btn-ghost"
+                            style={{ minHeight: 30, padding: "4px 8px" }}
+                            onClick={() => openPreviewModal(row.id, "view")}
+                          >
+                            查看
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost"
+                            style={{ minHeight: 30, padding: "4px 8px" }}
+                            onClick={() => openPreviewModal(row.id, "edit")}
+                          >
+                            编辑
+                          </button>
+                          <button
+                            type="button"
+                            className="btn-ghost"
+                            style={{ minHeight: 30, padding: "4px 8px" }}
+                            onClick={() => deletePreviewRow(row.id)}
+                          >
+                            删除
+                          </button>
+                        </div>
+                      </td>
                     </tr>
                   ))}
-                  {!previewResult.previewQuestions.length && (
+                  {!previewRows.length && (
                     <tr>
-                      <td colSpan={9} style={{ border: "1px solid var(--border)", padding: 8, color: "var(--text-muted)" }}>
+                      <td colSpan={10} style={{ border: "1px solid var(--border)", padding: 8, color: "var(--text-muted)" }}>
                         {previewResult.status === "error" ? "生成失败，无题目数据" : "暂无可预览题目"}
                       </td>
                     </tr>
@@ -3411,9 +4106,160 @@ function GeneratePapersPanel() {
                 </tbody>
               </table>
             </div>
+            <div style={{ marginTop: 10, display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+              <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>每页显示</span>
+              <select
+                value={String(previewPageSize)}
+                onChange={(e) => {
+                  const n = Math.max(1, Math.min(100, Number(e.target.value || 10)));
+                  setPreviewPageSize(n);
+                  setPreviewCurrentPage(1);
+                }}
+              >
+                {[10, 20, 30, 50, 100].map((n) => (
+                  <option key={n} value={n}>
+                    {n}
+                  </option>
+                ))}
+              </select>
+              <button type="button" className="btn-secondary" onClick={() => setPreviewCurrentPage((p) => Math.max(1, p - 1))} disabled={previewCurrentPage <= 1}>
+                上一页
+              </button>
+              <button type="button" className="btn-secondary" onClick={() => setPreviewCurrentPage((p) => Math.min(previewTotalPages, p + 1))} disabled={previewCurrentPage >= previewTotalPages}>
+                下一页
+              </button>
+              <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+                第 {previewCurrentPage} / {previewTotalPages} 页，共 {previewRows.length} 条
+              </span>
+            </div>
+            <div style={{ borderTop: "1px solid var(--border)", marginTop: 12, paddingTop: 12, display: "flex", gap: 10 }}>
+              <button type="button" className="btn-primary" onClick={submitToPaperBank} disabled={confirmingSubmit || submitting || !previewRows.length}>
+                {confirmingSubmit ? "提交中..." : "提交到试卷库"}
+              </button>
+            </div>
           </div>
         )}
       </div>
+      {editingPreviewRowId !== null && previewDraft && (
+        <div
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0, 0, 0, 0.55)",
+            display: "flex",
+            alignItems: "center",
+            justifyContent: "center",
+            zIndex: 2000,
+            padding: 16,
+          }}
+          onClick={() => {
+            setEditingPreviewRowId(null);
+            setPreviewDraft(null);
+          }}
+        >
+          <div className="card" style={{ width: "min(760px, 100%)", maxHeight: "85vh", overflowY: "auto" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ marginTop: 0, marginBottom: 10 }}>{previewModalMode === "edit" ? "编辑题目" : "查看题目"}</h3>
+            <div style={{ display: "grid", gridTemplateColumns: "100px minmax(0,1fr)", rowGap: 10, columnGap: 10 }}>
+              <div style={{ color: "var(--text-secondary)" }}>题型</div>
+              {previewModalMode === "edit" ? (
+                <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
+                  {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((k) => (
+                    <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+                      <input
+                        type="radio"
+                        name="paper-preview-question-type"
+                        checked={normalizePreviewQuestionType(previewDraft.questionType) === k}
+                        onChange={() => setPreviewDraft((d) => (d ? { ...d, questionType: k } : d))}
+                      />
+                      {typeLabelMap[k]}
+                    </label>
+                  ))}
+                </div>
+              ) : (
+                <div>{typeLabelMap[normalizePreviewQuestionType(previewDraft.questionType)] || previewDraft.questionType}</div>
+              )}
+              <div style={{ color: "var(--text-secondary)" }}>题目内容</div>
+              {previewModalMode === "edit" ? (
+                <textarea value={previewDraft.questionText} onChange={(e) => setPreviewDraft((d) => (d ? { ...d, questionText: e.target.value } : d))} rows={4} style={{ width: "100%" }} />
+              ) : (
+                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{previewDraft.questionText}</div>
+              )}
+              <div style={{ color: "var(--text-secondary)" }}>选项</div>
+              {previewModalMode === "edit" ? (
+                <textarea
+                  value={previewDraft.options.join("\n")}
+                  onChange={(e) =>
+                    setPreviewDraft((d) => (d ? { ...d, options: e.target.value.split("\n").map((x) => x.trim()).filter(Boolean) } : d))
+                  }
+                  rows={4}
+                  placeholder="每行一个选项"
+                  style={{ width: "100%" }}
+                />
+              ) : (
+                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{previewDraft.options.length ? previewDraft.options.join("\n") : "-"}</div>
+              )}
+              <div style={{ color: "var(--text-secondary)" }}>答案</div>
+              {previewModalMode === "edit" ? (
+                <textarea value={previewDraft.correctAnswer} onChange={(e) => setPreviewDraft((d) => (d ? { ...d, correctAnswer: e.target.value } : d))} rows={3} style={{ width: "100%" }} />
+              ) : (
+                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{previewDraft.correctAnswer || "-"}</div>
+              )}
+              <div style={{ color: "var(--text-secondary)" }}>难度系数</div>
+              {previewModalMode === "edit" ? (
+                <input
+                  type="number"
+                  min={0}
+                  max={1}
+                  step={0.01}
+                  value={previewDraft.difficultyScore}
+                  onChange={(e) => setPreviewDraft((d) => (d ? { ...d, difficultyScore: Number(e.target.value) || 0 } : d))}
+                  style={{ width: 140 }}
+                />
+              ) : (
+                <div>{previewDraft.difficultyScore.toFixed(2)}</div>
+              )}
+              <div style={{ color: "var(--text-secondary)" }}>每题分数</div>
+              {previewModalMode === "edit" ? (
+                <input
+                  type="number"
+                  min={0}
+                  step={0.1}
+                  value={previewDraft.score}
+                  onChange={(e) => setPreviewDraft((d) => (d ? { ...d, score: Number(e.target.value) || 0 } : d))}
+                  style={{ width: 140 }}
+                />
+              ) : (
+                <div>{previewDraft.score}</div>
+              )}
+              <div style={{ color: "var(--text-secondary)" }}>来源</div>
+              <div>{previewDraft.source === "local" ? "本地题库" : "互联网"}</div>
+              <div style={{ color: "var(--text-secondary)" }}>解析</div>
+              {previewModalMode === "edit" ? (
+                <textarea value={previewDraft.explanation || ""} onChange={(e) => setPreviewDraft((d) => (d ? { ...d, explanation: e.target.value } : d))} rows={4} style={{ width: "100%" }} />
+              ) : (
+                <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>{previewDraft.explanation || "-"}</div>
+              )}
+            </div>
+            <div style={{ marginTop: 14, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+              <button
+                type="button"
+                className="btn-secondary"
+                onClick={() => {
+                  setEditingPreviewRowId(null);
+                  setPreviewDraft(null);
+                }}
+              >
+                关闭
+              </button>
+              {previewModalMode === "edit" && (
+                <button type="button" className="btn-primary" onClick={savePreviewRow}>
+                  保存修改
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

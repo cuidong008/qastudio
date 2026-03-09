@@ -30,6 +30,17 @@ class VLLM(BaseLLM):
         temperature: float = 0.3,
         **kwargs,
     ) -> str:
+        text, _ = self.generate_with_meta(prompt, max_tokens=max_tokens, temperature=temperature, **kwargs)
+        return text
+
+    def generate_with_meta(
+        self,
+        prompt: str,
+        *,
+        max_tokens: int = 512,
+        temperature: float = 0.3,
+        **kwargs,
+    ) -> tuple[str, str | None]:
         resp = self._client.chat.completions.create(
             model=self._model,
             messages=[{"role": "user", "content": prompt}],
@@ -37,5 +48,6 @@ class VLLM(BaseLLM):
             temperature=temperature,
         )
         if not resp.choices:
-            return ""
-        return (resp.choices[0].message.content or "").strip()
+            return "", None
+        choice = resp.choices[0]
+        return (choice.message.content or "").strip(), getattr(choice, "finish_reason", None)
