@@ -925,6 +925,13 @@ export const api = {
           created_at: string | null;
         }>(`/teacher/questions/${questionId}`, { method: "PUT", body }),
       deleteQuestion: (questionId: number) => request<{ ok: boolean }>(`/teacher/questions/${questionId}`, { method: "DELETE" }),
+      /** 题库查重：按章节+题型的一组题目做语义查重，返回重复题序号组（1-based） */
+      checkDuplicates: (body: {
+        chapter_name: string;
+        question_type: string;
+        items: { index: number; question_text: string; options: string[]; correct_answer: string }[];
+      }) =>
+        request<{ groups: number[][] }>("/teacher/questions/check-duplicates", { method: "POST", body }),
       /** 文档列表项（含关联章节 id 列表） */
       chapterDocuments: (chapterId: number) =>
         request<DocWithChapters[]>(`/teacher/chapters/${chapterId}/documents`),

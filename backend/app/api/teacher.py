@@ -661,6 +661,24 @@ class TeacherImportConfirmOut(BaseModel):
     message: str
 
 
+class TeacherCheckDuplicatesItemIn(BaseModel):
+    """查重请求中单道题目（序号为在习题列表中的 1-based 序号）"""
+    index: int = Field(ge=1)
+    question_text: str = ""
+    options: list[str] = Field(default_factory=list)
+    correct_answer: str = ""
+
+
+class TeacherCheckDuplicatesIn(BaseModel):
+    chapter_name: str = ""
+    question_type: str = ""
+    items: list[TeacherCheckDuplicatesItemIn] = Field(default_factory=list)
+
+
+class TeacherCheckDuplicatesOut(BaseModel):
+    groups: list[list[int]] = Field(default_factory=list)  # 每组为重复题的序号列表
+
+
 class TeacherDocumentChunkOut(BaseModel):
     index: int
     text: str
@@ -5606,6 +5624,96 @@ async def delete_teacher_question(
     await _cleanup_orphan_knowledge_points_for_chapter(db, chapter_id)
     await db.commit()
     return {"ok": True}
+
+
+def _extract_duplicate_groups_json(raw: str) -> list[list[int]]:
+    """从 LLM 输出中解析出 groups（重复题序号组的列表）。"""
+    text = (raw or "").strip()
+    if not text:
+        return []
+    # 先尝试整块 JSON 对象
+    m = re.search(r"\{[\s\S]*\}", text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, dict) and "groups" in obj and isinstance(obj["groups"], list):
+                return [
+                    [int(x) for x in g if isinstance(x, (int, float)) and int(x) == x]
+                    for g in obj["groups"]
+                    if isinstance(g, list)
+                ]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    # 再尝试顶层数组 [[1,2],[3,4]]
+    m = re.search(r"\[\s*\[[\s\S]*\]\s*\]", text)
+    if m:
+        try:
+            obj = json.loads(m.group(0))
+            if isinstance(obj, list):
+                return [
+                    [int(x) for x in g if isinstance(x, (int, float)) and int(x) == x]
+                    for g in obj
+                    if isinstance(g, list)
+                ]
+        except (json.JSONDecodeError, TypeError):
+            pass
+    return []
+
+
+@router.post("/questions/check-duplicates", response_model=TeacherCheckDuplicatesOut)
+async def check_teacher_question_duplicates(
+    body: TeacherCheckDuplicatesIn,
+    user: User = Depends(require_teacher),
+):
+    """按章节+题型的一组题目做语义查重，返回重复题序号组。序号为请求中 items 的 index（1-based）。"""
+    if not body.items or len(body.items) < 2:
+        return TeacherCheckDuplicatesOut(groups=[])
+    valid_indices = {item.index for item in body.items}
+    # 构建 prompt：题目序号、题干、选项、答案
+    lines = []
+    for item in body.items:
+        parts = [f"【序号 {item.index}】", f"题干：{item.question_text or ''}"]
+        if item.options:
+            parts.append("选项：" + "；".join(item.options))
+        if item.correct_answer:
+            parts.append("答案：" + item.correct_answer)
+        lines.append("\n".join(parts))
+    prompt = (
+        "你是一名题库质检助手。下面是一组同章节、同题型的习题（含序号、题干、选项与答案）。\n"
+        "请判断其中哪些题目在语义上重复或高度相似（题意与考查点相同或可视为同一题的不同表述），将重复的题目序号归为一组。\n"
+        "只输出一个 JSON，不要其他解释。格式为 {\"groups\": [[序号1, 序号2], [序号3, 序号4, 序号5], ...]}，每组内为重复题的序号列表。\n"
+        "若没有重复题，输出 {\"groups\": []}。序号必须使用题目中给出的序号数字。\n\n"
+        + "\n---\n".join(lines)
+    )
+    try:
+        from ..rag.config import get_rag_settings
+        from ..rag.llm import get_llm
+        settings = get_rag_settings()
+        llm = get_llm(settings)
+    except Exception as e:
+        logger.exception("check-duplicates: RAG/LLM 初始化失败")
+        raise HTTPException(
+            status_code=503,
+            detail=f"查重依赖的 LLM 未配置或初始化失败：{str(e)[:200]}",
+        ) from e
+    try:
+        raw = await asyncio.to_thread(
+            llm.generate,
+            prompt,
+            max_tokens=min(2048, int(settings.llm_max_tokens or 512) * 2),
+            temperature=0.1,
+        )
+    except Exception as e:
+        logger.exception("check-duplicates: LLM 调用失败")
+        raise HTTPException(status_code=500, detail=f"查重调用失败：{str(e)[:200]}") from e
+    groups = _extract_duplicate_groups_json(raw)
+    # 只保留序号在请求中且每组至少 2 个的
+    out = []
+    for g in groups:
+        g = [int(x) for x in g if x in valid_indices]
+        if len(g) >= 2:
+            out.append(sorted(g))
+    return TeacherCheckDuplicatesOut(groups=out)
 
 
 async def _get_doc_chapter_ids(db: AsyncSession, doc_ids: list[int]) -> dict[int, list[int]]:

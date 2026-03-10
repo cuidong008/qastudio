@@ -1966,6 +1966,10 @@ function ExerciseManagePanel() {
   const [pageSize, setPageSize] = useState(10);
   const [generatedTimeSortOrder, setGeneratedTimeSortOrder] = useState<"none" | "asc" | "desc">("none");
   const [autoQueried, setAutoQueried] = useState(false);
+  const [checkingDup, setCheckingDup] = useState(false);
+  const [duplicateGroups, setDuplicateGroups] = useState<number[][]>([]);
+  /** 查重时的序号 -> 行 id 快照，删除后仍按 id 取行，避免错行填充 */
+  const [dedupSeqToId, setDedupSeqToId] = useState<Record<number, number> | null>(null);
 
   const typeLabel: Record<QuestionTypeKey, string> = {
     single_choice: "单选题",
@@ -1999,6 +2003,99 @@ function ExerciseManagePanel() {
     const start = (currentPage - 1) * pageSize;
     return sortedRows.slice(start, start + pageSize);
   }, [sortedRows, currentPage, pageSize]);
+
+  const runDedup = async () => {
+    if (!rows.length) {
+      toast("请先查询出习题列表再查重", "error");
+      return;
+    }
+    setCheckingDup(true);
+    try {
+      const allGroups: number[][] = [];
+      const key = (r: (typeof sortedRows)[0]) => `${r.chapterId}-${r.chapterName}-${r.questionType}`;
+      const groupMap = new Map<string, { row: (typeof sortedRows)[0]; 序号: number }[]>();
+      sortedRows.forEach((row, i) => {
+        const 序号 = i + 1;
+        const k = key(row);
+        if (!groupMap.has(k)) groupMap.set(k, []);
+        groupMap.get(k)!.push({ row, 序号 });
+      });
+      for (const [, items] of groupMap) {
+        if (items.length < 2) continue;
+        const textNorm = (t: string) => (t || "").replace(/\s+/g, " ").trim();
+        const byText = new Map<string, number[]>();
+        for (const { row, 序号 } of items) {
+          const n = textNorm(row.questionText);
+          if (!byText.has(n)) byText.set(n, []);
+          byText.get(n)!.push(序号);
+        }
+        for (const g of byText.values()) {
+          if (g.length >= 2) allGroups.push([...g].sort((a, b) => a - b));
+        }
+        const inTextDup = new Set<number>();
+        for (const g of byText.values()) {
+          if (g.length >= 2) g.forEach((seq) => inTextDup.add(seq));
+        }
+        const remaining = items.filter((x) => !inTextDup.has(x.序号));
+        if (remaining.length >= 2) {
+          const chapterName = items[0].row.chapterName;
+          const questionType = typeLabel[items[0].row.questionType as QuestionTypeKey] || items[0].row.questionType;
+          const res = await api.teacher.courses.checkDuplicates({
+            chapter_name: chapterName,
+            question_type: questionType,
+            items: remaining.map(({ row, 序号 }) => ({
+              index: 序号,
+              question_text: row.questionText || "",
+              options: row.options || [],
+              correct_answer: row.correctAnswer || "",
+            })),
+          });
+          for (const g of res.groups || []) {
+            if (g.length >= 2) allGroups.push([...g].sort((a, b) => a - b));
+          }
+        }
+      }
+      const seqToId: Record<number, number> = {};
+      sortedRows.forEach((row, i) => {
+        seqToId[i + 1] = row.id;
+      });
+      setDedupSeqToId(seqToId);
+      setDuplicateGroups(allGroups);
+      if (!allGroups.length) toast("未发现重复题", "success");
+      else toast(`发现 ${allGroups.length} 组重复题`, "success");
+    } catch (e: any) {
+      toast(e?.message || "查重失败", "error");
+      setDuplicateGroups([]);
+      setDedupSeqToId(null);
+    } finally {
+      setCheckingDup(false);
+    }
+  };
+
+  /** 查重结果：按序号→id 快照从当前列表中取行，已删除的行不展示、不填充；按组依次排列 */
+  const dedupDisplayRows = useMemo((): { row: (typeof sortedRows)[0]; groupIndex: number }[] | null => {
+    if (!duplicateGroups.length || !dedupSeqToId) return null;
+    const idToRow = new Map(sortedRows.map((r) => [r.id, r]));
+    const out: { row: (typeof sortedRows)[0]; groupIndex: number }[] = [];
+    duplicateGroups.forEach((group, groupIdx) => {
+      group.forEach((序号) => {
+        const id = dedupSeqToId[序号];
+        const row = id != null ? idToRow.get(id) : undefined;
+        if (row) out.push({ row, groupIndex: groupIdx });
+      });
+    });
+    return out.length ? out : null;
+  }, [duplicateGroups, sortedRows, dedupSeqToId]);
+
+  const dedupTotalPages = dedupDisplayRows
+    ? Math.max(1, Math.ceil(dedupDisplayRows.length / pageSize))
+    : 1;
+  const dedupPagedRows = useMemo(() => {
+    if (!dedupDisplayRows) return [];
+    const start = (currentPage - 1) * pageSize;
+    return dedupDisplayRows.slice(start, start + pageSize);
+  }, [dedupDisplayRows, currentPage, pageSize]);
+
   const truncateByHanCount = (text: string, maxHan: number) => {
     let hanCount = 0;
     let truncated = false;
@@ -2136,6 +2233,8 @@ function ExerciseManagePanel() {
     setCurrentPage(1);
     setSelectedIds([]);
     setPageSize(10);
+    setDuplicateGroups([]);
+    setDedupSeqToId(null);
   };
 
   const runQuery = async () => {
@@ -2199,6 +2298,8 @@ function ExerciseManagePanel() {
       setRows(filtered);
       setCurrentPage(1);
       setSelectedIds([]);
+      setDuplicateGroups([]);
+      setDedupSeqToId(null);
     } catch (e: any) {
       toast(e?.message || "查询失败", "error");
       setRows([]);
@@ -2220,16 +2321,18 @@ function ExerciseManagePanel() {
   }, [autoQueried, loadingCourses, loadingChapters, courseId, chapterIds.length]);
 
   useEffect(() => {
-    setCurrentPage((p) => Math.min(Math.max(1, p), totalPages));
+    const maxPage = dedupDisplayRows ? dedupTotalPages : totalPages;
+    setCurrentPage((p) => Math.min(Math.max(1, p), maxPage));
     setSelectedIds((prev) => prev.filter((id) => rows.some((x) => x.id === id)));
-  }, [rows, totalPages]);
+  }, [rows, totalPages, dedupDisplayRows, dedupTotalPages]);
 
-  const allCurrentSelected = pagedRows.length > 0 && pagedRows.every((r) => selectedIds.includes(r.id));
+  const currentPageRowIds = dedupDisplayRows ? dedupPagedRows.map((x) => x.row.id) : pagedRows.map((r) => r.id);
+  const allCurrentSelected = currentPageRowIds.length > 0 && currentPageRowIds.every((id) => selectedIds.includes(id));
   const toggleSelectAllCurrent = (checked: boolean) => {
     if (checked) {
-      setSelectedIds(Array.from(new Set([...selectedIds, ...pagedRows.map((r) => r.id)])));
+      setSelectedIds(Array.from(new Set([...selectedIds, ...currentPageRowIds])));
     } else {
-      const current = new Set(pagedRows.map((r) => r.id));
+      const current = new Set(currentPageRowIds);
       setSelectedIds(selectedIds.filter((id) => !current.has(id)));
     }
   };
@@ -2248,6 +2351,8 @@ function ExerciseManagePanel() {
     try {
       await Promise.all(selectedIds.map((id) => api.teacher.courses.deleteQuestion(id)));
       setRows((prev) => prev.filter((x) => !selectedIds.includes(x.id)));
+      setDuplicateGroups([]);
+      setDedupSeqToId(null);
       toast(`已删除 ${selectedIds.length} 道习题`, "success");
       setSelectedIds([]);
     } catch (e: any) {
@@ -2660,17 +2765,35 @@ function ExerciseManagePanel() {
           </div>
         </div>
 
-        <div style={{ marginTop: 12, display: "flex", gap: 10 }}>
+        <div style={{ marginTop: 12, display: "flex", gap: 10, alignItems: "center" }}>
           <button type="button" className="btn-primary" onClick={runQuery} disabled={querying}>
             {querying ? "查询中..." : "查询"}
           </button>
           <button type="button" className="btn-secondary" onClick={resetFilter}>
             重置筛选
           </button>
+          <button
+            type="button"
+            className="btn-secondary"
+            onClick={runDedup}
+            disabled={checkingDup || rows.length === 0}
+          >
+            {checkingDup ? "查重中..." : "题库查重"}
+          </button>
+          <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+            查重时，列表中的习题将按章节和题型分组依次进行查重
+          </span>
         </div>
 
         <div style={{ borderTop: "1px solid var(--border)", marginTop: 16, paddingTop: 14 }}>
-          <div style={{ fontWeight: 700, marginBottom: 8 }}>【习题列表】</div>
+          <div style={{ fontWeight: 700, marginBottom: 8 }}>
+            【习题列表】
+            {dedupDisplayRows && (
+              <span style={{ fontWeight: 400, color: "var(--text-secondary)", marginLeft: 8 }}>
+                （查重结果，仅显示重复题，相邻组深/浅色区分）
+              </span>
+            )}
+          </div>
           <div style={{ overflowX: "auto" }}>
               <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 1080, tableLayout: "fixed" }}>
                 <colgroup>
@@ -2725,7 +2848,138 @@ function ExerciseManagePanel() {
                   </tr>
               </thead>
               <tbody>
-                {pagedRows.map((row, idx) => (
+                {dedupDisplayRows
+                  ? dedupPagedRows.map(({ row, groupIndex }, idx) => (
+                      <tr
+                        key={`${row.id}-${groupIndex}-${idx}`}
+                        style={{
+                          backgroundColor: groupIndex % 2 === 0 ? "var(--dup-group-dark, rgba(255, 193, 7, 0.25))" : "var(--dup-group-light, transparent)",
+                        }}
+                      >
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          <input type="checkbox" checked={selectedIds.includes(row.id)} onChange={(e) => toggleSelectOne(row.id, e.target.checked)} />
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{(currentPage - 1) * pageSize + idx + 1}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8, wordBreak: "break-word", whiteSpace: "normal" }}>
+                          {Array.from(row.questionText).length > 63 ? `${Array.from(row.questionText).slice(0, 63).join("")}...` : row.questionText}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8, wordBreak: "break-word", whiteSpace: "normal" }}>
+                          {row.options?.length ? row.options.join("；") : "-"}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8, overflow: "hidden", wordBreak: "break-word" }}>{row.correctAnswer || "-"}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          {row.explanation ? (Array.from(row.explanation).length > 31 ? `${Array.from(row.explanation).slice(0, 31).join("")}...` : row.explanation) : "-"}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8, wordBreak: "break-word", whiteSpace: "normal" }}>{row.chapterName}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.knowledgePoints.length ? row.knowledgePoints.join("、") : "-"}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{typeLabel[row.questionType as QuestionTypeKey] || row.questionType}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.difficultyScore.toFixed(2)}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.remark}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.bankType === "training" ? "训练库" : "考试库"}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.status === "pending" ? "待审核" : "已审核"}</td>
+                        <td
+                          style={{
+                            border: "1px solid var(--border)",
+                            padding: 8,
+                            fontSize: 12,
+                            lineHeight: 1.25,
+                            width: "clamp(3em, 8vw, 5em)",
+                            maxWidth: "5em",
+                            whiteSpace: "normal",
+                            overflowWrap: "anywhere",
+                          }}
+                        >
+                          {(() => {
+                            if (!row.generatedTime) return "-";
+                            const normalized = /^\d{4}-\d{2}-\d{2}\s/.test(row.generatedTime) ? row.generatedTime.replace(" ", "T") : row.generatedTime;
+                            const ts = Date.parse(normalized);
+                            if (!Number.isFinite(ts)) return row.generatedTime;
+                            const dt = new Date(ts);
+                            return (
+                              <>
+                                <div>{dt.toLocaleDateString()}</div>
+                                <div style={{ color: "var(--text-secondary)" }}>{dt.toLocaleTimeString()}</div>
+                              </>
+                            );
+                          })()}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          <div style={{ display: "flex", gap: 6, flexWrap: "wrap" }}>
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ minHeight: 30, padding: "4px 8px" }}
+                              onClick={() =>
+                                openQuestionModal(
+                                  {
+                                    id: row.id,
+                                    questionText: row.questionText,
+                                    courseName: row.courseName,
+                                    chapterId: row.chapterId,
+                                    chapterName: row.chapterName,
+                                    questionType: row.questionType,
+                                    status: row.status,
+                                    remark: row.remark,
+                                    options: row.options,
+                                    knowledgePoints: row.knowledgePoints,
+                                    knowledgePointIds: row.knowledgePointIds,
+                                    correctAnswer: row.correctAnswer,
+                                    explanation: row.explanation,
+                                    difficultyScore: row.difficultyScore,
+                                    generatedTime: row.generatedTime,
+                                    editedTime: row.editedTime,
+                                    bankType: row.bankType,
+                                  },
+                                  "view"
+                                )
+                              }
+                            >
+                              查看
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ minHeight: 30, padding: "4px 8px" }}
+                              onClick={() =>
+                                openQuestionModal(
+                                  {
+                                    id: row.id,
+                                    questionText: row.questionText,
+                                    courseName: row.courseName,
+                                    chapterId: row.chapterId,
+                                    chapterName: row.chapterName,
+                                    questionType: row.questionType,
+                                    status: row.status,
+                                    remark: row.remark,
+                                    options: row.options,
+                                    knowledgePoints: row.knowledgePoints,
+                                    knowledgePointIds: row.knowledgePointIds,
+                                    correctAnswer: row.correctAnswer,
+                                    explanation: row.explanation,
+                                    difficultyScore: row.difficultyScore,
+                                    generatedTime: row.generatedTime,
+                                    editedTime: row.editedTime,
+                                    bankType: row.bankType,
+                                  },
+                                  "edit"
+                                )
+                              }
+                            >
+                              编辑
+                            </button>
+                            <button
+                              type="button"
+                              className="btn-ghost"
+                              style={{ minHeight: 30, padding: "4px 8px" }}
+                              onClick={() => deleteOneQuestion(row.id)}
+                            >
+                              删除
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    ))
+                  : pagedRows.map((row, idx) => (
                   <tr key={row.id}>
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>
                       <input type="checkbox" checked={selectedIds.includes(row.id)} onChange={(e) => toggleSelectOne(row.id, e.target.checked)} />
@@ -2850,7 +3104,7 @@ function ExerciseManagePanel() {
                     </td>
                   </tr>
                 ))}
-                {!rows.length && (
+                {!rows.length && !dedupDisplayRows && (
                   <tr>
                     <td colSpan={15} style={{ border: "1px solid var(--border)", padding: 12, color: "var(--text-muted)" }}>
                       暂无数据，请先设置筛选条件后点击“查询”。
@@ -2880,11 +3134,16 @@ function ExerciseManagePanel() {
             <button type="button" className="btn-secondary" onClick={() => setCurrentPage((p) => Math.max(1, p - 1))} disabled={currentPage <= 1}>
               上一页
             </button>
-            <button type="button" className="btn-secondary" onClick={() => setCurrentPage((p) => Math.min(totalPages, p + 1))} disabled={currentPage >= totalPages}>
+            <button
+              type="button"
+              className="btn-secondary"
+              onClick={() => setCurrentPage((p) => Math.min(dedupDisplayRows ? dedupTotalPages : totalPages, p + 1))}
+              disabled={currentPage >= (dedupDisplayRows ? dedupTotalPages : totalPages)}
+            >
               下一页
             </button>
             <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
-              第 {currentPage} / {totalPages} 页，共 {rows.length} 条
+              第 {currentPage} / {dedupDisplayRows ? dedupTotalPages : totalPages} 页，共 {dedupDisplayRows ? dedupDisplayRows.length : rows.length} 条
             </span>
           </div>
           <div style={{ marginTop: 10, display: "flex", gap: 10, flexWrap: "wrap" }}>
@@ -5035,6 +5294,30 @@ export function TeacherPaperContentPage() {
   const [editingQuestionIndex, setEditingQuestionIndex] = useState<number | null>(null);
   const [editQuestionDraft, setEditQuestionDraft] = useState<PaperQuestionRow | null>(null);
 
+  // 添加题目弹窗
+  const [addQuestionsOpen, setAddQuestionsOpen] = useState(false);
+  const [addQuestionsChapterIds, setAddQuestionsChapterIds] = useState<number[]>([]);
+  const [addQuestionsKnowledgePointIds, setAddQuestionsKnowledgePointIds] = useState<number[]>([]);
+  const [addQuestionsQuestionTypeFilter, setAddQuestionsQuestionTypeFilter] = useState("");
+  const [addQuestionsDifficultyMin, setAddQuestionsDifficultyMin] = useState(0);
+  const [addQuestionsDifficultyMax, setAddQuestionsDifficultyMax] = useState(1);
+  const [addQuestionsRows, setAddQuestionsRows] = useState<
+    {
+      id: number;
+      questionText: string;
+      options: string[];
+      correctAnswer: string;
+      explanation: string;
+      questionType: string;
+      difficultyScore: number;
+      knowledgePointIds: number[];
+    }[]
+  >([]);
+  const [addQuestionsSelectedIds, setAddQuestionsSelectedIds] = useState<number[]>([]);
+  const [addQuestionsQuerying, setAddQuestionsQuerying] = useState(false);
+  const [addQuestionsKnowledgePoints, setAddQuestionsKnowledgePoints] = useState<{ id: number; title: string; chapterId: number }[]>([]);
+  const [addQuestionsLoadingKnowledgePoints, setAddQuestionsLoadingKnowledgePoints] = useState(false);
+
   useEffect(() => {
     if (!paperId || !Number.isFinite(paperId)) {
       setLoading(false);
@@ -5108,6 +5391,14 @@ export function TeacherPaperContentPage() {
     setEditQuestionDraft(null);
   };
 
+  const deleteQuestionAt = (idx: number) => {
+    setQuestions((prev) => prev.filter((_, i) => i !== idx));
+    if (editingQuestionIndex !== null) {
+      if (editingQuestionIndex === idx) closeQuestionEdit();
+      else if (editingQuestionIndex > idx) setEditingQuestionIndex(editingQuestionIndex - 1);
+    }
+  };
+
   const saveQuestionEdit = () => {
     if (editingQuestionIndex === null || !editQuestionDraft) return;
     updateQuestion(editingQuestionIndex, editQuestionDraft);
@@ -5172,6 +5463,165 @@ export function TeacherPaperContentPage() {
     } finally {
       setSaving(false);
     }
+  };
+
+  const openAddQuestionsModal = () => {
+    setAddQuestionsChapterIds(editChapterIds.length ? editChapterIds : (detail?.chapterIds ?? []));
+    setAddQuestionsKnowledgePointIds([]);
+    setAddQuestionsQuestionTypeFilter("");
+    setAddQuestionsDifficultyMin(0);
+    setAddQuestionsDifficultyMax(1);
+    setAddQuestionsRows([]);
+    setAddQuestionsSelectedIds([]);
+    setAddQuestionsOpen(true);
+  };
+
+  const closeAddQuestionsModal = () => {
+    setAddQuestionsOpen(false);
+  };
+
+  useEffect(() => {
+    if (!addQuestionsOpen || !addQuestionsChapterIds.length) {
+      setAddQuestionsKnowledgePoints([]);
+      return;
+    }
+    setAddQuestionsLoadingKnowledgePoints(true);
+    Promise.all(
+      addQuestionsChapterIds.map((id) =>
+        api.teacher.courses
+          .chapterKnowledgePoints(id)
+          .then((rows) => rows.map((kp) => ({ id: kp.id, title: kp.title, chapterId: id })))
+          .catch(() => [])
+      )
+    )
+      .then((parts) => {
+        setAddQuestionsKnowledgePoints(parts.flat());
+      })
+      .catch(() => setAddQuestionsKnowledgePoints([]))
+      .finally(() => setAddQuestionsLoadingKnowledgePoints(false));
+  }, [addQuestionsOpen, addQuestionsChapterIds]);
+
+  const runAddQuestionsQuery = async () => {
+    if (!detail) return;
+    if (!addQuestionsChapterIds.length) {
+      toast("请至少选择一个章节", "error");
+      return;
+    }
+    if (addQuestionsDifficultyMin > addQuestionsDifficultyMax) {
+      toast("难度区间不合法", "error");
+      return;
+    }
+    setAddQuestionsQuerying(true);
+    try {
+      const chapterNameMap = new Map(chapters.map((x) => [x.id, x.title]));
+      const all = (
+        await Promise.all(
+          addQuestionsChapterIds.map((id) => api.teacher.courses.chapterQuestions(id).catch(() => []))
+        )
+      ).flat();
+      const mapped = all.map((q) => {
+        let options: string[] = [];
+        try {
+          const parsed = q.options ? JSON.parse(q.options) : [];
+          options = Array.isArray(parsed) ? parsed.map((x) => String(x || "")) : [];
+        } catch {
+          options = [];
+        }
+        const knowledgePointIds = (q.knowledge_point_ids || "")
+          .split(",")
+          .map((x) => Number(x.trim()))
+          .filter((x) => Number.isFinite(x) && x > 0);
+        return {
+          id: q.id,
+          chapterId: q.chapter_id,
+          chapterName: q.chapter_title || chapterNameMap.get(q.chapter_id) || `章节${q.chapter_id}`,
+          questionType: q.question_type || "single_choice",
+          difficultyScore: Number(q.difficulty_score ?? 0.8),
+          knowledgePointIds,
+          questionText: q.question_text,
+          options,
+          correctAnswer: q.correct_answer || "",
+          explanation: (q.explanation || "").trim() || "-",
+          bankType: (q.question_bank_type === "exam" ? "exam" : "training") as "training" | "exam",
+          status: (q.is_approved ? "approved" : "pending") as "pending" | "approved",
+        };
+      });
+      const filtered = mapped.filter((r) => {
+        if (r.bankType !== "exam") return false;
+        if (r.status !== "approved") return false;
+        if (addQuestionsQuestionTypeFilter && r.questionType !== addQuestionsQuestionTypeFilter) return false;
+        if (r.difficultyScore < addQuestionsDifficultyMin || r.difficultyScore > addQuestionsDifficultyMax) return false;
+        if (addQuestionsKnowledgePointIds.length > 0) {
+          const hasAny = r.knowledgePointIds.some((id) => addQuestionsKnowledgePointIds.includes(id));
+          if (!hasAny) return false;
+        }
+        return true;
+      });
+      setAddQuestionsRows(
+        filtered.map((r) => ({
+          id: r.id,
+          questionText: r.questionText,
+          options: r.options,
+          correctAnswer: r.correctAnswer,
+          explanation: r.explanation,
+          questionType: r.questionType,
+          difficultyScore: r.difficultyScore,
+          knowledgePointIds: r.knowledgePointIds,
+        }))
+      );
+      setAddQuestionsSelectedIds([]);
+    } catch (e: unknown) {
+      toast((e as Error)?.message || "查询失败", "error");
+      setAddQuestionsRows([]);
+    } finally {
+      setAddQuestionsQuerying(false);
+    }
+  };
+
+  const resetAddQuestionsFilter = () => {
+    setAddQuestionsChapterIds(editChapterIds);
+    setAddQuestionsKnowledgePointIds([]);
+    setAddQuestionsQuestionTypeFilter("");
+    setAddQuestionsDifficultyMin(0);
+    setAddQuestionsDifficultyMax(1);
+    setAddQuestionsRows([]);
+    setAddQuestionsSelectedIds([]);
+  };
+
+  const addQuestionsAllCurrentSelected =
+    addQuestionsRows.length > 0 && addQuestionsRows.every((r) => addQuestionsSelectedIds.includes(r.id));
+  const toggleAddQuestionsSelectAll = (checked: boolean) => {
+    if (checked) {
+      setAddQuestionsSelectedIds(addQuestionsRows.map((r) => r.id));
+    } else {
+      setAddQuestionsSelectedIds([]);
+    }
+  };
+  const toggleAddQuestionsSelectOne = (id: number, checked: boolean) => {
+    setAddQuestionsSelectedIds((prev) =>
+      checked ? Array.from(new Set([...prev, id])) : prev.filter((x) => x !== id)
+    );
+  };
+
+  const confirmAddQuestions = () => {
+    const selected = addQuestionsRows.filter((r) => addQuestionsSelectedIds.includes(r.id));
+    if (!selected.length) {
+      toast("请至少选择一道题目", "error");
+      return;
+    }
+    const newRows: PaperQuestionRow[] = selected.map((r) => ({
+      questionType: r.questionType,
+      questionText: r.questionText,
+      options: r.options,
+      correctAnswer: r.correctAnswer,
+      explanation: r.explanation || null,
+      difficultyScore: r.difficultyScore,
+      score: 1,
+      source: "local" as const,
+    }));
+    setQuestions((prev) => [...prev, ...newRows]);
+    closeAddQuestionsModal();
+    toast(`已添加 ${newRows.length} 道题目`, "success");
   };
 
   if (loading) {
@@ -5387,6 +5837,9 @@ export function TeacherPaperContentPage() {
                       <button type="button" className="btn-ghost" style={{ padding: "4px 8px", fontSize: 13 }} onClick={() => openQuestionEdit(idx)}>
                         编辑
                       </button>
+                      <button type="button" className="btn-ghost" style={{ padding: "4px 8px", fontSize: 13 }} onClick={() => deleteQuestionAt(idx)}>
+                        删除
+                      </button>
                     </td>
                   )}
                 </tr>
@@ -5402,7 +5855,10 @@ export function TeacherPaperContentPage() {
           </table>
         </div>
         {mode === "edit" && (
-          <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end" }}>
+          <div style={{ marginTop: 12, display: "flex", justifyContent: "flex-end", gap: 10 }}>
+            <button type="button" className="btn-secondary" onClick={openAddQuestionsModal}>
+              添加题目
+            </button>
             <button type="button" className="btn-primary" onClick={saveAll} disabled={saving}>
               {saving ? "保存中..." : "保存"}
             </button>
@@ -5504,6 +5960,318 @@ export function TeacherPaperContentPage() {
               <button type="button" className="btn-primary" onClick={saveQuestionEdit}>
                 确定
               </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {addQuestionsOpen && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          style={{
+            position: "fixed",
+            inset: 0,
+            background: "rgba(0,0,0,0.35)",
+            display: "grid",
+            placeItems: "center",
+            zIndex: 2000,
+            padding: 12,
+          }}
+          onClick={closeAddQuestionsModal}
+        >
+          <div
+            className="card"
+            style={{
+              width: "min(900px, 95vw)",
+              maxHeight: "90vh",
+              overflow: "auto",
+              padding: 16,
+              background: "var(--bg-elevated)",
+              border: "1px solid var(--border)",
+              borderRadius: 10,
+            }}
+            onClick={(e) => e.stopPropagation()}
+          >
+            <h3 style={{ marginTop: 0, marginBottom: 14, fontSize: 18, fontWeight: 700 }}>从题库添加题目</h3>
+            <div
+              style={{
+                border: "1px solid var(--border)",
+                borderRadius: 10,
+                padding: 14,
+                background: "var(--bg-base)",
+                color: "var(--text-primary)",
+              }}
+            >
+              <div style={{ fontWeight: 700, marginBottom: 10 }}>筛选条件</div>
+              <div style={{ display: "grid", gridTemplateColumns: "100px minmax(0, 1fr)", rowGap: 10, columnGap: 12, alignItems: "start" }}>
+                <div style={{ color: "var(--text-secondary)", paddingTop: 8 }}>章节</div>
+                <div>
+                  <details>
+                    <summary
+                      style={{
+                        listStyle: "none",
+                        cursor: "pointer",
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        padding: "10px 12px",
+                        background: "var(--bg-elevated)",
+                        color: "var(--text-primary)",
+                        userSelect: "none",
+                      }}
+                    >
+                      {`已选 ${addQuestionsChapterIds.length} / ${chapters.length || 0} 个章节`}
+                    </summary>
+                    <div
+                      style={{
+                        marginTop: 8,
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        padding: 10,
+                        display: "grid",
+                        gap: 8,
+                        maxHeight: 220,
+                        overflowY: "auto",
+                        background: "var(--bg-elevated)",
+                      }}
+                    >
+                      {!!chapters.length && (
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 600 }}>
+                          <input
+                            type="checkbox"
+                            checked={chapters.length > 0 && addQuestionsChapterIds.length === chapters.length}
+                            onChange={(e) =>
+                              setAddQuestionsChapterIds(e.target.checked ? chapters.map((x) => x.id) : [])
+                            }
+                          />
+                          全部章节
+                        </label>
+                      )}
+                      {chapters.map((ch) => (
+                        <label key={ch.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14 }}>
+                          <input
+                            type="checkbox"
+                            checked={addQuestionsChapterIds.includes(ch.id)}
+                            onChange={() =>
+                              setAddQuestionsChapterIds((prev) =>
+                                prev.includes(ch.id) ? prev.filter((x) => x !== ch.id) : [...prev, ch.id]
+                              )
+                            }
+                          />
+                          {ch.title}
+                        </label>
+                      ))}
+                      {!chapters.length && <span style={{ color: "var(--text-muted)" }}>暂无章节</span>}
+                    </div>
+                  </details>
+                </div>
+
+                <div style={{ color: "var(--text-secondary)", paddingTop: 8 }}>知识点</div>
+                <div>
+                  <details>
+                    <summary
+                      style={{
+                        listStyle: "none",
+                        cursor: "pointer",
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        padding: "10px 12px",
+                        background: "var(--bg-elevated)",
+                        color: "var(--text-primary)",
+                        userSelect: "none",
+                      }}
+                    >
+                      {addQuestionsLoadingKnowledgePoints
+                        ? "知识点加载中..."
+                        : `已选 ${addQuestionsKnowledgePointIds.length} / ${addQuestionsKnowledgePoints.length || 0} 个知识点`}
+                    </summary>
+                    <div
+                      style={{
+                        marginTop: 8,
+                        border: "1px solid var(--border)",
+                        borderRadius: 10,
+                        padding: 10,
+                        display: "grid",
+                        gap: 8,
+                        maxHeight: 220,
+                        overflowY: "auto",
+                        background: "var(--bg-elevated)",
+                      }}
+                    >
+                      {!addQuestionsLoadingKnowledgePoints && !!addQuestionsKnowledgePoints.length && (
+                        <label style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14, fontWeight: 600 }}>
+                          <input
+                            type="checkbox"
+                            checked={
+                              addQuestionsKnowledgePoints.length > 0 &&
+                              addQuestionsKnowledgePointIds.length === addQuestionsKnowledgePoints.length
+                            }
+                            onChange={(e) =>
+                              setAddQuestionsKnowledgePointIds(
+                                e.target.checked ? addQuestionsKnowledgePoints.map((x) => x.id) : []
+                              )
+                            }
+                          />
+                          全部知识点
+                        </label>
+                      )}
+                      {addQuestionsKnowledgePoints.map((kp) => (
+                        <label key={kp.id} style={{ display: "inline-flex", alignItems: "center", gap: 6, fontSize: 14 }}>
+                          <input
+                            type="checkbox"
+                            checked={addQuestionsKnowledgePointIds.includes(kp.id)}
+                            onChange={() =>
+                              setAddQuestionsKnowledgePointIds((prev) =>
+                                prev.includes(kp.id) ? prev.filter((x) => x !== kp.id) : [...prev, kp.id]
+                              )
+                            }
+                          />
+                          {kp.title}
+                        </label>
+                      ))}
+                      {!addQuestionsLoadingKnowledgePoints && !addQuestionsKnowledgePoints.length && (
+                        <span style={{ color: "var(--text-muted)" }}>暂无知识点</span>
+                      )}
+                    </div>
+                  </details>
+                </div>
+
+                <div style={{ color: "var(--text-secondary)", alignSelf: "center" }}>题目类型</div>
+                <div style={{ display: "flex", alignItems: "center", flexWrap: "wrap", minHeight: 38 }}>
+                  <label style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 12 }}>
+                    <input
+                      type="radio"
+                      name="add-questions-type"
+                      checked={addQuestionsQuestionTypeFilter === ""}
+                      onChange={() => setAddQuestionsQuestionTypeFilter("")}
+                    />
+                    全部
+                  </label>
+                  {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((t) => (
+                    <label key={t} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 12 }}>
+                      <input
+                        type="radio"
+                        name="add-questions-type"
+                        checked={addQuestionsQuestionTypeFilter === t}
+                        onChange={() => setAddQuestionsQuestionTypeFilter(t)}
+                      />
+                      {PAPER_CONTENT_TYPE_LABEL[t] || t}
+                    </label>
+                  ))}
+                </div>
+
+                <div style={{ color: "var(--text-secondary)", paddingTop: 8 }}>难度系数</div>
+                <div style={{ display: "flex", gap: 8, alignItems: "center", flexWrap: "wrap" }}>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={addQuestionsDifficultyMin}
+                    onChange={(e) =>
+                      setAddQuestionsDifficultyMin(Math.max(0, Math.min(1, Number(e.target.value || 0))))
+                    }
+                    style={{ width: 100 }}
+                  />
+                  <span>~</span>
+                  <input
+                    type="number"
+                    min={0}
+                    max={1}
+                    step={0.01}
+                    value={addQuestionsDifficultyMax}
+                    onChange={(e) =>
+                      setAddQuestionsDifficultyMax(Math.max(0, Math.min(1, Number(e.target.value || 0))))
+                    }
+                    style={{ width: 100 }}
+                  />
+                </div>
+              </div>
+
+              <div style={{ marginTop: 10, padding: "8px 0", color: "var(--text-secondary)", fontSize: 13 }}>
+                题库来源：考试库；　　题目状态：已审核
+              </div>
+
+              <div style={{ marginTop: 8, display: "flex", gap: 10, alignItems: "center" }}>
+                <button
+                  type="button"
+                  className="btn-primary"
+                  onClick={runAddQuestionsQuery}
+                  disabled={addQuestionsQuerying}
+                >
+                  {addQuestionsQuerying ? "查询中..." : "查询"}
+                </button>
+                <button type="button" className="btn-secondary" onClick={resetAddQuestionsFilter}>
+                  重置筛选
+                </button>
+              </div>
+            </div>
+
+            <div style={{ borderTop: "1px solid var(--border)", marginTop: 14, paddingTop: 14 }}>
+              <div style={{ fontWeight: 700, marginBottom: 8 }}>习题列表</div>
+              <div style={{ overflowX: "auto" }}>
+                <table style={{ width: "100%", borderCollapse: "collapse", minWidth: 700 }}>
+                  <thead>
+                    <tr>
+                      <th style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)", width: 36 }}>
+                        <input
+                          type="checkbox"
+                          checked={addQuestionsAllCurrentSelected}
+                          onChange={(e) => toggleAddQuestionsSelectAll(e.target.checked)}
+                        />
+                      </th>
+                      {["序号", "题目内容", "选项", "答案", "解析", "题型", "难度系数"].map((h) => (
+                        <th key={h} style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
+                          {h}
+                        </th>
+                      ))}
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {addQuestionsRows.map((row, idx) => (
+                      <tr key={row.id}>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          <input
+                            type="checkbox"
+                            checked={addQuestionsSelectedIds.includes(row.id)}
+                            onChange={(e) => toggleAddQuestionsSelectOne(row.id, e.target.checked)}
+                          />
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{idx + 1}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8, wordBreak: "break-word", whiteSpace: "normal", maxWidth: 200 }}>
+                          {row.questionText.length > 80 ? `${row.questionText.slice(0, 80)}...` : row.questionText}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          {row.options?.length ? row.options.join("；") : "-"}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.correctAnswer || "-"}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          {row.explanation && row.explanation !== "-" ? (row.explanation.length > 40 ? `${row.explanation.slice(0, 40)}...` : row.explanation) : "-"}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>
+                          {PAPER_CONTENT_TYPE_LABEL[row.questionType] || row.questionType}
+                        </td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8 }}>{row.difficultyScore.toFixed(2)}</td>
+                      </tr>
+                    ))}
+                    {!addQuestionsRows.length && (
+                      <tr>
+                        <td colSpan={8} style={{ border: "1px solid var(--border)", padding: 8, color: "var(--text-muted)" }}>
+                          请设置筛选条件后点击「查询」
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ marginTop: 12, display: "flex", gap: 10, justifyContent: "flex-end" }}>
+                <button type="button" className="btn-secondary" onClick={closeAddQuestionsModal}>
+                  取消
+                </button>
+                <button type="button" className="btn-primary" onClick={confirmAddQuestions} disabled={!addQuestionsSelectedIds.length}>
+                  确定添加
+                </button>
+              </div>
             </div>
           </div>
         </div>
