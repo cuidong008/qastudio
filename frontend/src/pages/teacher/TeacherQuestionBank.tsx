@@ -2780,7 +2780,7 @@ function ExerciseManagePanel() {
           >
             {checkingDup ? "查重中..." : "题库查重"}
           </button>
-          <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>
+          <span style={{ color: "var(--text-secondary)", fontSize: 13, marginLeft: "1em" }}>
             查重时，列表中的习题将按章节和题型分组依次进行查重
           </span>
         </div>
