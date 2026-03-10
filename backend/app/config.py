@@ -35,7 +35,7 @@ class Settings(BaseSettings):
 
     # 生成习题页「题目类型配置」表格默认值（最大数量、难度系数）
     exercise_default_single_choice_max: int = 10
-    exercise_default_multiple_choice_max: int = 10
+    exercise_default_multiple_choice_max: int = 5
     exercise_default_judge_max: int = 10
     exercise_default_blank_max: int = 10
     exercise_default_qa_max: int = 5
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
 
     # 生成试卷页「题型数量&难度配置」表格默认值（数量、难度系数、每题分数）
     paper_default_single_choice_count: int = 10
-    paper_default_multiple_choice_count: int = 10
+    paper_default_multiple_choice_count: int = 5
     paper_default_judge_count: int = 10
     paper_default_blank_count: int = 10
     paper_default_qa_count: int = 5

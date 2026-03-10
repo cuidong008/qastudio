@@ -60,7 +60,7 @@ const EXERCISE_GENERATE_DEFAULTS_STORAGE_KEY = "qastudio.exerciseGenerateDefault
 
 const defaultTypeConfigs: QuestionTypeConfig[] = [
   { key: "single_choice", label: "单选题", max: 10, difficulty: 0.8 },
-  { key: "multiple_choice", label: "多选题", max: 10, difficulty: 0.8 },
+  { key: "multiple_choice", label: "多选题", max: 5, difficulty: 0.8 },
   { key: "judge", label: "判断题", max: 10, difficulty: 0.8 },
   { key: "blank", label: "填空题", max: 10, difficulty: 0.8 },
   { key: "qa", label: "问答题", max: 5, difficulty: 0.8 },
@@ -163,7 +163,7 @@ function GenerateExercisesPanel() {
   const [generateSettingsModalOpen, setGenerateSettingsModalOpen] = useState(false);
   const [generateSettingsDraft, setGenerateSettingsDraft] = useState<Record<QuestionTypeKey, { max: number; difficulty: number }>>({
     single_choice: { max: 10, difficulty: 0.8 },
-    multiple_choice: { max: 10, difficulty: 0.8 },
+    multiple_choice: { max: 5, difficulty: 0.8 },
     judge: { max: 10, difficulty: 0.8 },
     blank: { max: 10, difficulty: 0.8 },
     qa: { max: 5, difficulty: 0.8 },
@@ -378,7 +378,7 @@ function GenerateExercisesPanel() {
         difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "single_choice")?.difficulty ?? 0.8,
       },
       multiple_choice: {
-        max: defaultExerciseTypeConfigs.find((r) => r.key === "multiple_choice")?.max ?? 10,
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "multiple_choice")?.max ?? 5,
         difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "multiple_choice")?.difficulty ?? 0.8,
       },
       judge: {
@@ -419,11 +419,12 @@ function GenerateExercisesPanel() {
     setSavedExerciseDefaults(null);
     if (exerciseDefaultRowsFromApi?.length) {
       const byType = Object.fromEntries(exerciseDefaultRowsFromApi.map((r) => [r.type, r]));
+      const defaultMax = (k: QuestionTypeKey) => (k === "multiple_choice" || k === "qa" ? 5 : 10);
       const d = (k: QuestionTypeKey) => {
         const r = byType[k];
         const difficultyNum = parseFloat(String(r?.difficulty));
         return {
-          max: Math.max(0, Math.min(30, r?.max ?? 10)),
+          max: Math.max(0, Math.min(30, r?.max ?? defaultMax(k))),
           difficulty:
             Number.isFinite(difficultyNum) && difficultyNum >= 0 && difficultyNum <= 1 ? difficultyNum : 0.8,
         };
@@ -3179,7 +3180,7 @@ function loadSavedPaperDefaults(): Partial<Record<QuestionTypeKey, PaperDefaultP
 
 const FALLBACK_PAPER_DEFAULT_CONFIGS: Array<{ id: number; type: QuestionTypeKey; count: number; difficulty: string; score: number }> = [
   { id: 1, type: "single_choice", count: 10, difficulty: "0.8", score: 2 },
-  { id: 2, type: "multiple_choice", count: 10, difficulty: "0.8", score: 4 },
+  { id: 2, type: "multiple_choice", count: 5, difficulty: "0.8", score: 4 },
   { id: 3, type: "judge", count: 10, difficulty: "0.8", score: 1 },
   { id: 4, type: "blank", count: 10, difficulty: "0.8", score: 2 },
   { id: 5, type: "qa", count: 5, difficulty: "0.8", score: 10 },
@@ -3250,7 +3251,7 @@ function GeneratePapersPanel() {
   const [paperSettingsModalOpen, setPaperSettingsModalOpen] = useState(false);
   const [paperSettingsDraft, setPaperSettingsDraft] = useState<Record<QuestionTypeKey, { count: number; difficulty: number; score: number }>>({
     single_choice: { count: 10, difficulty: 0.8, score: 2 },
-    multiple_choice: { count: 10, difficulty: 0.8, score: 4 },
+    multiple_choice: { count: 5, difficulty: 0.8, score: 4 },
     judge: { count: 10, difficulty: 0.8, score: 1 },
     blank: { count: 10, difficulty: 0.8, score: 2 },
     qa: { count: 5, difficulty: 0.8, score: 10 },
@@ -3457,11 +3458,12 @@ function GeneratePapersPanel() {
     setSavedPaperDefaults(null);
     if (defaultRowsFromApi?.length) {
       const byType = Object.fromEntries(defaultRowsFromApi.map((r) => [r.type, r]));
+      const defaultCount = (k: QuestionTypeKey) => (k === "multiple_choice" || k === "qa" ? 5 : 10);
       const d = (k: QuestionTypeKey) => {
         const r = byType[k];
         const diff = parseFloat(String(r?.difficulty));
         return {
-          count: Math.max(0, Math.min(100, r?.count ?? 10)),
+          count: Math.max(0, Math.min(100, r?.count ?? defaultCount(k))),
           difficulty: Number.isFinite(diff) && diff >= 0 && diff <= 1 ? diff : 0.8,
           score: Number(r?.score) ?? 2,
         };
@@ -5653,6 +5655,15 @@ function PaperManagePanel() {
 
   useEffect(() => {
     loadRows();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  useEffect(() => {
+    const onVisibilityChange = () => {
+      if (document.visibilityState === "visible") loadRows();
+    };
+    document.addEventListener("visibilitychange", onVisibilityChange);
+    return () => document.removeEventListener("visibilitychange", onVisibilityChange);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 

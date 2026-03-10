@@ -4920,6 +4920,17 @@ async def update_teacher_paper(
         p.request_payload = json.dumps(body.request_payload, ensure_ascii=False)
     if body.content_payload is not None:
         p.content_payload = json.dumps(body.content_payload, ensure_ascii=False)
+        preview_questions = (body.content_payload or {}).get("preview_questions") or []
+        if isinstance(preview_questions, list):
+            total_score = round(sum(float((q.get("score") or 0)) for q in preview_questions if isinstance(q, dict)), 2)
+            p.total_score = total_score
+            if total_score > 0:
+                weighted = sum(
+                    float((q.get("score") or 0)) * _normalize_difficulty_score(q.get("difficulty_score"), 0.8)
+                    for q in preview_questions
+                    if isinstance(q, dict)
+                )
+                p.overall_difficulty = _normalize_difficulty_score(round(weighted / total_score, 2), 0.0)
     if body.error_message is not None:
         p.error_message = (body.error_message or "").strip() or None
     await db.flush()
@@ -5250,9 +5261,10 @@ async def preview_import_teacher_questions(
     normalized_bank_type = _normalize_question_bank_type(question_bank_type)
     if not files:
         raise HTTPException(status_code=400, detail="请上传文件")
+    file_list: list[UploadFile] = list(files) if isinstance(files, (list, tuple)) else [files]
 
     extracted_docs: list[dict[str, object]] = []
-    for f in files:
+    for f in file_list:
         file_name = (f.filename or "").strip()
         if not file_name:
             continue
@@ -5290,11 +5302,19 @@ async def preview_import_teacher_questions(
         raise HTTPException(status_code=400, detail="未从上传文件提取到可用文本")
     matched_pairs, unmatched_questions, unmatched_answers = _pair_documents_by_name(extracted_docs)
 
-    from ..rag.config import get_rag_settings
-    from ..rag.llm import get_llm
+    try:
+        from ..rag.config import get_rag_settings
+        from ..rag.llm import get_llm
 
-    settings = get_rag_settings()
-    llm = get_llm(settings)
+        settings = get_rag_settings()
+        llm = get_llm(settings)
+    except Exception as e:
+        logger.exception("questions/import/preview: RAG/LLM 初始化失败")
+        raise HTTPException(
+            status_code=503,
+            detail=f"题目解析依赖的 LLM 未配置或初始化失败，请到「管理后台 - RAG 配置」检查模型与 API 设置。错误摘要: {str(e)[:200]}",
+        ) from e
+
     parse_jobs: list[tuple[str, str]] = []
     for q_doc, a_doc in matched_pairs:
         q_ctx = f"【文件：{q_doc['file_name']}】\n{q_doc['text']}"
@@ -5311,41 +5331,50 @@ async def preview_import_teacher_questions(
     if not parse_jobs:
         raise HTTPException(status_code=400, detail="未形成可解析的题目-答案文档配对")
 
-    parsed_items: list[TeacherImportQuestionPreviewItemOut] = []
-    for q_ctx, a_ctx in parse_jobs:
-        prompt = _build_import_questions_prompt(
-            question_context=q_ctx,
-            answer_context=a_ctx,
-            chapter_options_text=chapter_options_text,
-        )
-        raw = await asyncio.to_thread(
-            llm.generate,
-            prompt,
-            max_tokens=max(1600, int(settings.llm_max_tokens or 512)),
-            temperature=0.1,
-        )
-        candidates = _extract_json_payload(raw)
-        parsed_items.extend(_normalize_import_questions(candidates, chapter_options=chapter_options))
+    try:
+        parsed_items: list[TeacherImportQuestionPreviewItemOut] = []
+        for q_ctx, a_ctx in parse_jobs:
+            prompt = _build_import_questions_prompt(
+                question_context=q_ctx,
+                answer_context=a_ctx,
+                chapter_options_text=chapter_options_text,
+            )
+            raw = await asyncio.to_thread(
+                llm.generate,
+                prompt,
+                max_tokens=max(1600, int(settings.llm_max_tokens or 512)),
+                temperature=0.1,
+            )
+            candidates = _extract_json_payload(raw)
+            parsed_items.extend(_normalize_import_questions(candidates, chapter_options=chapter_options))
 
-    # 去重：按题干键合并，保留首次识别结果。
-    dedup_items: list[TeacherImportQuestionPreviewItemOut] = []
-    seen_keys: set[str] = set()
-    for item in parsed_items:
-        key = _normalize_text_key(item.question_text)
-        if not key or key in seen_keys:
-            continue
-        seen_keys.add(key)
-        dedup_items.append(item)
-    items = dedup_items
-    if not items:
-        raise HTTPException(status_code=400, detail="未识别到有效题目，请检查文档内容或重试")
-    return TeacherImportQuestionsPreviewOut(
-        course_id=course.id,
-        chapter_ids=target_chapter_ids,
-        question_bank_type=normalized_bank_type,
-        parsed_count=len(items),
-        items=items,
-    )
+        # 去重：按题干键合并，保留首次识别结果。
+        dedup_items: list[TeacherImportQuestionPreviewItemOut] = []
+        seen_keys: set[str] = set()
+        for item in parsed_items:
+            key = _normalize_text_key(item.question_text)
+            if not key or key in seen_keys:
+                continue
+            seen_keys.add(key)
+            dedup_items.append(item)
+        items = dedup_items
+        if not items:
+            raise HTTPException(status_code=400, detail="未识别到有效题目，请检查文档内容或重试")
+        return TeacherImportQuestionsPreviewOut(
+            course_id=course.id,
+            chapter_ids=target_chapter_ids,
+            question_bank_type=normalized_bank_type,
+            parsed_count=len(items),
+            items=items,
+        )
+    except HTTPException:
+        raise
+    except Exception as e:
+        logger.exception("questions/import/preview: 解析或 LLM 调用失败")
+        raise HTTPException(
+            status_code=500,
+            detail=f"题目解析失败（可能是 LLM 调用超时或返回格式异常）。请检查 RAG/LLM 配置或稍后重试。错误摘要: {str(e)[:200]}",
+        ) from e
 
 
 @router.post("/questions/import/confirm", response_model=TeacherImportConfirmOut)
