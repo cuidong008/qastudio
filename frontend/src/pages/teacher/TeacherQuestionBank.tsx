@@ -3184,18 +3184,6 @@ const FALLBACK_PAPER_DEFAULT_CONFIGS: Array<{ id: number; type: QuestionTypeKey;
   { id: 4, type: "blank", count: 10, difficulty: "0.8", score: 2 },
   { id: 5, type: "qa", count: 5, difficulty: "0.8", score: 10 },
 ];
-const OPTION_PREFIX_RE = /^\s*[A-Z][\.\)．、]\s*/;
-const formatOptionsForDisplay = (options: string[]) =>
-  (options || []).length
-    ? options
-        .map((opt, i) => {
-          const text = String(opt || "").trim();
-          if (!text) return `${String.fromCharCode(65 + i)}.`;
-          return OPTION_PREFIX_RE.test(text) ? text : `${String.fromCharCode(65 + i)}. ${text}`;
-        })
-        .join("\n")
-    : "-";
-
 type PaperPreviewQuestionRow = {
   id: number;
   questionType: string;
