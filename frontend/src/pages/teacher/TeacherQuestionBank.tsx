@@ -2422,7 +2422,9 @@ function ExerciseManagePanel() {
     setEditingRow(row);
     setRemarkDraft(row.remark === "-" ? "" : row.remark);
     setQuestionTextDraft(row.questionText || "");
-    setOptionsDraft((row.options || []).join("\n"));
+    setOptionsDraft(
+      (row.options || []).map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("\n")
+    );
     setCorrectAnswerDraft(row.correctAnswer || "");
     setExplanationDraft(row.explanation === "-" ? "" : row.explanation);
     setDifficultyScoreDraft(String(Number.isFinite(row.difficultyScore) ? row.difficultyScore : 0.8));
@@ -2471,7 +2473,8 @@ function ExerciseManagePanel() {
     const optionsList = optionsDraft
       .split("\n")
       .map((x) => x.trim())
-      .filter((x) => !!x);
+      .filter((x) => !!x)
+      .map((line) => line.replace(/^[A-Z]\.\s*/, ""));
     setSavingRemark(true);
     try {
       const updated = await api.teacher.courses.updateQuestion(editingRow.id, {
@@ -3205,7 +3208,9 @@ function ExerciseManagePanel() {
                 />
               ) : (
                 <div style={{ whiteSpace: "pre-wrap", lineHeight: 1.6 }}>
-                  {editingRow.options.length ? editingRow.options.join("\n") : "-"}
+                  {editingRow.options.length
+                    ? editingRow.options.map((o, i) => `${String.fromCharCode(65 + i)}. ${o}`).join("\n")
+                    : "-"}
                 </div>
               )}
               <div style={{ color: "var(--text-secondary)" }}>参考答案</div>
