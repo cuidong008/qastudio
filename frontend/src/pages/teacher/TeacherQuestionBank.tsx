@@ -6570,25 +6570,128 @@ function PaperManagePanel() {
       .replace(/"/g, "&quot;")
       .replace(/'/g, "&#39;");
 
+  const SECTION_NUMERALS = "一二三四五六七八九十";
+  const typeOrder = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+
   const buildPaperHtml = (title: string, questions: any[], withAnswer: boolean) => {
-    const rowsHtml = questions
-      .map((q, idx) => {
-        const opts = (q.options || []).map((o: string) => `<div style="margin-left:12px;">${_escapeHtml(o)}</div>`).join("");
-        const answerPart = withAnswer
-          ? `<div><b>答案：</b>${_escapeHtml(q.correct_answer || "")}</div>`
-          : "";
-        const typePart = withAnswer ? `【${_escapeHtml(typeLabelMap[q.question_type] || q.question_type || "")}】` : "";
-        return `<div style="margin:10px 0;padding:8px;border-bottom:1px solid #ddd;">
-          <div><b>${idx + 1}. ${typePart} ${_escapeHtml(q.question_text || "")}</b></div>
-          ${opts}
-          ${answerPart}
-        </div>`;
-      })
-      .join("");
-    return `<!doctype html><html><head><meta charset="utf-8"><title>${_escapeHtml(title)}</title></head>
+    if (!questions.length) {
+      return `<!doctype html><html><head><meta charset="utf-8"><title>${_escapeHtml(title)}</title></head>
       <body style="font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; padding: 20px;">
         <h2>${_escapeHtml(title)}${withAnswer ? "（答案）" : ""}</h2>
-        ${rowsHtml}
+        <p>暂无题目</p>
+      </body></html>`;
+    }
+
+    const getQuestionType = (q: any) => String(q.question_type ?? q.questionType ?? "").trim();
+    const getScore = (q: any) => Number(q.score) ?? 0;
+    const groupKey = (q: any) => `${getQuestionType(q)}_${getScore(q)}`;
+    const groups = new Map<string, any[]>();
+    for (const q of questions) {
+      const key = groupKey(q);
+      if (!groups.has(key)) groups.set(key, []);
+      groups.get(key)!.push(q);
+    }
+
+    const labelToKey: Record<string, string> = {
+      单选题: "single_choice",
+      多选题: "multiple_choice",
+      判断题: "judge",
+      填空题: "blank",
+      问答题: "qa",
+    };
+    const normalizeType = (t: string) => {
+      const lower = t.toLowerCase();
+      if (typeOrder.includes(lower)) return lower;
+      if (labelToKey[t]) return labelToKey[t];
+      return t;
+    };
+    const typeOrderIdx = (t: string) => {
+      const key = normalizeType(t);
+      const i = typeOrder.indexOf(key);
+      return i >= 0 ? i : typeOrder.length;
+    };
+    const sortedGroupEntries = Array.from(groups.entries()).sort((a, b) => {
+      const typeA = a[0].split("_").slice(0, -1).join("_") || a[0].split("_")[0] || "";
+      const typeB = b[0].split("_").slice(0, -1).join("_") || b[0].split("_")[0] || "";
+      const orderDiff = typeOrderIdx(typeA) - typeOrderIdx(typeB);
+      if (orderDiff !== 0) return orderDiff;
+      const scoreA = Number(a[1][0]?.score) ?? 0;
+      const scoreB = Number(b[1][0]?.score) ?? 0;
+      return scoreA - scoreB;
+    });
+
+    const numSections = sortedGroupEntries.length;
+    const headerTable = withAnswer
+      ? ""
+      : (() => {
+          const cellStyle = "border:1px solid #333;padding:2px 4px;text-align:center;max-width:5em;width:5em;overflow:hidden;box-sizing:border-box;";
+          const sectionTds = Array.from(
+            { length: numSections },
+            (_, i) => `<td style="${cellStyle}">${SECTION_NUMERALS[i] || i + 1}</td>`
+          ).join("");
+          const emptyTds = Array(numSections + 2)
+            .fill(`<td style="${cellStyle}"></td>`)
+            .join("");
+          return `
+    <table style="border-collapse:collapse; margin:12px 0; table-layout:fixed; width:auto;">
+      <tr><td style="${cellStyle}">题号</td>${sectionTds}<td style="${cellStyle}">总分</td><td style="${cellStyle}">总分人</td></tr>
+      <tr><td style="${cellStyle}">得分</td>${emptyTds}</tr>
+      <tr><td style="${cellStyle}">阅卷人</td>${emptyTds}</tr>
+    </table>
+    <p style="margin:8px 0;">适用班级：</p>
+    <div style="margin-bottom:16px;"></div>`;
+        })();
+
+    const sectionsHtml = sortedGroupEntries
+      .map((entry, sectionIndex) => {
+        const [, groupQuestions] = entry;
+        const q = groupQuestions[0];
+        const questionType = getQuestionType(q);
+        const typeName = typeLabelMap[normalizeType(questionType)] || questionType || "题目";
+        const scorePerQuestion = Number(q.score) ?? 0;
+        const count = groupQuestions.length;
+        const sectionTotal = scorePerQuestion * count;
+        const sectionNum = SECTION_NUMERALS[sectionIndex] || String(sectionIndex + 1);
+        const sectionTitle = `${sectionNum}、${typeName}.（每题${scorePerQuestion}分，共${count}小题，总计${sectionTotal}分）`;
+
+        const questionsHtml = groupQuestions
+          .map((item: any, subIdx: number) => {
+            const opts = (item.options || []).map((o: string) => `<div style="margin-left:1.5em;">${_escapeHtml(o)}</div>`).join("");
+            const answerPart = withAnswer
+              ? `<div style="margin-top:4px;"><b>答案：</b>${_escapeHtml(item.correct_answer || "")}</div>`
+              : "";
+            const isQa = normalizeType(getQuestionType(item)) === "qa";
+            const blankLines = !withAnswer && isQa ? "<div style=\"margin:4px 0;\"><br/><br/><br/><br/><br/></div>" : "";
+            const normType = normalizeType(getQuestionType(item));
+            const answerBracket =
+              !withAnswer && (normType === "single_choice" || normType === "multiple_choice")
+                ? "（<span style=\"display:inline-block;width:4ch;min-width:4ch;border-bottom:1px solid #333;vertical-align:bottom;\">&nbsp;</span>）"
+                : !withAnswer && normType === "judge"
+                  ? "（<span style=\"display:inline-block;width:2ch;min-width:2ch;border-bottom:1px solid #333;vertical-align:bottom;\">&nbsp;</span>）"
+                  : "";
+            return `<div style="margin:6px 0;">
+  <div>${subIdx + 1}、${_escapeHtml(item.question_text || "")}${answerBracket}</div>
+  ${opts}
+  ${answerPart}
+  ${blankLines}
+</div>`;
+          })
+          .join("");
+
+        return `<div style="margin:14px 0;">
+  <div style="font-weight:bold; margin-bottom:6px;">${sectionTitle}</div>
+  ${questionsHtml}
+</div>`;
+      })
+      .join("");
+
+    const mainTitle = `${_escapeHtml(title)}${withAnswer ? "（答案）" : ""}`;
+    return `<!doctype html><html><head><meta charset="utf-8"><title>${_escapeHtml(title)}</title></head>
+      <body style="font-family: 'PingFang SC', 'Microsoft YaHei', sans-serif; padding: 20px;">
+        <h2 style="text-align:center;">${mainTitle}</h2>
+        <div style="margin-top:8px;"></div>
+        ${headerTable}
+        ${sectionsHtml}
       </body></html>`;
   };
 
