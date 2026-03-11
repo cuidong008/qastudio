@@ -626,6 +626,7 @@ export const api = {
         reviewStatus?: "pending" | "reviewed" | "";
         paperBankType?: "training" | "formal" | "";
         status?: "pending" | "reviewed" | "";
+        orderByUpdated?: "desc" | "asc";
         page?: number;
         pageSize?: number;
       }) => {
@@ -642,6 +643,7 @@ export const api = {
         if (params?.reviewStatus) qs.set("review_status", params.reviewStatus);
         if (params?.paperBankType) qs.set("paper_bank_type", params.paperBankType);
         if (params?.status) qs.set("status", params.status);
+        if (params?.orderByUpdated) qs.set("order_by_updated", params.orderByUpdated);
         if (params?.page) qs.set("page", String(params.page));
         if (params?.pageSize) qs.set("page_size", String(params.pageSize));
         const q = qs.toString() ? `?${qs.toString()}` : "";

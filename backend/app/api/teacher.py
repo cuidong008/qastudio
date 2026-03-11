@@ -4489,6 +4489,7 @@ async def _list_teacher_papers_filtered(
     review_status: str | None = None,
     paper_bank_type: str | None = None,
     status: str | None = None,
+    order_by_updated: str = "desc",
 ) -> list[TeacherPaperListItemOut]:
     stmt = (
         select(Paper, Course)
@@ -4553,6 +4554,7 @@ async def _list_teacher_papers_filtered(
                 updated_at=p.updated_at.isoformat() if p.updated_at else None,
             )
         )
+    out.sort(key=lambda x: (x.updated_at or ""), reverse=(order_by_updated == "desc"))
     return out
 
 
@@ -4566,6 +4568,7 @@ async def list_teacher_papers_paged(
     review_status: str | None = Query(default=None),
     paper_bank_type: str | None = Query(default=None),
     status: str | None = Query(default=None),
+    order_by_updated: str = Query(default="desc", description="updated_at 排序: desc 或 asc"),
     page: int = Query(default=1, ge=1),
     page_size: int = Query(default=10, ge=1, le=100),
     db: AsyncSession = Depends(get_db),
@@ -4582,6 +4585,7 @@ async def list_teacher_papers_paged(
         review_status=review_status,
         paper_bank_type=paper_bank_type,
         status=status,
+        order_by_updated=order_by_updated or "desc",
     )
     total = len(items)
     start = (page - 1) * page_size

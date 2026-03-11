@@ -6318,6 +6318,7 @@ function PaperManagePanel() {
   const [titleKeyword, setTitleKeyword] = useState<string>("");
   const [reviewStatusFilter, setReviewStatusFilter] = useState<"" | "pending" | "reviewed">("");
   const [bankTypeFilter, setBankTypeFilter] = useState<"" | "training" | "formal">("");
+  const [updatedAtOrder, setUpdatedAtOrder] = useState<"desc" | "asc">("desc");
   const typeLabelMap: Record<string, string> = {
     single_choice: "单选题",
     multiple_choice: "多选题",
@@ -6376,9 +6377,10 @@ function PaperManagePanel() {
     setChapterIdsFilter((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
 
-  const loadRows = async (targetPage = page) => {
+  const loadRows = async (targetPage = page, orderOverride?: "desc" | "asc") => {
     setLoadingRows(true);
     try {
+      const order = orderOverride ?? updatedAtOrder;
       const resp = await api.teacher.courses.listPapersPaged({
         courseId: courseIdFilter === "" ? undefined : courseIdFilter,
         chapterIds: courseIdFilter && !allChaptersSelected ? chapterIdsFilter : undefined,
@@ -6387,6 +6389,7 @@ function PaperManagePanel() {
         difficultyMax: difficultyMax.trim() ? Number(difficultyMax) : undefined,
         reviewStatus: reviewStatusFilter || undefined,
         paperBankType: bankTypeFilter || undefined,
+        orderByUpdated: order,
         page: targetPage,
         pageSize,
       });
@@ -6466,12 +6469,13 @@ function PaperManagePanel() {
     setTitleKeyword("");
     setReviewStatusFilter("");
     setBankTypeFilter("");
+    setUpdatedAtOrder("desc");
     setPage(1);
     setTotal(0);
     setSelectedIds([]);
     setLoadingRows(true);
     try {
-      const resp = await api.teacher.courses.listPapersPaged({ page: 1, pageSize });
+      const resp = await api.teacher.courses.listPapersPaged({ page: 1, pageSize, orderByUpdated: "desc" });
       setRows(
         resp.items.map((x) => ({
           id: x.id,
@@ -6656,13 +6660,18 @@ function PaperManagePanel() {
 
         const questionsHtml = groupQuestions
           .map((item: any, subIdx: number) => {
-            const opts = (item.options || []).map((o: string) => `<div style="margin-left:1.5em;">${_escapeHtml(o)}</div>`).join("");
+            const normType = normalizeType(getQuestionType(item));
+            const isJudge = normType === "judge";
+            const opts = (item.options || []).map((o: string, i: number) =>
+              isJudge
+                ? `<div style="margin-left:1.5em;">${String.fromCharCode(65 + i)}. ${_escapeHtml(o)}</div>`
+                : `<div style="margin-left:1.5em;">${_escapeHtml(o)}</div>`
+            ).join("");
             const answerPart = withAnswer
               ? `<div style="margin-top:4px;"><b>答案：</b>${_escapeHtml(item.correct_answer || "")}</div>`
               : "";
-            const isQa = normalizeType(getQuestionType(item)) === "qa";
+            const isQa = normType === "qa";
             const blankLines = !withAnswer && isQa ? "<div style=\"margin:4px 0;\"><br/><br/><br/><br/><br/></div>" : "";
-            const normType = normalizeType(getQuestionType(item));
             const answerBracket =
               !withAnswer && (normType === "single_choice" || normType === "multiple_choice")
                 ? "（<span style=\"display:inline-block;width:4ch;min-width:4ch;border-bottom:1px solid #333;vertical-align:bottom;\">&nbsp;</span>）"
@@ -6925,7 +6934,22 @@ function PaperManagePanel() {
                   </th>
                   {["序号", "试卷标题", "课程", "试卷类型", "试卷库类型", "来源", "状态", "整卷难度", "总分", "更新时间", "操作"].map((h) => (
                     <th key={h} style={{ textAlign: "left", border: "1px solid var(--border)", padding: 8, color: "var(--text-secondary)" }}>
-                      {h}
+                      {h === "更新时间" ? (
+                        <button
+                          type="button"
+                          className="btn-ghost"
+                          style={{ padding: 0, fontWeight: 600, color: "inherit", cursor: "pointer", border: "none", background: "none" }}
+                          onClick={() => {
+                            const next = updatedAtOrder === "desc" ? "asc" : "desc";
+                            setUpdatedAtOrder(next);
+                            loadRows(page, next);
+                          }}
+                        >
+                          更新时间{updatedAtOrder === "desc" ? " ↓" : " ↑"}
+                        </button>
+                      ) : (
+                        h
+                      )}
                     </th>
                   ))}
                 </tr>
