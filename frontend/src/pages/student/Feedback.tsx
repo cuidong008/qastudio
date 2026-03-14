@@ -25,7 +25,7 @@ function formatDateTime(iso: string): string {
   }
 }
 
-export default function Feedback({ inWorkspace = false, onGoQa, courseId }: { inWorkspace?: boolean; onGoQa?: () => void; courseId?: number | null }) {
+export default function Feedback({ courseId }: { inWorkspace?: boolean; onGoQa?: () => void; courseId?: number | null }) {
   const [content, setContent] = useState("");
   const [status, setStatus] = useState<"idle" | "sending" | "success" | "error">("idle");
   const [message, setMessage] = useState("");
