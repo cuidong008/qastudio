@@ -356,6 +356,7 @@ class UserListOut(BaseModel):
     display_name: str | None
     student_no: str | None
     admin_class_or_dept: str | None = None  # 学生：行政班级；教师：部门
+    gender: str | None = None  # male / female
     created_at: str | None
 
     class Config:
@@ -369,6 +370,7 @@ class UserCreateIn(BaseModel):
     display_name: str | None = None
     student_no: str | None = None
     admin_class_or_dept: str | None = None
+    gender: str | None = None  # male / female
 
 
 class UserUpdateIn(BaseModel):
@@ -377,6 +379,7 @@ class UserUpdateIn(BaseModel):
     display_name: str | None = None
     student_no: str | None = None
     admin_class_or_dept: str | None = None
+    gender: str | None = None  # male / female
 
 
 @router.get("/users", response_model=list[UserListOut])
@@ -399,6 +402,7 @@ async def list_users(
         UserListOut(
             id=u.id, username=u.username, role=u.role, display_name=u.display_name,
             student_no=u.student_no, admin_class_or_dept=getattr(u, "admin_class_or_dept", None),
+            gender=getattr(u, "gender", None),
             created_at=u.created_at.isoformat() if u.created_at else None,
         )
         for u in rows
@@ -422,6 +426,7 @@ async def create_user(
             raise HTTPException(status_code=400, detail="学号/工号已存在")
     raw = (body.password or "123456").encode()
     hashed = bcrypt.hashpw(raw, bcrypt.gensalt()).decode("utf-8")
+    gender_val = _normalize_gender(body.gender) if body.gender else None
     u = User(
         username=body.username.strip(),
         hashed_password=hashed,
@@ -429,6 +434,7 @@ async def create_user(
         display_name=body.display_name or body.username.strip(),
         student_no=body.student_no.strip() if body.student_no else None,
         admin_class_or_dept=body.admin_class_or_dept.strip() if body.admin_class_or_dept else None,
+        gender=gender_val,
     )
     db.add(u)
     await db.commit()
@@ -436,6 +442,7 @@ async def create_user(
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
         student_no=u.student_no, admin_class_or_dept=u.admin_class_or_dept,
+        gender=getattr(u, "gender", None),
         created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
@@ -447,7 +454,7 @@ _ADMIN_USER_IMPORT_TEMPLATE_PATH = Path(__file__).resolve().parent.parent / "sta
 async def download_user_import_template(
     user: User = Depends(require_admin),
 ):
-    """下载批量导入用户用的 CSV 模版，表头：用户名、学号/工号、姓名、角色、行政班级/部门。除行政班级/部门外不能为空。"""
+    """下载批量导入用户用的 CSV 模版，表头：用户名、学号/工号、姓名、性别、行政班级/部门、角色。除行政班级/部门、性别外不能为空。"""
     if not _ADMIN_USER_IMPORT_TEMPLATE_PATH.is_file():
         raise HTTPException(status_code=500, detail="模版文件不存在")
     return FileResponse(
@@ -469,6 +476,19 @@ def _role_from_csv(value: str) -> str | None:
         return "teaching_leader"
     if v in ("管理员", "管理员 "):
         return "admin"
+    return None
+
+
+def _normalize_gender(value: str | None) -> str | None:
+    """将「男」「女」或 male/female 规范为 male/female，无效或空返回 None"""
+    if not value or not (v := (value or "").strip()):
+        return None
+    if v in ("male", "female"):
+        return v
+    if v in ("男", "男 "):
+        return "male"
+    if v in ("女", "女 "):
+        return "female"
     return None
 
 
@@ -496,7 +516,7 @@ async def import_users(
     if not rows:
         raise HTTPException(status_code=400, detail="文件无有效行")
     header = [str(c).strip() for c in rows[0]]
-    col_username = col_student_no = col_display_name = col_role = col_admin = None
+    col_username = col_student_no = col_display_name = col_role = col_admin = col_gender = None
     for i, h in enumerate(header):
         if h in ("用户名", "username"):
             col_username = i
@@ -508,6 +528,8 @@ async def import_users(
             col_role = i
         elif h in ("行政班级/部门", "行政班级", "部门", "admin_class_or_dept"):
             col_admin = i
+        elif h in ("性别", "gender"):
+            col_gender = i
     if col_username is None:
         raise HTTPException(status_code=400, detail="表头需包含「用户名」列")
     if col_student_no is None:
@@ -551,6 +573,10 @@ async def import_users(
         if not role:
             errors.append(f"第{row_no}行：角色无效（须为：学生/教师/教研组长/管理员 或 student/teacher/teaching_leader/admin）")
             continue
+        gender_val = ""
+        if col_gender is not None and len(r) > col_gender and r[col_gender] is not None:
+            gender_val = (r[col_gender] if len(r) > col_gender else "").strip()
+        gender = _normalize_gender(gender_val) if gender_val else None
         if username in existing_usernames:
             errors.append(f"第{row_no}行：用户名「{username}」已存在")
             continue
@@ -564,6 +590,7 @@ async def import_users(
             display_name=display_name,
             student_no=student_no,
             admin_class_or_dept=admin_val if admin_val else None,
+            gender=gender,
         )
         db.add(u)
         await db.flush()
@@ -590,6 +617,7 @@ async def get_user(
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
         student_no=u.student_no, admin_class_or_dept=getattr(u, "admin_class_or_dept", None),
+        gender=getattr(u, "gender", None),
         created_at=u.created_at.isoformat() if u.created_at else None,
     )
 
@@ -622,11 +650,14 @@ async def update_user(
         u.student_no = next_no
     if body.admin_class_or_dept is not None:
         u.admin_class_or_dept = body.admin_class_or_dept.strip() if body.admin_class_or_dept else None
+    if body.gender is not None:
+        u.gender = _normalize_gender(body.gender) if body.gender else None
     await db.commit()
     await db.refresh(u)
     return UserListOut(
         id=u.id, username=u.username, role=u.role, display_name=u.display_name,
         student_no=u.student_no, admin_class_or_dept=getattr(u, "admin_class_or_dept", None),
+        gender=getattr(u, "gender", None),
         created_at=u.created_at.isoformat() if u.created_at else None,
     )
 

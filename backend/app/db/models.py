@@ -33,6 +33,7 @@ class User(Base):
     username_changed_at = Column(DateTime, nullable=True)  # 非管理员仅可修改一次登录名，修改后记录时间
     class_id = Column(Integer, ForeignKey("classes.id"), nullable=True)  # 学生所属班级
     admin_class_or_dept = Column(String(128), nullable=True)  # 学生：行政班级；教师：部门；可为空
+    gender = Column(String(10), nullable=True)  # male / female，可为空
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 

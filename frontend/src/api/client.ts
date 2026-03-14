@@ -1289,13 +1289,13 @@ export const api = {
         const q = new URLSearchParams();
         if (params?.role) q.set("role", params.role);
         if (params?.q) q.set("q", params.q);
-        return request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; created_at: string | null }[]>(`/admin/users?${q}`);
+        return request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; gender: string | null; created_at: string | null }[]>(`/admin/users?${q}`);
       },
-      create: (body: { username: string; password?: string; role: string; display_name?: string; student_no?: string; admin_class_or_dept?: string }) =>
-        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null }>("/admin/users", { method: "POST", body }),
-      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null }>(`/admin/users/${id}`),
-      update: (id: number, body: { password?: string; role?: string; display_name?: string; student_no?: string; admin_class_or_dept?: string }) =>
-        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null }>(`/admin/users/${id}`, { method: "PUT", body }),
+      create: (body: { username: string; password?: string; role: string; display_name?: string; student_no?: string; admin_class_or_dept?: string; gender?: string }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; gender: string | null }>("/admin/users", { method: "POST", body }),
+      get: (id: number) => request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; gender: string | null }>(`/admin/users/${id}`),
+      update: (id: number, body: { password?: string; role?: string; display_name?: string; student_no?: string; admin_class_or_dept?: string; gender?: string }) =>
+        request<{ id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; gender: string | null }>(`/admin/users/${id}`, { method: "PUT", body }),
       delete: (id: number) => request<{ ok: boolean }>(`/admin/users/${id}`, { method: "DELETE" }),
       /** 下载批量导入用户模版（CSV） */
       downloadImportTemplate: () => requestBlob("/admin/users/import-template"),

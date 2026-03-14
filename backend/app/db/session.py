@@ -127,6 +127,14 @@ def _migrate_user_admin_class_or_dept(sync_conn):
         pass
 
 
+def _migrate_user_gender(sync_conn):
+    """为已有 users 表添加 gender 列（男/女，可为空）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE users ADD COLUMN gender VARCHAR(10)"))
+    except Exception:
+        pass
+
+
 def _backfill_student_class_memberships(sync_conn):
     """将历史 users.class_id 数据回填到多对多关系表"""
     try:
@@ -711,6 +719,7 @@ async def init_db():
         await conn.run_sync(_migrate_user_avatar_url)
         await conn.run_sync(_migrate_user_username_changed_at)
         await conn.run_sync(_migrate_user_admin_class_or_dept)
+        await conn.run_sync(_migrate_user_gender)
         await conn.run_sync(_backfill_student_class_memberships)
         await conn.run_sync(_migrate_knowledge_documents_upload_fields)
         await conn.run_sync(_migrate_knowledge_documents_student_visible_downloadable)

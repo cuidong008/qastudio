@@ -3,23 +3,65 @@ import { api } from "../../api/client";
 
 const PAGE_SIZE_OPTIONS = [10, 20, 30, 50, 100] as const;
 
-type User = { id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; created_at: string | null };
+type User = { id: number; username: string; role: string; display_name: string | null; student_no: string | null; admin_class_or_dept: string | null; gender: string | null; created_at: string | null };
+
+type SortKey = "id" | "username" | "student_no" | "display_name" | "gender" | "admin_class_or_dept" | "role";
+type SortDir = "asc" | "desc";
+
+function getSortValue(u: User, key: SortKey): string {
+  switch (key) {
+    case "id": return String(u.id);
+    case "username": return u.username ?? "";
+    case "student_no": return u.student_no ?? "";
+    case "display_name": return u.display_name ?? "";
+    case "gender": return u.gender === "male" ? "男" : u.gender === "female" ? "女" : "";
+    case "admin_class_or_dept": return u.admin_class_or_dept ?? "";
+    case "role":
+      return u.role === "admin" ? "管理员" : u.role === "teacher" ? "教师" : u.role === "teaching_leader" ? "教研组长" : "学生";
+    default: return "";
+  }
+}
 
 export default function AdminUsers() {
   const [list, setList] = useState<User[]>([]);
   const [loading, setLoading] = useState(true);
   const [currentPage, setCurrentPage] = useState(1);
   const [pageSize, setPageSize] = useState(10);
-  const totalPages = Math.max(1, Math.ceil(list.length / pageSize));
+  const [sortKey, setSortKey] = useState<SortKey>("username");
+  const [sortDir, setSortDir] = useState<SortDir>("asc");
+  const sortedList = useMemo(() => {
+    const arr = [...list];
+    arr.sort((a, b) => {
+      const va = getSortValue(a, sortKey);
+      const vb = getSortValue(b, sortKey);
+      const c = va.localeCompare(vb, "zh-CN", { numeric: true });
+      return sortDir === "asc" ? c : -c;
+    });
+    return arr;
+  }, [list, sortKey, sortDir]);
+  const totalPages = Math.max(1, Math.ceil(sortedList.length / pageSize));
   const pagedList = useMemo(
-    () => list.slice((currentPage - 1) * pageSize, currentPage * pageSize),
-    [list, currentPage, pageSize]
+    () => sortedList.slice((currentPage - 1) * pageSize, currentPage * pageSize),
+    [sortedList, currentPage, pageSize]
+  );
+  const toggleSort = (key: SortKey) => {
+    if (sortKey === key) setSortDir((d) => (d === "asc" ? "desc" : "asc"));
+    else { setSortKey(key); setSortDir("asc"); }
+  };
+  const thSortable = (key: SortKey, label: string, style?: { width?: string; maxWidth?: string }) => (
+    <th
+      style={{ textAlign: "left", padding: "10px 12px", cursor: "pointer", userSelect: "none", ...style }}
+      onClick={() => toggleSort(key)}
+      title="点击排序"
+    >
+      {label}{sortKey === key ? (sortDir === "asc" ? " ↑" : " ↓") : ""}
+    </th>
   );
   const [roleFilter, setRoleFilter] = useState<string>("");
   const [q, setQ] = useState("");
   const [modal, setModal] = useState<"create" | "edit" | null>(null);
   const [editId, setEditId] = useState<number | null>(null);
-  const [form, setForm] = useState({ username: "", password: "", role: "student", display_name: "", student_no: "", admin_class_or_dept: "" });
+  const [form, setForm] = useState({ username: "", password: "", role: "student", display_name: "", student_no: "", admin_class_or_dept: "", gender: "" });
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState("");
   const [importModalOpen, setImportModalOpen] = useState(false);
@@ -38,13 +80,13 @@ export default function AdminUsers() {
     setCurrentPage(1);
   }, [roleFilter, q]);
   const openCreate = () => {
-    setForm({ username: "", password: "123456", role: "student", display_name: "", student_no: "", admin_class_or_dept: "" });
+    setForm({ username: "", password: "123456", role: "student", display_name: "", student_no: "", admin_class_or_dept: "", gender: "" });
     setModal("create");
     setError("");
   };
   const openEdit = (u: User) => {
     setEditId(u.id);
-    setForm({ username: u.username, password: "", role: u.role, display_name: u.display_name || "", student_no: u.student_no || "", admin_class_or_dept: u.admin_class_or_dept || "" });
+    setForm({ username: u.username, password: "", role: u.role, display_name: u.display_name || "", student_no: u.student_no || "", admin_class_or_dept: u.admin_class_or_dept || "", gender: u.gender || "" });
     setModal("edit");
     setError("");
   };
@@ -77,6 +119,7 @@ export default function AdminUsers() {
         display_name: form.display_name.trim() || undefined,
         student_no: studentNo || undefined,
         admin_class_or_dept: form.admin_class_or_dept.trim() || undefined,
+        gender: form.gender.trim() || undefined,
       })
       .then(() => { setModal(null); load(); })
       .catch((e) => setError(e?.message || "创建失败"))
@@ -95,12 +138,13 @@ export default function AdminUsers() {
       return;
     }
     setSaving(true);
-    const body: { password?: string; role?: string; display_name?: string; student_no?: string; admin_class_or_dept?: string } = {};
+    const body: { password?: string; role?: string; display_name?: string; student_no?: string; admin_class_or_dept?: string; gender?: string } = {};
     if (form.password) body.password = form.password;
     body.role = form.role;
     body.display_name = form.display_name.trim() || undefined;
     body.student_no = studentNo || undefined;
     body.admin_class_or_dept = form.admin_class_or_dept.trim() || undefined;
+    body.gender = form.gender.trim() || undefined;
     api.admin.users
       .update(editId, body)
       .then(() => { setModal(null); setEditId(null); load(); })
@@ -183,12 +227,13 @@ export default function AdminUsers() {
           <table style={{ width: "100%", borderCollapse: "collapse" }}>
             <thead>
               <tr style={{ borderBottom: "1px solid var(--border)" }}>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>ID</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>用户名</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>学号/工号</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>姓名</th>
-                <th style={{ textAlign: "left", padding: "10px 12px" }}>角色</th>
-                <th style={{ textAlign: "left", padding: "10px 12px", width: "9em", maxWidth: "9em" }}>行政班级/部门</th>
+                {thSortable("id", "ID")}
+                {thSortable("username", "用户名")}
+                {thSortable("student_no", "学号/工号")}
+                {thSortable("display_name", "姓名")}
+                {thSortable("gender", "性别")}
+                {thSortable("admin_class_or_dept", "行政班级/部门", { width: "9em", maxWidth: "9em" })}
+                {thSortable("role", "角色")}
                 <th style={{ textAlign: "left", padding: "10px 12px" }}>操作</th>
               </tr>
             </thead>
@@ -199,8 +244,9 @@ export default function AdminUsers() {
                   <td style={{ padding: "10px 12px" }}>{u.username}</td>
                   <td style={{ padding: "10px 12px" }}>{u.student_no || "—"}</td>
                   <td style={{ padding: "10px 12px" }}>{u.display_name || "—"}</td>
-                  <td style={{ padding: "10px 12px" }}>{u.role === "admin" ? "管理员" : u.role === "teacher" ? "教师" : u.role === "teaching_leader" ? "教研组长" : "学生"}</td>
+                  <td style={{ padding: "10px 12px" }}>{u.gender === "male" ? "男" : u.gender === "female" ? "女" : "—"}</td>
                   <td style={{ padding: "10px 12px", width: "9em", maxWidth: "9em", overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }} title={u.admin_class_or_dept || undefined}>{u.admin_class_or_dept || "—"}</td>
+                  <td style={{ padding: "10px 12px" }}>{u.role === "admin" ? "管理员" : u.role === "teacher" ? "教师" : u.role === "teaching_leader" ? "教研组长" : "学生"}</td>
                   <td style={{ padding: "10px 12px" }}>
                     <button type="button" className="btn-ghost" style={{ marginRight: 8 }} onClick={() => openEdit(u)}>编辑</button>
                     <button type="button" className="btn-ghost" style={{ color: "var(--danger, #c00)" }} onClick={() => doDelete(u.id)}>删除</button>
@@ -286,6 +332,18 @@ export default function AdminUsers() {
                 />
               </label>
               <label>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>性别</span>
+                <select
+                  value={form.gender}
+                  onChange={(e) => setForm((f) => ({ ...f, gender: e.target.value }))}
+                  style={{ width: "100%", padding: "8px 12px", border: "1px solid var(--border)", borderRadius: 6 }}
+                >
+                  <option value="">请选择</option>
+                  <option value="male">男</option>
+                  <option value="female">女</option>
+                </select>
+              </label>
+              <label>
                 <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>学号/工号</span>
                 <input
                   type="text"
@@ -322,7 +380,7 @@ export default function AdminUsers() {
           <div className="card" style={{ minWidth: 420 }} onClick={(e) => e.stopPropagation()}>
             <h3 style={{ marginTop: 0 }}>批量导入用户</h3>
             <p style={{ color: "var(--text-muted)", fontSize: 14, marginBottom: 12 }}>
-              请上传已填写的导入模版（CSV），表头：用户名、学号/工号、姓名、角色、行政班级/部门。除「行政班级/部门」外均不能为空。角色可为：学生、教师、教研组长、管理员。新用户默认密码 123456。
+              请上传已填写的导入模版（CSV），表头：用户名、学号/工号、姓名、性别、行政班级/部门、角色。除「行政班级/部门」「性别」外均不能为空。性别可为：男、女（或留空）。角色可为：学生、教师、教研组长、管理员。新用户默认密码 123456。
             </p>
             <div style={{ marginBottom: 12 }}>
               <input
