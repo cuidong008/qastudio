@@ -168,7 +168,7 @@ const studentMenus = [
   { key: "preview", label: "课前预习" },
   { key: "review", label: "课后复习" },
   { key: "exercises", label: "习题训练" },
-  { key: "feedback", label: "反馈" },
+  { key: "feedback", label: "反馈答疑" },
   { key: "learning-data", label: "我的学情" },
 ] as const;
 type WorkspaceMode = (typeof studentMenus)[number]["key"];

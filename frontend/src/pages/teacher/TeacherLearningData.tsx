@@ -883,7 +883,9 @@ export default function TeacherLearningData() {
   // 问题反馈列表（从后台拉取，按课程/班级筛选）
   const [feedbackList, setFeedbackList] = useState<FeedbackRow[]>([]);
   const [feedbackListLoading, setFeedbackListLoading] = useState(false);
-  const [feedbackSort, setFeedbackSort] = useState<"course" | "student_no" | "class">("course");
+  type FeedbackSortKey = "course_name" | "student_no" | "class_name" | "created_at" | "status";
+  const [feedbackSortKey, setFeedbackSortKey] = useState<FeedbackSortKey>("created_at");
+  const [feedbackSortDir, setFeedbackSortDir] = useState<"asc" | "desc">("desc");
   const [feedbackPage, setFeedbackPage] = useState(1);
   const [feedbackPageSize, setFeedbackPageSize] = useState(10);
   /** 反馈弹窗：查看 / 编辑 */
@@ -903,9 +905,20 @@ export default function TeacherLearningData() {
     setFeedbackPage(1);
   }, [courseId, classId]);
   const feedbackRows: FeedbackRow[] = useMemo(() => {
-    const key = feedbackSort === "course" ? "course_name" : feedbackSort === "student_no" ? "student_no" : "class_name";
-    return [...feedbackList].sort((a, b) => (a[key as keyof FeedbackRow] as string).localeCompare(b[key as keyof FeedbackRow] as string));
-  }, [feedbackList, feedbackSort]);
+    const key = feedbackSortKey;
+    const dir = feedbackSortDir === "asc" ? 1 : -1;
+    return [...feedbackList].sort((a, b) => {
+      let cmp: number;
+      if (key === "created_at") {
+        cmp = (a.created_at || "").localeCompare(b.created_at || "");
+      } else {
+        const va = (a[key as keyof FeedbackRow] as string) ?? "";
+        const vb = (b[key as keyof FeedbackRow] as string) ?? "";
+        cmp = va.localeCompare(vb);
+      }
+      return dir * cmp;
+    });
+  }, [feedbackList, feedbackSortKey, feedbackSortDir]);
   const feedbackTotal = feedbackRows.length;
   const feedbackPaginated = useMemo(
     () => feedbackRows.slice((feedbackPage - 1) * feedbackPageSize, feedbackPage * feedbackPageSize),
@@ -1499,34 +1512,46 @@ export default function TeacherLearningData() {
 
         <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>问题反馈列表</h2>
         <div className="card" style={{ marginBottom: 24 }}>
-          <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>可按课程、学号或班级排序；支持导出</div>
-          <div style={{ display: "flex", gap: 8, marginBottom: 12 }}>
-            <span style={{ color: "var(--text-muted)", fontSize: 13 }}>排序：</span>
-            {(["course", "student_no", "class"] as const).map((key) => (
-              <button
-                key={key}
-                type="button"
-                className={feedbackSort === key ? "btn-primary" : "btn-ghost"}
-                style={{ padding: "6px 12px", fontSize: 13 }}
-                onClick={() => setFeedbackSort(key)}
-              >
-                {key === "course" ? "课程" : key === "student_no" ? "学号" : "班级"}
-              </button>
-            ))}
-          </div>
+          <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>点击表头列名可排序；支持导出</div>
           <div style={{ overflowX: "auto" }}>
             <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
               <thead>
                 <tr style={{ borderBottom: "2px solid var(--border)" }}>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>课程</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>反馈问题</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>学号</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>学生姓名</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>班级</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>反馈时间</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>回复内容</th>
-                  <th style={{ textAlign: "left", padding: "10px 8px" }}>处理状态</th>
-                  <th style={{ textAlign: "center", padding: "10px 8px", width: 120 }}>操作</th>
+                  {(() => {
+                    const sortable = (key: FeedbackSortKey, label: string) => {
+                      const active = feedbackSortKey === key;
+                      return (
+                        <th
+                          key={key}
+                          style={{ textAlign: "left", padding: "10px 8px", cursor: "pointer", userSelect: "none", whiteSpace: key === "created_at" ? "nowrap" : undefined }}
+                          onClick={() => {
+                            if (feedbackSortKey === key) setFeedbackSortDir((d) => (d === "asc" ? "desc" : "asc"));
+                            else {
+                              setFeedbackSortKey(key);
+                              setFeedbackSortDir(key === "created_at" ? "desc" : "asc");
+                            }
+                          }}
+                          title="点击排序"
+                        >
+                          {label}
+                          {active && (feedbackSortDir === "asc" ? " ↑" : " ↓")}
+                        </th>
+                      );
+                    };
+                    return (
+                      <>
+                        {sortable("course_name", "课程")}
+                        <th style={{ textAlign: "left", padding: "10px 8px" }}>反馈问题</th>
+                        {sortable("student_no", "学号")}
+                        <th style={{ textAlign: "left", padding: "10px 8px" }}>学生姓名</th>
+                        {sortable("class_name", "班级")}
+                        {sortable("created_at", "反馈时间")}
+                        <th style={{ textAlign: "left", padding: "10px 8px" }}>回复内容</th>
+                        {sortable("status", "处理状态")}
+                        <th style={{ textAlign: "center", padding: "10px 8px", width: 120 }}>操作</th>
+                      </>
+                    );
+                  })()}
                 </tr>
               </thead>
               <tbody>

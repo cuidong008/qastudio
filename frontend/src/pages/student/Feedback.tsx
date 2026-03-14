@@ -1,5 +1,4 @@
 import { useState } from "react";
-import { Link } from "react-router-dom";
 import { api } from "../../api/client";
 
 type FeedbackItem = {
@@ -89,11 +88,11 @@ export default function Feedback({ inWorkspace = false, onGoQa, courseId }: { in
         学习反馈
       </h1>
       <p style={{ color: "var(--text-muted)", marginBottom: 24, fontSize: 15 }}>
-        您的反馈将用于持续改进课程与产品；我们同时支持问卷与对话两种方式收集意见。
+        您的反馈将用于持续改进课程与产品；您的疑问老师将会给予悉心解答。
       </p>
 
       <div className="card" style={{ marginBottom: 24 }}>
-        <h3 style={{ margin: "0 0 12px", fontSize: 17 }}>填写反馈</h3>
+        <h3 style={{ margin: "0 0 12px", fontSize: 17 }}>填写反馈与疑问</h3>
         <form onSubmit={handleSubmit}>
           <textarea
             value={content}
@@ -132,7 +131,7 @@ export default function Feedback({ inWorkspace = false, onGoQa, courseId }: { in
       <div className="card" style={{ marginBottom: 24 }}>
         <h3 style={{ margin: "0 0 12px", fontSize: 17 }}>反馈处理</h3>
         <p style={{ color: "var(--text-muted)", margin: "0 0 12px", fontSize: 14 }}>
-          可查看您已提交的反馈及教师/管理员的处理结果与状态。
+          可查看您已提交的反馈与疑问，以及教师/管理员的处理结果与状态。
         </p>
         <button
           type="button"
@@ -186,21 +185,6 @@ export default function Feedback({ inWorkspace = false, onGoQa, courseId }: { in
             )}
           </>
         )}
-      </div>
-
-      <div className="card" style={{ background: "var(--bg-muted)" }}>
-        <h3 style={{ margin: "0 0 8px", fontSize: 15 }}>通过对话提交反馈</h3>
-        <p style={{ color: "var(--text-muted)", margin: 0, fontSize: 14, lineHeight: 1.5 }}>
-          您也可以在「
-          {inWorkspace ? (
-            <button type="button" className="btn-ghost" onClick={onGoQa} style={{ padding: "0 6px", minHeight: "auto" }}>
-              课中辅助
-            </button>
-          ) : (
-            <Link to="/student/inclass">课中辅助</Link>
-          )}
-          」或课后答疑中直接向智能体说出您的意见或建议，系统会同时记录为反馈内容，便于教师与运营汇总改进。
-        </p>
       </div>
     </div>
   );
