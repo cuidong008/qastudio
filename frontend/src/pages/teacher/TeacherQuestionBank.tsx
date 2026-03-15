@@ -3905,9 +3905,11 @@ function GeneratePapersPanel() {
       const lackText = mapped.insufficientTypes
         .map((x) => `${typeLabelMap[x.questionType as QuestionTypeKey] || x.questionType}缺少${x.missing}题`)
         .join("；");
-      toast(`${mapped.message}${lackText ? `（${lackText}）` : ""}`, "error");
+      const msg = typeof mapped.message === "string" ? mapped.message : "试卷未完全生成";
+      toast(`${msg}${lackText ? `（${lackText}）` : ""}`, "error");
     } else {
-      toast(saveToBank ? `${mapped.message}（ID：${mapped.paperId ?? "-"}）` : "试卷预览已生成", "success");
+      const msg = typeof mapped.message === "string" ? mapped.message : "试卷已生成";
+      toast(saveToBank ? `${msg}（ID：${mapped.paperId ?? "-"}）` : "试卷预览已生成", "success");
     }
     return mapped;
   };
@@ -3999,7 +4001,8 @@ function GeneratePapersPanel() {
     try {
       await callGeneratePaper(true, previewRows);
     } catch (e: any) {
-      toast(e?.message || "提交到试卷库失败", "error");
+      const msg = e?.message;
+      toast(typeof msg === "string" ? msg : "提交到试卷库失败", "error");
     } finally {
       setConfirmingSubmit(false);
     }

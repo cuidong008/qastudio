@@ -105,6 +105,19 @@ export type DocWithChapters = {
 
 type JsonRequestOptions = Omit<RequestInit, "body"> & { body?: unknown };
 
+/** 将 API 错误体转为可读字符串（FastAPI 的 detail 可能是 string 或对象数组） */
+function apiErrorDetailToString(detail: unknown): string {
+  if (detail == null) return "";
+  if (typeof detail === "string") return detail;
+  if (Array.isArray(detail)) {
+    const parts = detail.map((x: { msg?: string; loc?: unknown }) =>
+      typeof x?.msg === "string" ? x.msg : JSON.stringify(x)
+    );
+    return parts.length ? parts.join("；") : String(detail);
+  }
+  return String(detail);
+}
+
 export async function request<T>(
   path: string,
   options: JsonRequestOptions = {}
@@ -124,7 +137,8 @@ export async function request<T>(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || String(err));
+    const msg = apiErrorDetailToString(err.detail) || res.statusText || String(err);
+    throw new Error(msg);
   }
   return res.json();
 }
@@ -146,7 +160,8 @@ export async function requestForm<T>(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || String(err));
+    const msg = apiErrorDetailToString(err.detail) || res.statusText || String(err);
+    throw new Error(msg);
   }
   return res.json();
 }
@@ -166,7 +181,8 @@ export async function requestBlob(
   });
   if (!res.ok) {
     const err = await res.json().catch(() => ({ detail: res.statusText }));
-    throw new Error(err.detail || String(err));
+    const msg = apiErrorDetailToString(err.detail) || res.statusText || String(err);
+    throw new Error(msg);
   }
   return res.blob();
 }

@@ -413,7 +413,7 @@ class TeacherPaperPreviewQuestionIn(BaseModel):
     question_type: str = Field(min_length=1, max_length=32)
     question_text: str = Field(min_length=1, max_length=10000)
     options: list[str] = Field(default_factory=list)
-    correct_answer: str = Field(default="", max_length=1000)
+    correct_answer: str = Field(default="", max_length=50000)  # 分析题答案可较长
     explanation: str | None = None
     difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
     score: float = Field(default=0, ge=0, le=100)
