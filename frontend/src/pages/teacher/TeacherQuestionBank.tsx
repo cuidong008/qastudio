@@ -27,7 +27,7 @@ type ChapterItem = {
   title: string;
 };
 
-type QuestionTypeKey = "single_choice" | "multiple_choice" | "judge" | "blank" | "qa";
+type QuestionTypeKey = "single_choice" | "multiple_choice" | "judge" | "blank" | "qa" | "analysis";
 type QuestionBankType = "training" | "exam";
 
 type QuestionTypeConfig = {
@@ -64,6 +64,7 @@ const defaultTypeConfigs: QuestionTypeConfig[] = [
   { key: "judge", label: "判断题", max: 10, difficulty: 0.8 },
   { key: "blank", label: "填空题", max: 10, difficulty: 0.8 },
   { key: "qa", label: "问答题", max: 5, difficulty: 0.8 },
+  { key: "analysis", label: "分析题", max: 1, difficulty: 0.8 },
 ];
 
 type ExerciseDefaultPerType = { max: number; difficulty: number };
@@ -72,7 +73,7 @@ function loadSavedExerciseDefaults(): Partial<Record<QuestionTypeKey, ExerciseDe
     const raw = localStorage.getItem(EXERCISE_GENERATE_DEFAULTS_STORAGE_KEY);
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Record<string, { max?: number; difficulty?: number }>;
-    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"];
     const out: Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> = {};
     for (const k of keys) {
       const v = parsed[k];
@@ -96,7 +97,7 @@ function loadSavedExerciseDefaultsCompat(): Partial<Record<QuestionTypeKey, Exer
     const raw = localStorage.getItem("qastudio.exerciseGenerateDefaultMax");
     if (!raw) return null;
     const parsed = JSON.parse(raw) as Record<string, number>;
-    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"];
     const out: Partial<Record<QuestionTypeKey, ExerciseDefaultPerType>> = {};
     for (const k of keys) {
       if (typeof parsed[k] === "number" && Number.isFinite(parsed[k])) {
@@ -142,7 +143,7 @@ function GenerateExercisesPanel() {
   const defaultExerciseTypeConfigs = useMemo(() => {
     if (!exerciseDefaultRowsFromApi?.length) return defaultTypeConfigs;
     const byType = Object.fromEntries(exerciseDefaultRowsFromApi.map((r) => [r.type, r]));
-    return (["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((key) => {
+    return (["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"] as const).map((key) => {
       const row = defaultTypeConfigs.find((c) => c.key === key)!;
       const fromApi = byType[key];
       if (!fromApi) return row;
@@ -167,6 +168,7 @@ function GenerateExercisesPanel() {
     judge: { max: 10, difficulty: 0.8 },
     blank: { max: 10, difficulty: 0.8 },
     qa: { max: 5, difficulty: 0.8 },
+    analysis: { max: 1, difficulty: 0.8 },
   });
   const [previewRows, setPreviewRows] = useState<
     {
@@ -218,6 +220,7 @@ function GenerateExercisesPanel() {
     judge: "判断题",
     blank: "填空题",
     qa: "问答题",
+    analysis: "分析题",
   };
 
   useEffect(() => {
@@ -393,6 +396,10 @@ function GenerateExercisesPanel() {
         max: defaultExerciseTypeConfigs.find((r) => r.key === "qa")?.max ?? 5,
         difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "qa")?.difficulty ?? 0.8,
       },
+      analysis: {
+        max: defaultExerciseTypeConfigs.find((r) => r.key === "analysis")?.max ?? 1,
+        difficulty: defaultExerciseTypeConfigs.find((r) => r.key === "analysis")?.difficulty ?? 0.8,
+      },
     };
     setGenerateSettingsDraft(draft);
     setGenerateSettingsModalOpen(true);
@@ -464,6 +471,7 @@ function GenerateExercisesPanel() {
       judge_max: typeConfigs.find((x) => x.key === "judge")?.max || 0,
       qa_max: typeConfigs.find((x) => x.key === "qa")?.max || 0,
       blank_max: typeConfigs.find((x) => x.key === "blank")?.max || 0,
+      analysis_max: typeConfigs.find((x) => x.key === "analysis")?.max || 0,
     };
     const commonPayload = {
       question_bank_type: bankType,
@@ -472,6 +480,7 @@ function GenerateExercisesPanel() {
       judge_difficulty_score: typeConfigs.find((x) => x.key === "judge")?.difficulty || 0.8,
       qa_difficulty_score: typeConfigs.find((x) => x.key === "qa")?.difficulty || 0.8,
       blank_difficulty_score: typeConfigs.find((x) => x.key === "blank")?.difficulty || 0.8,
+      analysis_difficulty_score: typeConfigs.find((x) => x.key === "analysis")?.difficulty || 0.8,
     };
 
     const targetChapterIds = chapterId === "all" ? chapters.map((ch) => ch.id) : [chapterId];
@@ -520,9 +529,45 @@ function GenerateExercisesPanel() {
       const judgePlan = distribute(maxByType.judge_max, chapterCount);
       const qaPlan = distribute(maxByType.qa_max, chapterCount);
       const blankPlan = distribute(maxByType.blank_max, chapterCount);
+      const analysisPlan = distribute(maxByType.analysis_max, chapterCount);
       const courseName = courses.find((x) => x.id === courseId)?.name || "未知课程";
       let idSeed = Date.now();
       let submittedChapters = 0;
+
+      const isMultiChapterAnalysis = chapterCount > 1 && maxByType.analysis_max > 0;
+      if (isMultiChapterAnalysis) {
+        setProgressText("正在生成分析题（多章合并）...");
+        try {
+          const analysisResp = await api.teacher.courses.generateAnalysisPreview(courseId!, {
+            chapter_ids: targetChapterIds,
+            analysis_max: maxByType.analysis_max,
+            analysis_difficulty_score: commonPayload.analysis_difficulty_score,
+            question_bank_type: bankType,
+          });
+          for (const item of analysisResp.items || []) {
+            const typeKey = (["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"].includes(item.question_type) ? item.question_type : "qa") as QuestionTypeKey;
+            const chId = item.chapter_id ?? targetChapterIds[0];
+            generatedRows.push({
+              id: idSeed++,
+              courseName,
+              chapterId: chId,
+              chapterName: item.chapter_title ?? chapters.find((x) => x.id === chId)?.title ?? "",
+              questionType: questionTypeLabel[typeKey] || typeKey,
+              questionTypeKey: typeKey,
+              questionText: item.question_text || "",
+              options: Array.isArray(item.options) ? item.options.map((x) => String(x || "")) : [],
+              correctAnswer: item.correct_answer || "",
+              explanation: item.explanation || "",
+              difficultyScore:
+                item.difficulty_score != null && Number.isFinite(Number(item.difficulty_score))
+                  ? Number(Number(item.difficulty_score).toFixed(2))
+                  : null,
+            });
+          }
+        } catch (e: any) {
+          toast(e?.message || "分析题（多章合并）生成失败", "error");
+        }
+      }
 
       for (let i = 0; i < chapterCount; i += 1) {
         setProgressText(`正在生成预览：第 ${i + 1} / ${chapterCount} 个章节`);
@@ -536,6 +581,7 @@ function GenerateExercisesPanel() {
           judge_max: judgePlan[i],
           qa_max: qaPlan[i],
           blank_max: blankPlan[i],
+          analysis_max: isMultiChapterAnalysis ? 0 : analysisPlan[i],
           knowledge_point_ids: allKnowledgePointsSelected ? [] : chapterKnowledgePointIds,
         };
         const perChapterTotal =
@@ -543,7 +589,8 @@ function GenerateExercisesPanel() {
           chapterTaskPayload.multiple_choice_max +
           chapterTaskPayload.judge_max +
           chapterTaskPayload.qa_max +
-          chapterTaskPayload.blank_max;
+          chapterTaskPayload.blank_max +
+          chapterTaskPayload.analysis_max;
         if (perChapterTotal <= 0) continue;
         const resp = await api.teacher.courses.generateChapterQuestionsPreview(targetChapterIds[i], chapterTaskPayload);
         const chapterName = chapters.find((x) => x.id === targetChapterIds[i])?.title || `章节${targetChapterIds[i]}`;
@@ -553,6 +600,7 @@ function GenerateExercisesPanel() {
           judge: Number(resp.by_type?.judge || 0),
           blank: Number(resp.by_type?.blank || 0),
           qa: Number(resp.by_type?.qa || 0),
+          analysis: Number(resp.by_type?.analysis || 0),
         };
         const requestedByType: Record<QuestionTypeKey, number> = {
           single_choice: chapterTaskPayload.single_choice_max,
@@ -560,6 +608,7 @@ function GenerateExercisesPanel() {
           judge: chapterTaskPayload.judge_max,
           blank: chapterTaskPayload.blank_max,
           qa: chapterTaskPayload.qa_max,
+          analysis: chapterTaskPayload.analysis_max,
         };
         statsRows.push({
           chapterId: targetChapterIds[i],
@@ -573,7 +622,7 @@ function GenerateExercisesPanel() {
         });
         for (const item of resp.items || []) {
           const typeKey = (
-            ["single_choice", "multiple_choice", "judge", "blank", "qa"].includes(item.question_type)
+            ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"].includes(item.question_type)
               ? item.question_type
               : "qa"
           ) as QuestionTypeKey;
@@ -760,7 +809,7 @@ function GenerateExercisesPanel() {
                     </tr>
                   </thead>
                   <tbody>
-                    {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((key) => {
+                    {(["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"] as const).map((key) => {
                       const label = defaultTypeConfigs.find((c) => c.key === key)!.label;
                       return (
                         <tr key={key}>
@@ -1169,7 +1218,7 @@ function GenerateExercisesPanel() {
                 <div style={{ color: "var(--text-secondary)" }}>题型</div>
                 {previewModalMode === "edit" ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                    {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((k) => (
+                    {(["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"] as const).map((k) => (
                       <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                         <input type="radio" name="generate-preview-question-type" checked={previewQuestionTypeDraft === k} onChange={() => setPreviewQuestionTypeDraft(k)} />
                         {questionTypeLabel[k]}
@@ -1255,7 +1304,7 @@ function ImportExercisesPanel() {
       chapterId: number | "";
       chapterName: string;
       questionType: string;
-      questionTypeKey: "single_choice" | "multiple_choice" | "judge" | "blank" | "qa";
+      questionTypeKey: QuestionTypeKey;
       questionText: string;
       optionsText: string;
       correctAnswer: string;
@@ -1266,7 +1315,7 @@ function ImportExercisesPanel() {
   >([]);
   const [previewModalMode, setPreviewModalMode] = useState<"view" | "edit">("view");
   const [editingPreviewRowId, setEditingPreviewRowId] = useState<number | null>(null);
-  const [previewQuestionTypeDraft, setPreviewQuestionTypeDraft] = useState<"single_choice" | "multiple_choice" | "judge" | "blank" | "qa">("single_choice");
+  const [previewQuestionTypeDraft, setPreviewQuestionTypeDraft] = useState<QuestionTypeKey>("single_choice");
   const [previewChapterIdDraft, setPreviewChapterIdDraft] = useState<number | "">("");
   const [previewQuestionTextDraft, setPreviewQuestionTextDraft] = useState("");
   const [previewOptionsDraft, setPreviewOptionsDraft] = useState("");
@@ -1281,12 +1330,13 @@ function ImportExercisesPanel() {
     const start = (previewCurrentPage - 1) * previewPageSize;
     return previewRows.slice(start, start + previewPageSize);
   }, [previewRows, previewCurrentPage, previewPageSize]);
-  const questionTypeLabel: Record<"single_choice" | "multiple_choice" | "judge" | "blank" | "qa", string> = {
+  const questionTypeLabel: Record<QuestionTypeKey, string> = {
     single_choice: "单选题",
     multiple_choice: "多选题",
     judge: "判断题",
     blank: "填空题",
     qa: "问答题",
+    analysis: "分析题",
   };
 
   useEffect(() => {
@@ -1400,6 +1450,7 @@ function ImportExercisesPanel() {
         judge: "判断题",
         blank: "填空题",
         qa: "问答题",
+        analysis: "分析题",
       };
       const rows = (resp.items || []).map((item: any, idx: number) => {
         const rawDiff = item?.difficulty_score;
@@ -1413,7 +1464,7 @@ function ImportExercisesPanel() {
           chapterId: (Number.isFinite(Number(item.chapter_id)) && Number(item.chapter_id) > 0 ? Number(item.chapter_id) : "") as number | "",
           chapterName: (item.chapter_title || "").trim() || chapterName,
           questionType: questionTypeLabel[item.question_type] || item.question_type || "待识别",
-          questionTypeKey: (["single_choice", "multiple_choice", "judge", "blank", "qa"].includes(item.question_type) ? item.question_type : "qa") as
+          questionTypeKey: (["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"].includes(item.question_type) ? item.question_type : "qa") as
             | "single_choice"
             | "multiple_choice"
             | "judge"
@@ -1805,7 +1856,7 @@ function ImportExercisesPanel() {
                 <div style={{ color: "var(--text-secondary)" }}>题型</div>
                 {previewModalMode === "edit" ? (
                   <div style={{ display: "flex", alignItems: "center", gap: 12, flexWrap: "wrap" }}>
-                    {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((k) => (
+                    {(["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"] as const).map((k) => (
                       <label key={k} style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
                         <input type="radio" name="preview-question-type" checked={previewQuestionTypeDraft === k} onChange={() => setPreviewQuestionTypeDraft(k)} />
                         {questionTypeLabel[k]}
@@ -1977,6 +2028,7 @@ function ExerciseManagePanel() {
     judge: "判断题",
     blank: "填空题",
     qa: "问答题",
+    analysis: "分析题",
   };
 
   const sortedRows = useMemo(() => {
@@ -2742,6 +2794,10 @@ function ExerciseManagePanel() {
               <input type="radio" name="manage-question-type" checked={questionTypeFilter === "qa"} onChange={() => setQuestionTypeFilter("qa")} />
               问答题
             </label>
+            <label style={{ display: "inline-flex", alignItems: "center", gap: 6 }}>
+              <input type="radio" name="manage-question-type" checked={questionTypeFilter === "analysis"} onChange={() => setQuestionTypeFilter("analysis")} />
+              分析题
+            </label>
           </div>
 
           <div style={{ color: "var(--text-secondary)", paddingTop: 8 }}>难度系数</div>
@@ -3407,7 +3463,7 @@ function loadSavedPaperDefaults(): Partial<Record<QuestionTypeKey, PaperDefaultP
     const raw = localStorage.getItem(PAPER_GENERATE_DEFAULTS_STORAGE_KEY);
     if (raw) {
       const parsed = JSON.parse(raw) as Record<string, { count?: number; difficulty?: number; score?: number }>;
-      const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+      const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"];
       const out: Partial<Record<QuestionTypeKey, PaperDefaultPerType>> = {};
       for (const k of keys) {
         const v = parsed[k];
@@ -3429,7 +3485,7 @@ function loadSavedPaperDefaults(): Partial<Record<QuestionTypeKey, PaperDefaultP
     const rawLegacy = localStorage.getItem("qastudio.paperGenerateDefaultCount");
     if (!rawLegacy) return null;
     const parsed = JSON.parse(rawLegacy) as Record<string, number>;
-    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+    const keys: QuestionTypeKey[] = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"];
     const out: Partial<Record<QuestionTypeKey, PaperDefaultPerType>> = {};
     for (const k of keys) {
       if (typeof parsed[k] === "number" && Number.isFinite(parsed[k])) {
@@ -3448,6 +3504,7 @@ const FALLBACK_PAPER_DEFAULT_CONFIGS: Array<{ id: number; type: QuestionTypeKey;
   { id: 3, type: "judge", count: 10, difficulty: "0.8", score: 1 },
   { id: 4, type: "blank", count: 10, difficulty: "0.8", score: 2 },
   { id: 5, type: "qa", count: 5, difficulty: "0.8", score: 10 },
+  { id: 6, type: "analysis", count: 1, difficulty: "0.8", score: 10 },
 ];
 type PaperPreviewQuestionRow = {
   id: number;
@@ -3511,7 +3568,7 @@ function GeneratePapersPanel() {
   const [configs, setConfigs] = useState<Array<{ id: number; type: QuestionTypeKey; count: number; difficulty: string; score: number }>>(
     () => FALLBACK_PAPER_DEFAULT_CONFIGS
   );
-  const nextConfigIdRef = useRef(6);
+  const nextConfigIdRef = useRef(7);
   const [paperSettingsModalOpen, setPaperSettingsModalOpen] = useState(false);
   const [paperSettingsDraft, setPaperSettingsDraft] = useState<Record<QuestionTypeKey, { count: number; difficulty: number; score: number }>>({
     single_choice: { count: 10, difficulty: 0.8, score: 2 },
@@ -3519,6 +3576,7 @@ function GeneratePapersPanel() {
     judge: { count: 10, difficulty: 0.8, score: 1 },
     blank: { count: 10, difficulty: 0.8, score: 2 },
     qa: { count: 5, difficulty: 0.8, score: 10 },
+    analysis: { count: 1, difficulty: 0.8, score: 10 },
   });
   const previewQuestionIdRef = useRef(1);
   const [previewCurrentPage, setPreviewCurrentPage] = useState(1);
@@ -3533,6 +3591,7 @@ function GeneratePapersPanel() {
     judge: "判断题",
     blank: "填空题",
     qa: "问答题",
+    analysis: "分析题",
   };
   const previewRows = previewResult?.previewQuestions || [];
   const previewTotalPages = Math.max(1, Math.ceil(previewRows.length / previewPageSize));
@@ -3604,7 +3663,7 @@ function GeneratePapersPanel() {
     setChapterIds((prev) => (prev.includes(id) ? prev.filter((x) => x !== id) : [...prev, id]));
   };
   const normalizePreviewQuestionType = (value: string): QuestionTypeKey =>
-    (["single_choice", "multiple_choice", "judge", "blank", "qa"].includes(value) ? value : "qa") as QuestionTypeKey;
+    (["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"].includes(value) ? value : "qa") as QuestionTypeKey;
   const computePreviewStats = (rows: PaperPreviewQuestionRow[]) => {
     const totalScore = Number(rows.reduce((sum, row) => sum + (Number.isFinite(row.score) ? row.score : 0), 0).toFixed(2));
     if (totalScore <= 0) {
@@ -4203,6 +4262,7 @@ function GeneratePapersPanel() {
                         <option value="judge">判断题</option>
                         <option value="blank">填空题</option>
                         <option value="qa">问答题</option>
+                        <option value="analysis">分析题</option>
                       </select>
                     </td>
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>
@@ -4983,6 +5043,7 @@ const PAPER_CONTENT_TYPE_LABEL: Record<string, string> = {
   judge: "判断题",
   blank: "填空题",
   qa: "问答题",
+  analysis: "分析题",
 };
 
 type PaperFileRow = { id: number; paper_id: number; file_name: string; created_at: string | null };
@@ -6152,7 +6213,7 @@ export function TeacherPaperContentPage() {
                     />
                     全部
                   </label>
-                  {(["single_choice", "multiple_choice", "judge", "blank", "qa"] as const).map((t) => (
+                  {(["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"] as const).map((t) => (
                     <label key={t} style={{ display: "inline-flex", alignItems: "center", gap: 6, marginRight: 12 }}>
                       <input
                         type="radio"
@@ -6330,6 +6391,7 @@ function PaperManagePanel() {
     judge: "判断题",
     blank: "填空题",
     qa: "问答题",
+    analysis: "分析题",
   };
   const isValidDifficultyText = (value: string) => /^\d*(\.\d{0,2})?$/.test(value);
 
@@ -6580,7 +6642,7 @@ function PaperManagePanel() {
       .replace(/'/g, "&#39;");
 
   const SECTION_NUMERALS = "一二三四五六七八九十";
-  const typeOrder = ["single_choice", "multiple_choice", "judge", "blank", "qa"];
+  const typeOrder = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"];
 
   const buildPaperHtml = (title: string, questions: any[], withAnswer: boolean) => {
     if (!questions.length) {

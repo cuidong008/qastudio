@@ -149,6 +149,11 @@ async def get_exercise_generate_defaults(
             max=s.exercise_default_qa_max,
             difficulty=s.exercise_default_difficulty,
         ),
+        ExerciseGenerateDefaultRowOut(
+            type="analysis",
+            max=s.exercise_default_analysis_max,
+            difficulty=s.exercise_default_difficulty,
+        ),
     ]
 
 
@@ -223,6 +228,12 @@ async def get_paper_generate_defaults(
             count=s.paper_default_qa_count,
             difficulty=s.paper_default_difficulty,
             score=s.paper_default_qa_score,
+        ),
+        PaperGenerateDefaultRowOut(
+            type="analysis",
+            count=s.paper_default_analysis_count,
+            difficulty=s.paper_default_difficulty,
+            score=s.paper_default_analysis_score,
         ),
     ]
 
@@ -377,13 +388,18 @@ class TeacherGenerateQuestionsIn(BaseModel):
     judge_max: int = Field(default=0, ge=0, le=30)
     qa_max: int = Field(default=0, ge=0, le=30)
     blank_max: int = Field(default=0, ge=0, le=30)
+    analysis_max: int = Field(default=0, ge=0, le=30)
     question_bank_type: str = Field(default="training", min_length=1, max_length=20)
     single_choice_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
     multiple_choice_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
     judge_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
     qa_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
     blank_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    analysis_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
     knowledge_point_ids: list[int] = Field(default_factory=list)
+    # 多章合并仅生成分析题：True 且 chapter_ids 长度>=2 时，任务执行时用合并上下文只出分析题
+    analysis_only: bool = Field(default=False)
+    chapter_ids: list[int] = Field(default_factory=list)
 
 
 class TeacherPaperGenerateConfigIn(BaseModel):
@@ -636,6 +652,24 @@ class TeacherGenerateQuestionsPreviewOut(BaseModel):
     output_count: int
     generated_count: int
     by_type: dict[str, int]
+    skipped: int
+    items: list[TeacherImportQuestionPreviewItemOut]
+
+
+class TeacherGenerateAnalysisPreviewIn(BaseModel):
+    """多章合并上下文仅生成分析题（预览）"""
+    chapter_ids: list[int] = Field(default_factory=list, min_length=2)
+    analysis_max: int = Field(default=1, ge=1, le=30)
+    analysis_difficulty_score: float = Field(default=0.8, ge=0, le=1, multiple_of=0.01)
+    question_bank_type: str = Field(default="training", min_length=1, max_length=20)
+
+
+class TeacherGenerateAnalysisPreviewOut(BaseModel):
+    course_id: int
+    question_bank_type: str
+    output_count: int
+    generated_count: int
+    by_type: dict[str, int]  # 仅含 analysis
     skipped: int
     items: list[TeacherImportQuestionPreviewItemOut]
 
@@ -916,6 +950,8 @@ def _to_question_type(value: str) -> str | None:
         return "qa"
     if s in {"blank", "fill_blank", "fill", "填空题"}:
         return "blank"
+    if s in {"analysis", "分析题"}:
+        return "analysis"
     return None
 
 
@@ -1135,7 +1171,7 @@ def _plan_question_generation_batches(
     按题型顺序规划分批，尽量不拆分单个题型到多批。
     仅当某题型自身超出单批预算时，才强制拆分该题型。
     """
-    type_order = ["single_choice", "multiple_choice", "judge", "blank", "qa"]
+    type_order = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"]
     # 经验值：用于估算单题输出 token 成本（含 JSON 结构与字段开销）
     per_question_token_est = {
         "single_choice": 170,
@@ -1143,6 +1179,7 @@ def _plan_question_generation_batches(
         "judge": 95,
         "blank": 90,
         "qa": 120,
+        "analysis": 300,
     }
     budget = max(200, int(output_token_budget))
     batches: list[dict[str, int]] = []
@@ -1317,12 +1354,14 @@ def _build_generate_questions_prompt(
     judge_max: int,
     qa_max: int,
     blank_max: int,
+    analysis_max: int,
     question_bank_type: str,
     single_choice_difficulty_score: float,
     multiple_choice_difficulty_score: float,
     judge_difficulty_score: float,
     qa_difficulty_score: float,
     blank_difficulty_score: float,
+    analysis_difficulty_score: float,
     diff_basic_target: int,
     diff_applied_target: int,
     diff_extended_target: int,
@@ -1336,6 +1375,7 @@ def _build_generate_questions_prompt(
 - judge(判断题)：最多 {judge_max} 题
 - qa(问答题)：最多 {qa_max} 题
 - blank(填空题)：最多 {blank_max} 题
+- analysis(分析题)：最多 {analysis_max} 题
 题库类型：{question_bank_type}
 各题型目标难度系数（0~1，越大越难）：
 - single_choice：{single_choice_difficulty_score}
@@ -1343,6 +1383,7 @@ def _build_generate_questions_prompt(
 - judge：{judge_difficulty_score}
 - qa：{qa_difficulty_score}
 - blank：{blank_difficulty_score}
+- analysis：{analysis_difficulty_score}
 难度目标（尽量贴近）：
 - basic(基础)：约 {diff_basic_target} 题
 - applied(应用)：约 {diff_applied_target} 题
@@ -1354,6 +1395,7 @@ def _build_generate_questions_prompt(
 3) 多选题必须提供 4 个选项，correct_answer 用逗号分隔多个字母（如 A,C），至少 2 个答案。
 4) 判断题 correct_answer 必须是 A 或 B，A=正确，B=错误。
 5) 问答题与填空题提供标准答案（简短），不超过 32 字。
+5.1) 分析题需符合工程教育认证：题干与答案宜分点、条理清晰，内容可较长；correct_answer 和 question_text 可分多段、多要点。
 6) 每题给 difficulty: basic|applied|extended。
 7) 仅输出 JSON，不要输出 markdown 或解释。
 
@@ -1361,7 +1403,7 @@ def _build_generate_questions_prompt(
 {{
   "questions": [
     {{
-      "type": "single_choice|multiple_choice|judge|qa|blank",
+      "type": "single_choice|multiple_choice|judge|qa|blank|analysis",
       "difficulty": "basic|applied|extended",
       "question_text": "题干",
       "options": ["选项1","选项2","选项3","选项4"], 
@@ -1370,10 +1412,51 @@ def _build_generate_questions_prompt(
     }}
   ]
 }}
-说明：qa/blank 的 options 传 []；multiple_choice 的 correct_answer 示例 "A,C"。
+说明：qa/blank/analysis 的 options 传 []；multiple_choice 的 correct_answer 示例 "A,C"；analysis 的 correct_answer 可为长文本。
 
 章节内容：
 {context}
+"""
+
+
+def _build_generate_analysis_only_prompt(
+    merged_context: str,
+    chapter_titles_text: str,
+    analysis_max: int,
+    analysis_difficulty_score: float,
+    question_bank_type: str,
+) -> str:
+    """多章合并上下文下仅生成分析题的 prompt"""
+    return f"""你是一名严谨的课程出题助手。以下内容来自**多章合并**，请根据整体内容出**分析题**，不得超纲。
+
+涉及章节：{chapter_titles_text}
+
+题量：分析题(analysis) 最多 {analysis_max} 题
+题库类型：{question_bank_type}
+分析题目标难度系数（0~1，越大越难）：{analysis_difficulty_score}
+
+要求：
+1) 分析题需符合工程教育认证：题干与答案宜分点、条理清晰，内容可较长。
+2) type 仅输出 "analysis"；question_text 与 correct_answer 可分多段、多要点。
+3) options 传 []；每题给 difficulty: basic|applied|extended。
+4) 仅输出 JSON，不要输出 markdown 或解释。
+
+输出格式（严格）：
+{{
+  "questions": [
+    {{
+      "type": "analysis",
+      "difficulty": "basic|applied|extended",
+      "question_text": "题干（可长、分点）",
+      "options": [],
+      "correct_answer": "参考答案（可长、分点）",
+      "explanation": "解析"
+    }}
+  ]
+}}
+
+多章合并内容：
+{merged_context}
 """
 
 
@@ -2305,11 +2388,11 @@ def _build_import_questions_prompt(
 
 要求：
 1) 只输出 JSON，不要输出 markdown 或解释。
-2) question_type 取值仅允许：single_choice | multiple_choice | judge | blank | qa。
+2) question_type 取值仅允许：single_choice | multiple_choice | judge | blank | qa | analysis。
 2.1) chapter_title 尽量从给定章节列表中选择最匹配的一项；无法判断可留空字符串。
 3) 如果是 single_choice / multiple_choice，options 最多 4 个，correct_answer 优先输出字母（A/B/C/D 或 A,C）。
 4) 如果是 judge，correct_answer 仅输出 A 或 B（A=正确，B=错误）。
-5) 题干尽量简洁完整，去掉无关前后缀。
+5) 题干尽量简洁完整，去掉无关前后缀。分析题(analysis)题干与答案可分点、可较长。
 6) 若无法确认答案，可留空字符串，但尽量依据答案文档补全。
 7) explanation 可为空字符串。
 8) difficulty_score：难度系数，取值 0~1（0 最难，1 最简单）。根据题干与答案综合判断难度；无法判断时可省略该字段或留空。
@@ -2319,7 +2402,7 @@ def _build_import_questions_prompt(
   "questions": [
     {{
       "chapter_title": "章节名称（来自给定章节列表）",
-      "question_type": "single_choice|multiple_choice|judge|blank|qa",
+      "question_type": "single_choice|multiple_choice|judge|blank|qa|analysis",
       "question_text": "题干",
       "options": ["A选项", "B选项", "C选项", "D选项"],
       "correct_answer": "A",
@@ -2481,6 +2564,8 @@ def _normalize_import_questions(
         elif q_type == "judge":
             options = ["A. 正确", "B. 错误"]
             answer = _normalize_judge_answer(item.get("correct_answer")) or _trim_answer(item.get("correct_answer"), max_len=8)
+        elif q_type == "analysis":
+            answer = str(item.get("correct_answer") or "").strip()
         else:
             answer = _trim_answer(item.get("correct_answer"), max_len=64)
         explanation = str(item.get("explanation") or "").strip() or None
@@ -3194,6 +3279,69 @@ async def delete_teacher_chapter(
     return {"ok": True}
 
 
+ANALYSIS_MERGED_CONTEXT_MAX_CHARS = 45000
+
+
+async def _build_merged_context_for_chapters(
+    db: AsyncSession,
+    course_id: int,
+    chapter_ids: list[int],
+) -> tuple[str, list[tuple[int, str]]]:
+    """多章合并为一份上下文，用于分析题生成。返回 (merged_context, [(chapter_id, chapter_title), ...])"""
+    if not chapter_ids:
+        return "", []
+    r_ch = await db.execute(
+        select(Chapter.id, Chapter.title)
+        .where(Chapter.course_id == course_id, Chapter.id.in_(chapter_ids))
+        .order_by(Chapter.order_index, Chapter.id)
+    )
+    rows = r_ch.all()
+    ordered_ids = [int(r[0]) for r in rows]
+    title_map = {int(r[0]): str(r[1] or "") for r in rows}
+    if not ordered_ids:
+        return "", []
+    parts: list[str] = []
+    chapter_tuples: list[tuple[int, str]] = []
+    for ch_id in ordered_ids:
+        title = title_map.get(ch_id, "")
+        chapter_tuples.append((ch_id, title))
+        block_parts: list[str] = [f"## 章节：{title}"]
+        r_docs = await db.execute(
+            select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
+            .where(KnowledgeDocument.chapter_id == ch_id)
+            .order_by(KnowledgeDocument.id.desc())
+            .limit(30)
+        )
+        for d_title, content, page_ref in r_docs.all():
+            c = (content or "").strip()
+            if not c:
+                continue
+            header = f"文档：{(d_title or '').strip()}".strip()
+            if page_ref:
+                header += f"（{page_ref}）"
+            block_parts.append(f"{header}\n{c}")
+        r_kps = await db.execute(
+            select(KnowledgePoint.title, KnowledgePoint.content)
+            .where(KnowledgePoint.chapter_id == ch_id)
+            .order_by(KnowledgePoint.order_index, KnowledgePoint.id)
+        )
+        kp_rows = [(str(r[0] or ""), r[1]) for r in r_kps.all() if (r[0] or "").strip()]
+        if not kp_rows:
+            ch = await db.get(Chapter, ch_id)
+            if ch:
+                auto_kps = await _auto_generate_and_save_kps_for_chapter(db, ch, max_count=10)
+                kp_rows = [(str(t or ""), c) for _, t, c in auto_kps]
+        for kp_title, kp_content in kp_rows:
+            c = (kp_content or "").strip()
+            if kp_title.strip() or c:
+                block_parts.append(f"知识点：{kp_title.strip()}\n{c}".strip())
+        parts.append("\n\n".join(block_parts))
+    merged = "\n\n---\n\n".join(parts).strip()
+    if len(merged) > ANALYSIS_MERGED_CONTEXT_MAX_CHARS:
+        merged = merged[:ANALYSIS_MERGED_CONTEXT_MAX_CHARS]
+    return merged, chapter_tuples
+
+
 async def _generate_questions_for_chapter(
     db: AsyncSession,
     chapter: Chapter,
@@ -3208,6 +3356,7 @@ async def _generate_questions_for_chapter(
         "judge": _normalize_difficulty_score(body.judge_difficulty_score),
         "qa": _normalize_difficulty_score(body.qa_difficulty_score),
         "blank": _normalize_difficulty_score(body.blank_difficulty_score),
+        "analysis": _normalize_difficulty_score(body.analysis_difficulty_score),
     }
     r_docs = await db.execute(
         select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
@@ -3281,6 +3430,7 @@ async def _generate_questions_for_chapter(
         "judge": body.judge_max,
         "qa": body.qa_max,
         "blank": body.blank_max,
+        "analysis": body.analysis_max,
     }
     total_expected = sum(limits.values())
     diff_limits = _difficulty_limits(total_expected)
@@ -3299,7 +3449,7 @@ async def _generate_questions_for_chapter(
     )
 
     model_output_count = 0
-    created_by_type: dict[str, int] = {"single_choice": 0, "multiple_choice": 0, "judge": 0, "qa": 0, "blank": 0}
+    created_by_type: dict[str, int] = {"single_choice": 0, "multiple_choice": 0, "judge": 0, "qa": 0, "blank": 0, "analysis": 0}
     created_by_diff: dict[str, int] = {"basic": 0, "applied": 0, "extended": 0}
     preview_items: list[TeacherImportQuestionPreviewItemOut] = []
     skipped = 0
@@ -3377,7 +3527,12 @@ async def _generate_questions_for_chapter(
             correct_answer = ans
             preview_options = ["正确", "错误"]
         else:
-            ans = _trim_answer(item.get("correct_answer"))
+            # qa / blank 截断；analysis 保留长答案
+            raw_ans = str(item.get("correct_answer") or "").strip()
+            if q_type == "analysis":
+                ans = raw_ans if raw_ans else ""
+            else:
+                ans = _trim_answer(item.get("correct_answer"), max_len=64)
             if not ans:
                 _mark_skipped(candidate_idx, skipped_candidate_indices)
                 return False
@@ -3440,12 +3595,14 @@ async def _generate_questions_for_chapter(
             judge_max=int(batch_limits.get("judge", 0)),
             qa_max=int(batch_limits.get("qa", 0)),
             blank_max=int(batch_limits.get("blank", 0)),
+            analysis_max=int(batch_limits.get("analysis", 0)),
             question_bank_type=question_bank_type,
             single_choice_difficulty_score=type_difficulty_score["single_choice"],
             multiple_choice_difficulty_score=type_difficulty_score["multiple_choice"],
             judge_difficulty_score=type_difficulty_score["judge"],
             qa_difficulty_score=type_difficulty_score["qa"],
             blank_difficulty_score=type_difficulty_score["blank"],
+            analysis_difficulty_score=type_difficulty_score["analysis"],
             diff_basic_target=batch_diff_limits["basic"],
             diff_applied_target=batch_diff_limits["applied"],
             diff_extended_target=batch_diff_limits["extended"],
@@ -3536,28 +3693,117 @@ async def _run_question_generation_task(task_id: int):
         task.error_message = None
         await db.commit()
         try:
-            r_ch = await db.execute(
-                select(Chapter, Course)
-                .join(Course, Course.id == Chapter.course_id)
-                .where(Chapter.id == task.chapter_id, Course.id == task.course_id)
-            )
-            row = r_ch.first()
-            if not row:
-                raise RuntimeError("章节不存在")
-            chapter, course = row[0], row[1]
             params = json.loads(task.request_payload or "{}")
             body = TeacherGenerateQuestionsIn(**params)
-            created_by_type, skipped, _, _ = await _generate_questions_for_chapter(db, chapter, course, body)
-            task.status = "success"
-            task.result_payload = json.dumps(
-                {
-                    "created": int(sum(created_by_type.values())),
-                    "by_type": created_by_type,
-                    "skipped": int(skipped),
-                },
-                ensure_ascii=False,
-            )
-            task.error_message = None
+            if body.analysis_only and len(body.chapter_ids) >= 2:
+                # 多章合并仅生成分析题
+                r_course = await db.execute(select(Course).where(Course.id == task.course_id))
+                course = r_course.scalar_one_or_none()
+                if not course:
+                    raise RuntimeError("课程不存在")
+                merged_context, chapter_tuples = await _build_merged_context_for_chapters(
+                    db, task.course_id, body.chapter_ids
+                )
+                if not merged_context.strip():
+                    raise RuntimeError("所选章节暂无可用内容")
+                chapter_titles_text = "、".join(t for _, t in chapter_tuples)
+                prompt = _build_generate_analysis_only_prompt(
+                    merged_context=merged_context,
+                    chapter_titles_text=chapter_titles_text,
+                    analysis_max=body.analysis_max,
+                    analysis_difficulty_score=body.analysis_difficulty_score,
+                    question_bank_type=_normalize_question_bank_type(body.question_bank_type),
+                )
+                from ..rag.config import get_rag_settings
+                from ..rag.llm import get_llm
+                settings = get_rag_settings()
+                llm = get_llm(settings)
+                llm_max_tokens = max(
+                    2000,
+                    int(getattr(settings, "exercise_generate_max_tokens", 4096) or settings.llm_max_tokens or 512),
+                )
+                raw, _ = await asyncio.to_thread(
+                    llm.generate_with_meta,
+                    prompt,
+                    max_tokens=llm_max_tokens,
+                    temperature=0.2,
+                )
+                candidates = _extract_json_payload(raw)
+                question_bank_type = _normalize_question_bank_type(body.question_bank_type)
+                diff_score = _normalize_difficulty_score(body.analysis_difficulty_score)
+                created_count = 0
+                now_ts = datetime.utcnow()
+                for idx, item in enumerate(candidates):
+                    q_type = _to_question_type(str(item.get("type") or ""))
+                    if q_type != "analysis":
+                        continue
+                    q_text = str(item.get("question_text") or "").strip()
+                    if not q_text:
+                        continue
+                    correct_answer = str(item.get("correct_answer") or "").strip()
+                    if not correct_answer:
+                        continue
+                    ch_id, ch_title = chapter_tuples[idx % len(chapter_tuples)]
+                    raw_diff = item.get("difficulty_score")
+                    try:
+                        d = float(raw_diff) if raw_diff is not None and str(raw_diff).strip() != "" else None
+                    except (TypeError, ValueError):
+                        d = None
+                    diff = _normalize_difficulty(item.get("difficulty")) if item.get("difficulty") else "basic"
+                    explanation = str(item.get("explanation") or "").strip() or f"参考答案：{correct_answer}"
+                    if d is not None and 0 <= d <= 1:
+                        diff_score_use = round(d, 2)
+                    else:
+                        diff_score_use = diff_score
+                    db.add(
+                        Question(
+                            course_id=task.course_id,
+                            chapter_id=ch_id,
+                            question_bank_type=question_bank_type,
+                            difficulty_score=diff_score_use,
+                            difficulty=diff,
+                            question_type="analysis",
+                            question_text=q_text,
+                            options=None,
+                            correct_answer=correct_answer,
+                            explanation=explanation,
+                            is_active=True,
+                            is_approved=False,
+                            generated_time=now_ts,
+                            edited_time=now_ts,
+                        )
+                    )
+                    created_count += 1
+                    if created_count >= body.analysis_max:
+                        break
+                await db.flush()
+                task.status = "success"
+                task.result_payload = json.dumps(
+                    {"created": created_count, "by_type": {"analysis": created_count}, "skipped": max(0, len(candidates) - created_count)},
+                    ensure_ascii=False,
+                )
+                task.error_message = None
+            else:
+                r_ch = await db.execute(
+                    select(Chapter, Course)
+                    .join(Course, Course.id == Chapter.course_id)
+                    .where(Chapter.id == task.chapter_id, Course.id == task.course_id)
+                )
+                row = r_ch.first()
+                if not row:
+                    raise RuntimeError("章节不存在")
+                chapter, course = row[0], row[1]
+                created_by_type, skipped, _, _ = await _generate_questions_for_chapter(db, chapter, course, body)
+                task.status = "success"
+                task.result_payload = json.dumps(
+                    {
+                        "created": int(sum(created_by_type.values())),
+                        "by_type": created_by_type,
+                        "skipped": int(skipped),
+                    },
+                    ensure_ascii=False,
+                )
+                task.error_message = None
         except Exception as e:
             task.status = "failed"
             task.error_message = str(e)[:1000]
@@ -3573,7 +3819,7 @@ async def create_generate_teacher_chapter_questions_task(
     user: User = Depends(require_teacher),
 ):
     chapter, course = await _require_owned_chapter(db, user.id, chapter_id)
-    total_expected = body.single_choice_max + body.multiple_choice_max + body.judge_max + body.qa_max + body.blank_max
+    total_expected = body.single_choice_max + body.multiple_choice_max + body.judge_max + body.qa_max + body.blank_max + body.analysis_max
     if total_expected <= 0:
         raise HTTPException(status_code=400, detail="请至少设置一种题型数量大于 0")
     task = QuestionGenerationTask(
@@ -3598,7 +3844,7 @@ async def generate_teacher_chapter_questions_preview(
     user: User = Depends(require_teacher),
 ):
     chapter, course = await _require_owned_chapter(db, user.id, chapter_id)
-    total_expected = body.single_choice_max + body.multiple_choice_max + body.judge_max + body.qa_max + body.blank_max
+    total_expected = body.single_choice_max + body.multiple_choice_max + body.judge_max + body.qa_max + body.blank_max + body.analysis_max
     if total_expected <= 0:
         raise HTTPException(status_code=400, detail="请至少设置一种题型数量大于 0")
     normalized_bank_type = _normalize_question_bank_type(body.question_bank_type)
@@ -3612,6 +3858,96 @@ async def generate_teacher_chapter_questions_preview(
         generated_count=int(sum(created_by_type.values())),
         by_type=created_by_type,
         skipped=int(skipped),
+        items=items,
+    )
+
+
+@router.post("/courses/{course_id}/questions/generate-analysis-preview", response_model=TeacherGenerateAnalysisPreviewOut)
+async def generate_analysis_preview(
+    course_id: int,
+    body: TeacherGenerateAnalysisPreviewIn,
+    db: AsyncSession = Depends(get_db),
+    user: User = Depends(require_teacher),
+):
+    """多章合并上下文仅生成分析题（预览）。每题 chapter_id 按所选章节轮询分配。"""
+    r_course = await db.execute(
+        select(Course).where(Course.id == course_id, Course.owner_teacher_id == user.id)
+    )
+    course = r_course.scalar_one_or_none()
+    if not course:
+        raise HTTPException(status_code=404, detail="课程不存在或无权限")
+    r_ch = await db.execute(
+        select(Chapter.id).where(Chapter.course_id == course_id, Chapter.id.in_(body.chapter_ids))
+    )
+    owned_ids = {int(row[0]) for row in r_ch.all() if row[0]}
+    if owned_ids != set(body.chapter_ids):
+        raise HTTPException(status_code=400, detail="存在不属于当前课程的章节")
+    merged_context, chapter_tuples = await _build_merged_context_for_chapters(db, course_id, body.chapter_ids)
+    if not merged_context.strip():
+        raise HTTPException(status_code=400, detail="所选章节暂无可用内容，请先上传或解析文档")
+    chapter_titles_text = "、".join(t for _, t in chapter_tuples)
+    prompt = _build_generate_analysis_only_prompt(
+        merged_context=merged_context,
+        chapter_titles_text=chapter_titles_text,
+        analysis_max=body.analysis_max,
+        analysis_difficulty_score=body.analysis_difficulty_score,
+        question_bank_type=_normalize_question_bank_type(body.question_bank_type),
+    )
+    from ..rag.config import get_rag_settings
+    from ..rag.llm import get_llm
+    settings = get_rag_settings()
+    llm = get_llm(settings)
+    llm_max_tokens = max(
+        2000,
+        int(getattr(settings, "exercise_generate_max_tokens", 4096) or settings.llm_max_tokens or 512),
+    )
+    raw, _ = await asyncio.to_thread(
+        llm.generate_with_meta,
+        prompt,
+        max_tokens=llm_max_tokens,
+        temperature=0.2,
+    )
+    candidates = _extract_json_payload(raw)
+    items: list[TeacherImportQuestionPreviewItemOut] = []
+    diff_score = body.analysis_difficulty_score
+    for idx, item in enumerate(candidates):
+        q_type = _to_question_type(str(item.get("type") or ""))
+        if q_type != "analysis":
+            continue
+        q_text = str(item.get("question_text") or "").strip()
+        if not q_text:
+            continue
+        correct_answer = str(item.get("correct_answer") or "").strip()
+        if not correct_answer:
+            continue
+        ch_id, ch_title = chapter_tuples[idx % len(chapter_tuples)]
+        raw_diff = item.get("difficulty_score")
+        try:
+            d = float(raw_diff) if raw_diff is not None and str(raw_diff).strip() != "" else None
+        except (TypeError, ValueError):
+            d = None
+        diff = round(d, 2) if d is not None and 0 <= d <= 1 else diff_score
+        items.append(
+            TeacherImportQuestionPreviewItemOut(
+                chapter_id=ch_id,
+                chapter_title=ch_title,
+                question_type="analysis",
+                question_text=q_text,
+                options=[],
+                correct_answer=correct_answer,
+                explanation=str(item.get("explanation") or "").strip() or None,
+                difficulty_score=diff,
+            )
+        )
+        if len(items) >= body.analysis_max:
+            break
+    return TeacherGenerateAnalysisPreviewOut(
+        course_id=course_id,
+        question_bank_type=_normalize_question_bank_type(body.question_bank_type),
+        output_count=len(candidates),
+        generated_count=len(items),
+        by_type={"analysis": len(items)},
+        skipped=max(0, len(candidates) - len(items)),
         items=items,
     )
 
@@ -4115,7 +4451,7 @@ async def _generate_internet_questions_for_paper(
     )
 
     def _shrink_batch_limits(limits: dict[str, int]) -> dict[str, int]:
-        ordered_types = ["single_choice", "multiple_choice", "judge", "blank", "qa"]
+        ordered_types = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"]
         out: dict[str, int] = {}
         changed = False
         for q_type in ordered_types:
@@ -4134,7 +4470,7 @@ async def _generate_internet_questions_for_paper(
         return {k: int(v) for k, v in limits.items() if int(v) > 0}
 
     max_batch_attempts = 4
-    grouped: dict[str, list[dict]] = {"single_choice": [], "multiple_choice": [], "judge": [], "blank": [], "qa": []}
+    grouped: dict[str, list[dict]] = {"single_choice": [], "multiple_choice": [], "judge": [], "blank": [], "qa": [], "analysis": []}
     for batch_idx, initial_batch_limits in enumerate(planned_batches, start=1):
         current_limits = {k: int(v) for k, v in initial_batch_limits.items() if int(v) > 0}
         if sum(current_limits.values()) <= 0:
@@ -5426,7 +5762,7 @@ async def confirm_import_teacher_questions(
         if not q_text:
             continue
         q_type = (item.question_type or "single_choice").strip() or "single_choice"
-        if q_type not in ("single_choice", "multiple_choice", "judge", "blank", "qa"):
+        if q_type not in ("single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"):
             q_type = "qa"
         options_json = json.dumps(item.options or [], ensure_ascii=False) if (item.options or []) else None
         diff_score = 0.8

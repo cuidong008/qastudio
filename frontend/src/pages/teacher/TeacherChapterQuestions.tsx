@@ -25,6 +25,7 @@ const questionTypeLabel: Record<string, string> = {
   judge: "判断题",
   qa: "问答题",
   blank: "填空题",
+  analysis: "分析题",
 };
 
 function stripTypePrefix(text: string): string {
@@ -239,6 +240,7 @@ export default function TeacherChapterQuestions() {
             <option value="judge">判断题</option>
             <option value="qa">问答题</option>
             <option value="blank">填空题</option>
+            <option value="analysis">分析题</option>
           </select>
           <select
             value={filterKnowledgePointId === "" ? "" : String(filterKnowledgePointId)}

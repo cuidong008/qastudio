@@ -482,19 +482,50 @@ export const api = {
           judge_max: number;
           qa_max: number;
           blank_max: number;
+          analysis_max?: number;
           question_bank_type: "training" | "exam";
           single_choice_difficulty_score: number;
           multiple_choice_difficulty_score: number;
           judge_difficulty_score: number;
           qa_difficulty_score: number;
           blank_difficulty_score: number;
+          analysis_difficulty_score?: number;
           knowledge_point_ids?: number[];
+          analysis_only?: boolean;
+          chapter_ids?: number[];
         }
       ) =>
         request<{ ok: boolean; task_id: number; status: string }>(
           `/teacher/chapters/${chapterId}/questions/generate`,
           { method: "POST", body }
         ),
+      generateAnalysisPreview: (
+        courseId: number,
+        body: {
+          chapter_ids: number[];
+          analysis_max: number;
+          analysis_difficulty_score: number;
+          question_bank_type: "training" | "exam";
+        }
+      ) =>
+        request<{
+          course_id: number;
+          question_bank_type: string;
+          output_count: number;
+          generated_count: number;
+          by_type: Record<string, number>;
+          skipped: number;
+          items: {
+            chapter_id: number | null;
+            chapter_title: string | null;
+            question_type: string;
+            question_text: string;
+            options: string[];
+            correct_answer: string;
+            explanation: string | null;
+            difficulty_score: number | null;
+          }[];
+        }>(`/teacher/courses/${courseId}/questions/generate-analysis-preview`, { method: "POST", body }),
       generateChapterQuestionsPreview: (
         chapterId: number,
         body: {
@@ -503,12 +534,14 @@ export const api = {
           judge_max: number;
           qa_max: number;
           blank_max: number;
+          analysis_max?: number;
           question_bank_type: "training" | "exam";
           single_choice_difficulty_score: number;
           multiple_choice_difficulty_score: number;
           judge_difficulty_score: number;
           qa_difficulty_score: number;
           blank_difficulty_score: number;
+          analysis_difficulty_score?: number;
           knowledge_point_ids?: number[];
         }
       ) =>

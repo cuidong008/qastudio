@@ -148,10 +148,10 @@ class Question(Base):
     question_bank_type = Column(String(20), nullable=False, default="training")  # training | exam
     difficulty_score = Column(Float, nullable=False, default=0.8)  # (0,1)
     difficulty = Column(String(20), default=Difficulty.basic.value)
-    question_type = Column(String(24), default="single_choice", nullable=False)  # single_choice | multiple_choice | judge | qa | blank
+    question_type = Column(String(24), default="single_choice", nullable=False)  # single_choice | multiple_choice | judge | qa | blank | analysis
     question_text = Column(Text, nullable=False)
     options = Column(Text, nullable=True)  # JSON: ["A选项","B选项",...]
-    correct_answer = Column(String(32), nullable=False)  # 选项键或简答要点
+    correct_answer = Column(Text, nullable=False)  # 选项键或简答/分析题长答案
     explanation = Column(Text, nullable=True)
     remark = Column(String(128), nullable=True)
     ppt_ref = Column(String(128), nullable=True)

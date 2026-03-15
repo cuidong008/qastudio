@@ -693,6 +693,14 @@ def _migrate_student_feedbacks_processed_at(sync_conn):
         pass
 
 
+def _migrate_questions_correct_answer_text(sync_conn):
+    """questions.correct_answer 改为 TEXT，支持问答题/分析题长答案（SQLite 3.35+ 支持 ALTER COLUMN）"""
+    try:
+        sync_conn.execute(text("ALTER TABLE questions ALTER COLUMN correct_answer TEXT"))
+    except Exception:
+        pass  # 旧版 SQLite 会失败，模型已用 Text，存长串不受限
+
+
 async def get_db():
     async with AsyncSessionLocal() as session:
         try:
@@ -742,3 +750,4 @@ async def init_db():
         await conn.run_sync(_migrate_student_feedbacks_course_id)
         await conn.run_sync(_migrate_student_feedbacks_reply_and_status)
         await conn.run_sync(_migrate_student_feedbacks_processed_at)
+        await conn.run_sync(_migrate_questions_correct_answer_text)

@@ -68,7 +68,7 @@ def grade_qa_or_blank(
     失败时返回 None，由上层回退规则判卷。
     """
     qtype = (question_type or "").strip().lower()
-    if qtype not in {"qa", "blank"}:
+    if qtype not in {"qa", "blank", "analysis"}:
         return None
     std = (standard_answer or "").strip()
     usr = (user_answer or "").strip()

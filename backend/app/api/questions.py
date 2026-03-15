@@ -72,7 +72,7 @@ def _normalize_multi_answer(value: str) -> str:
 async def list_questions(
     chapter_id: int | None = Query(None),
     difficulty: str | None = Query(None),
-    question_types: str | None = Query(None, description="逗号分隔：single_choice,multiple_choice,judge,qa,blank"),
+    question_types: str | None = Query(None, description="逗号分隔：single_choice,multiple_choice,judge,qa,blank,analysis"),
     limit: int = Query(20, le=50),
     db: AsyncSession = Depends(get_db),
 ):
@@ -119,7 +119,7 @@ async def submit_answer(
         is_correct = _normalize_multi_answer(question.correct_answer) == _normalize_multi_answer(body.user_answer)
     else:
         is_correct = question.correct_answer.strip().lower() == body.user_answer.strip().lower()
-    if question_type in {"qa", "blank"}:
+    if question_type in {"qa", "blank", "analysis"}:
         graded = grade_qa_or_blank(
             question_type=question_type,
             question_text=question.question_text or "",
