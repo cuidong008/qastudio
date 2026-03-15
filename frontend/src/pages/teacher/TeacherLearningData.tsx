@@ -27,18 +27,6 @@ function getDefaultTimeRange(period: string): { start: string; end: string } {
   return { start: formatDate(start), end: formatDate(end) };
 }
 
-/** ISO 时间串格式化为本地日期时间 */
-function formatDateTime(iso: string | null | undefined): string {
-  if (!iso) return "—";
-  try {
-    const d = new Date(iso);
-    if (isNaN(d.getTime())) return "—";
-    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
-  } catch {
-    return "—";
-  }
-}
-
 /** 核心学习概览：从 stats 衍生或占位 */
 type OverviewStats = {
   preview_student_count: number;
