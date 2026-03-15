@@ -1173,13 +1173,14 @@ def _plan_question_generation_batches(
     """
     type_order = ["single_choice", "multiple_choice", "judge", "blank", "qa", "analysis"]
     # 经验值：用于估算单题输出 token 成本（含 JSON 结构与字段开销）
+    # 分析题题干/答案/解析可较长（实测单题约 1800+ 汉字≈1200~1500 token），故估值偏保守
     per_question_token_est = {
         "single_choice": 170,
         "multiple_choice": 185,
         "judge": 95,
         "blank": 90,
         "qa": 120,
-        "analysis": 300,
+        "analysis": 1800,
     }
     budget = max(200, int(output_token_budget))
     batches: list[dict[str, int]] = []
@@ -4042,14 +4043,15 @@ def _build_generate_paper_prompt(
 1) 仅输出 JSON，不要输出 Markdown。
 2) 输出字段：type, question_text, options, correct_answer, explanation, difficulty_score。
 3) 单选题/多选题给 4 个选项；判断题 options 固定为 ["A. 正确", "B. 错误"]。
-4) difficulty_score 在 0~1 之间，保留 2 位小数。
-5) 必须按题型数量输出足量题目，尽量不重复。
+4) 填空/问答/分析题 options 传 []。分析题(analysis)需符合工程教育认证：题干与答案宜分点、条理清晰，内容可较长；question_text 与 correct_answer 可分多段、多要点。
+5) difficulty_score 在 0~1 之间，保留 2 位小数。
+6) 必须按题型数量输出足量题目，尽量不重复。
 
 JSON 格式：
 {{
   "questions": [
     {{
-      "type": "single_choice|multiple_choice|judge|blank|qa",
+      "type": "single_choice|multiple_choice|judge|blank|qa|analysis",
       "question_text": "题干",
       "options": ["A. ...","B. ...","C. ...","D. ..."],
       "correct_answer": "A",
@@ -4224,7 +4226,7 @@ def _normalize_internet_paper_candidate_item(
     if not q_text:
         return None
     options: list[str] = []
-    answer = _trim_answer(item.get("correct_answer"), max_len=32)
+    answer: str
     if q_type == "single_choice":
         opts = _normalize_choice_options(item.get("options"))
         ans = _normalize_choice_answer(item.get("correct_answer"), opts)
@@ -4245,8 +4247,14 @@ def _normalize_internet_paper_candidate_item(
             return None
         options = ["A. 正确", "B. 错误"]
         answer = ans
-    elif not answer:
-        return None
+    elif q_type == "analysis":
+        answer = str(item.get("correct_answer") or "").strip()
+        if not answer:
+            return None
+    else:
+        answer = _trim_answer(item.get("correct_answer"), max_len=32)
+        if not answer:
+            return None
     return {
         "question_type": q_type,
         "question_text": q_text,
@@ -4398,6 +4406,7 @@ async def _generate_internet_questions_for_paper(
     paper_title: str,
     overall_difficulty: float | None,
     configs: list[dict],
+    pre_generated_analysis: list[dict] | None = None,
 ) -> tuple[list[dict], list[dict]]:
     from ..rag.config import get_rag_settings
     from ..rag.llm import get_llm
@@ -4410,13 +4419,14 @@ async def _generate_internet_questions_for_paper(
         getattr(settings, "paper_semantic_dedup_conf_threshold", PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT),
         PAPER_SEMANTIC_DEDUP_CONF_THRESHOLD_DEFAULT,
     )
-    # 估算生成输出 token，用于判定是否需要按题型分批调用模型。
+    # 估算生成输出 token，用于判定是否需要按题型分批调用模型（与习题生成 per_question_token_est 对齐）
     generation_token_est = {
         "single_choice": 190,
         "multiple_choice": 300,
         "judge": 105,
         "blank": 100,
         "qa": 140,
+        "analysis": 1800,
     }
     reserve_by_type = {
         str(row.get("type") or ""): _paper_dedup_reserve_count(int(row.get("count") or 0))
@@ -4426,6 +4436,9 @@ async def _generate_internet_questions_for_paper(
         str(row.get("type") or ""): int(row.get("count") or 0) + reserve_by_type.get(str(row.get("type") or ""), 5) if int(row.get("count") or 0) > 0 else 0
         for row in configs
     }
+    # 分析题已用章节合并内容预生成时，不再在混合批中生成分析题
+    if pre_generated_analysis:
+        prompt_limits_for_plan["analysis"] = 0
     estimated_output_tokens = 0
     for q_type, count in prompt_limits_for_plan.items():
         if int(count) <= 0:
@@ -4592,31 +4605,37 @@ async def _generate_internet_questions_for_paper(
             continue
         target_diff = _normalize_difficulty_score(overall_difficulty if overall_difficulty is not None else row.get("difficulty", 0.8))
         score = float(row.get("score") or 0)
-        raw_pool = grouped.get(q_type, [])
-        normalized_pool: list[dict] = []
-        for item in raw_pool:
-            normalized = _normalize_internet_paper_candidate_item(item, q_type=q_type, target_diff=target_diff, score=score)
-            if normalized:
-                normalized_pool.append(normalized)
+        if q_type == "analysis" and pre_generated_analysis:
+            normalized_pool = pre_generated_analysis
+        else:
+            raw_pool = grouped.get(q_type, [])
+            normalized_pool = []
+            for item in raw_pool:
+                normalized = _normalize_internet_paper_candidate_item(item, q_type=q_type, target_diff=target_diff, score=score)
+                if normalized:
+                    normalized_pool.append(normalized)
         reserve = int(reserve_by_type.get(q_type, 5))
         take_n = min(len(normalized_pool), count + reserve)
         picked: list[dict] = []
-        for _round in range(6):
-            candidates_slice = normalized_pool[:take_n]
-            candidates_slice, _ = _dedup_paper_questions_by_text(candidates_slice)
-            candidates_slice, _ = await _dedup_paper_questions_by_semantic(
-                candidates_slice,
-                llm=llm,
-                max_tokens=semantic_max_tokens,
-                conf_threshold=semantic_conf_threshold,
-            )
-            picked = candidates_slice[:count]
-            if len(picked) >= count or take_n >= len(normalized_pool):
-                break
-            take_n = min(
-                len(normalized_pool),
-                take_n + max(1, reserve),
-            )
+        if q_type == "analysis" and pre_generated_analysis:
+            picked = normalized_pool[:count]
+        else:
+            for _round in range(6):
+                candidates_slice = normalized_pool[:take_n]
+                candidates_slice, _ = _dedup_paper_questions_by_text(candidates_slice)
+                candidates_slice, _ = await _dedup_paper_questions_by_semantic(
+                    candidates_slice,
+                    llm=llm,
+                    max_tokens=semantic_max_tokens,
+                    conf_threshold=semantic_conf_threshold,
+                )
+                picked = candidates_slice[:count]
+                if len(picked) >= count or take_n >= len(normalized_pool):
+                    break
+                take_n = min(
+                    len(normalized_pool),
+                    take_n + max(1, reserve),
+                )
         if len(picked) < count:
             insufficient_types.append(
                 {
@@ -4715,12 +4734,66 @@ async def generate_teacher_paper(
             overall_difficulty=target_overall_difficulty,
         )
     else:
+        pre_generated_analysis: list[dict] = []
+        analysis_row = next((r for r in normalized_configs if r.get("type") == "analysis"), None)
+        analysis_count = int(analysis_row["count"]) if (analysis_row and int(analysis_row.get("count", 0)) > 0) else 0
+        if analysis_count > 0:
+            merged_context, chapter_tuples = await _build_merged_context_for_chapters(db, course.id, chapter_ids)
+            if merged_context.strip():
+                from ..rag.config import get_rag_settings
+                from ..rag.llm import get_llm
+                _settings = get_rag_settings()
+                _llm = get_llm(_settings)
+                _gen_max = max(4096, int(_settings.llm_max_tokens or 512))
+                chapter_titles_text = "、".join(t for _, t in chapter_tuples)
+                analysis_diff = _normalize_difficulty_score(analysis_row.get("difficulty"), 0.8)
+                analysis_score = float(analysis_row.get("score") or 0)
+                _prompt = _build_generate_analysis_only_prompt(
+                    merged_context=merged_context,
+                    chapter_titles_text=chapter_titles_text,
+                    analysis_max=analysis_count,
+                    analysis_difficulty_score=analysis_diff,
+                    question_bank_type=paper_bank_type or "training",
+                )
+                try:
+                    _raw = await asyncio.to_thread(
+                        _llm.generate,
+                        _prompt,
+                        max_tokens=min(_gen_max, 8192),
+                        temperature=0.2,
+                    )
+                    _candidates = _extract_json_payload(_raw)
+                    _diff_map = {"basic": 0.5, "applied": 0.8, "extended": 0.95}
+                    for _item in _candidates:
+                        if _to_question_type(str(_item.get("type") or "")) != "analysis":
+                            continue
+                        _q = str(_item.get("question_text") or "").strip()
+                        _a = str(_item.get("correct_answer") or "").strip()
+                        if not _q or not _a:
+                            continue
+                        _d = str(_item.get("difficulty") or "").strip().lower()
+                        _ds = _diff_map.get(_d, analysis_diff)
+                        pre_generated_analysis.append({
+                            "question_type": "analysis",
+                            "question_text": _q,
+                            "options": [],
+                            "correct_answer": _a,
+                            "explanation": str(_item.get("explanation") or "").strip() or None,
+                            "difficulty_score": _ds,
+                            "score": analysis_score,
+                            "source": "internet",
+                        })
+                        if len(pre_generated_analysis) >= analysis_count:
+                            break
+                except Exception as _e:
+                    logger.warning("internet_paper_analysis_pregen_failed course_id=%s reason=%s", course.id, str(_e)[:200])
         preview_questions, insufficient_types = await _generate_internet_questions_for_paper(
             course_name=course.name,
             chapter_titles=chapter_titles,
             paper_title=body.paper_title.strip(),
             overall_difficulty=target_overall_difficulty,
             configs=normalized_configs,
+            pre_generated_analysis=pre_generated_analysis if pre_generated_analysis else None,
         )
 
     is_partial = len(insufficient_types) > 0
