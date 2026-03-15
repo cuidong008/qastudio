@@ -648,7 +648,7 @@ function GenerateExercisesPanel() {
         setProgressPercent(Math.max(1, Math.min(99, Math.round((submittedChapters / chapterCount) * 100))));
       }
       setChapterGenerateStats(statsRows);
-      if (!submittedChapters) {
+      if (!submittedChapters && !generatedRows.length) {
         throw new Error("题型数量配置过小，无法分配到所选章节，请调整后重试");
       }
       if (!generatedRows.length) {
