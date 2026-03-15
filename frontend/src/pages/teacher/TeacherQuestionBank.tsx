@@ -442,6 +442,7 @@ function GenerateExercisesPanel() {
         judge: d("judge"),
         blank: d("blank"),
         qa: d("qa"),
+        analysis: d("analysis"),
       });
     }
     toast("已恢复为配置文件中的初始值", "success");
@@ -3754,6 +3755,10 @@ function GeneratePapersPanel() {
         const r = defaultConfigs.find((x) => x.type === "qa");
         return { count: r?.count ?? 5, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 10 };
       })(),
+      analysis: (() => {
+        const r = defaultConfigs.find((x) => x.type === "analysis");
+        return { count: r?.count ?? 1, difficulty: Number(r?.difficulty) || 0.8, score: r?.score ?? 10 };
+      })(),
     };
     setPaperSettingsDraft(draft);
     setPaperSettingsModalOpen(true);
@@ -3781,7 +3786,8 @@ function GeneratePapersPanel() {
     setSavedPaperDefaults(null);
     if (defaultRowsFromApi?.length) {
       const byType = Object.fromEntries(defaultRowsFromApi.map((r) => [r.type, r]));
-      const defaultCount = (k: QuestionTypeKey) => (k === "multiple_choice" || k === "qa" ? 5 : 10);
+      const defaultCount = (k: QuestionTypeKey) =>
+        k === "multiple_choice" || k === "qa" ? 5 : k === "analysis" ? 1 : 10;
       const d = (k: QuestionTypeKey) => {
         const r = byType[k];
         const diff = parseFloat(String(r?.difficulty));
@@ -3797,6 +3803,7 @@ function GeneratePapersPanel() {
         judge: d("judge"),
         blank: d("blank"),
         qa: d("qa"),
+        analysis: d("analysis"),
       });
     }
     toast("已恢复为配置文件中的初始值", "success");
