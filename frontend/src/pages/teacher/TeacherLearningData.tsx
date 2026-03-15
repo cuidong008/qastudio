@@ -1405,3 +1405,245 @@ export default function TeacherLearningData() {
     </div>
   );
 }
+
+// ========== 答疑交互页（命名导出，与学情概览同文件以便未同步 TeacherQaInteraction.tsx 的环境也能通过编译） ==========
+function formatDateTimeQa(iso: string | null | undefined): string {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    if (isNaN(d.getTime())) return "—";
+    return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-${String(d.getDate()).padStart(2, "0")} ${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
+  } catch {
+    return "—";
+  }
+}
+type FeedbackRowQa = {
+  id: number;
+  course_name: string;
+  feedback_text: string;
+  student_no: string;
+  student_name: string;
+  class_name: string;
+  created_at: string;
+  reply_text: string;
+  status: string;
+  processed_at: string | null;
+};
+const PAGE_SIZE_OPTIONS_QA = [10, 20, 30, 50, 100] as const;
+type FeedbackSortKeyQa = "course_name" | "student_no" | "class_name" | "created_at" | "status";
+
+export function TeacherQaInteraction() {
+  const [courses, setCourses] = useState<{ id: number; name: string }[]>([]);
+  const [classes, setClasses] = useState<ClassItem[]>([]);
+  const [courseId, setCourseId] = useState<number | undefined>(undefined);
+  const [classId, setClassId] = useState<number | undefined>(undefined);
+  const [studentFilter, setStudentFilter] = useState<string>("");
+  const [allStudents, setAllStudents] = useState<StudentItem[]>([]);
+  const [classStudents, setClassStudents] = useState<StudentItem[]>([]);
+  const [feedbackList, setFeedbackList] = useState<FeedbackRowQa[]>([]);
+  const [feedbackListLoading, setFeedbackListLoading] = useState(false);
+  const [feedbackSortKey, setFeedbackSortKey] = useState<FeedbackSortKeyQa>("created_at");
+  const [feedbackSortDir, setFeedbackSortDir] = useState<"asc" | "desc">("desc");
+  const [feedbackPage, setFeedbackPage] = useState(1);
+  const [feedbackPageSize, setFeedbackPageSize] = useState(10);
+  const [feedbackModal, setFeedbackModal] = useState<null | "view" | "edit">(null);
+  const [selectedFeedback, setSelectedFeedback] = useState<FeedbackRowQa | null>(null);
+  const [editReplyText, setEditReplyText] = useState("");
+  const [editStatus, setEditStatus] = useState("待处理");
+  const [feedbackSaveLoading, setFeedbackSaveLoading] = useState(false);
+
+  useEffect(() => {
+    api.teacher.courses.list().then((list) => setCourses(list.map((c) => ({ id: c.id, name: c.name })))).catch(() => setCourses([]));
+    api.teacher.classes.list().then((list) => setClasses(list.map((c) => ({ id: c.id, name: c.name, course_id: c.course_id ?? null })))).catch(() => setClasses([]));
+    api.teacher.students.list().then(setAllStudents).catch(() => setAllStudents([]));
+  }, []);
+  useEffect(() => {
+    if (classId == null) { setClassStudents([]); return; }
+    api.teacher.classes.students(classId).then(setClassStudents).catch(() => setClassStudents([]));
+  }, [classId]);
+  useEffect(() => {
+    setFeedbackListLoading(true);
+    api.teacher.feedbackList({ courseId: courseId ?? undefined, classId: classId ?? undefined })
+      .then((list) => setFeedbackList(list))
+      .catch(() => setFeedbackList([]))
+      .finally(() => setFeedbackListLoading(false));
+  }, [courseId, classId]);
+  useEffect(() => { setFeedbackPage(1); }, [courseId, classId, studentFilter]);
+
+  const filteredClasses = useMemo(() => {
+    if (courseId == null) return classes;
+    return classes.filter((c) => c.course_id === courseId);
+  }, [classes, courseId]);
+  const studentsForDropdown = classId != null ? classStudents : allStudents;
+  const feedbackRows: FeedbackRowQa[] = useMemo(() => {
+    let list = feedbackList;
+    if (studentFilter) list = list.filter((r) => r.student_no === studentFilter || r.student_name === studentFilter);
+    const key = feedbackSortKey;
+    const dir = feedbackSortDir === "asc" ? 1 : -1;
+    return [...list].sort((a, b) => {
+      let cmp: number;
+      if (key === "created_at") cmp = (a.created_at || "").localeCompare(b.created_at || "");
+      else { const va = (a[key as keyof FeedbackRowQa] as string) ?? ""; const vb = (b[key as keyof FeedbackRowQa] as string) ?? ""; cmp = va.localeCompare(vb); }
+      return dir * cmp;
+    });
+  }, [feedbackList, feedbackSortKey, feedbackSortDir, studentFilter]);
+  const feedbackTotal = feedbackRows.length;
+  const feedbackPaginated = useMemo(() => feedbackRows.slice((feedbackPage - 1) * feedbackPageSize, feedbackPage * feedbackPageSize), [feedbackRows, feedbackPage, feedbackPageSize]);
+
+  const openFeedbackView = (row: FeedbackRowQa) => { setSelectedFeedback(row); setFeedbackModal("view"); };
+  const openFeedbackEdit = (row: FeedbackRowQa) => {
+    setSelectedFeedback(row);
+    setEditReplyText(row.reply_text === "—" ? "" : row.reply_text);
+    setEditStatus(row.status);
+    setFeedbackModal("edit");
+  };
+  const closeFeedbackModal = () => { setFeedbackModal(null); setSelectedFeedback(null); };
+  const saveFeedbackEdit = async () => {
+    if (!selectedFeedback) return;
+    setFeedbackSaveLoading(true);
+    try {
+      await api.teacher.updateFeedback(selectedFeedback.id, { reply_text: editReplyText || null, status: editStatus });
+      const list = await api.teacher.feedbackList({ courseId: courseId ?? undefined, classId: classId ?? undefined });
+      setFeedbackList(list);
+      closeFeedbackModal();
+    } catch (e) { console.error(e); } finally { setFeedbackSaveLoading(false); }
+  };
+  const handleExportFeedbackTable = () => {
+    const headers = ["课程", "反馈问题", "学号", "学生姓名", "班级", "反馈时间", "回复内容", "处理状态"];
+    const rows = feedbackRows.map((r) => [r.course_name, r.feedback_text, r.student_no, r.student_name, r.class_name, formatDateTimeQa(r.created_at), r.reply_text, r.status]);
+    const csv = [headers.join(","), ...rows.map((row) => row.map((c) => `"${String(c).replace(/"/g, '""')}"`).join(","))].join("\n");
+    const blob = new Blob(["\uFEFF" + csv], { type: "text/csv;charset=utf-8" });
+    const a = document.createElement("a");
+    a.href = URL.createObjectURL(blob);
+    a.download = "问题反馈列表.csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  };
+  const sortable = (key: FeedbackSortKeyQa, label: string) => (
+    <th
+      key={key}
+      style={{ textAlign: "left", padding: "10px 8px", cursor: "pointer", userSelect: "none", whiteSpace: key === "created_at" ? "nowrap" : undefined }}
+      onClick={() => { if (feedbackSortKey === key) setFeedbackSortDir((d) => (d === "asc" ? "desc" : "asc")); else { setFeedbackSortKey(key); setFeedbackSortDir(key === "created_at" ? "desc" : "asc"); } }}
+      title="点击排序"
+    >
+      {label}
+      {feedbackSortKey === key && (feedbackSortDir === "asc" ? " ↑" : " ↓")}
+    </th>
+  );
+
+  return (
+    <div style={{ padding: "24px 0", maxWidth: 1200, margin: "0 auto" }}>
+      <h1 style={{ margin: "0 0 24px", fontSize: 22, fontWeight: 600 }}>答疑交互</h1>
+      <section className="card" style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>问题反馈筛选区</div>
+        <div style={{ display: "flex", flexWrap: "wrap", gap: 16, alignItems: "flex-end" }}>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ color: "var(--text-muted)" }}>课程</span>
+            <select value={courseId ?? ""} onChange={(e) => { setCourseId(e.target.value ? Number(e.target.value) : undefined); setClassId(undefined); }} style={{ minWidth: 140 }}>
+              <option value="">全部</option>
+              {courses.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ color: "var(--text-muted)" }}>班级</span>
+            <select value={classId ?? ""} onChange={(e) => { setClassId(e.target.value ? Number(e.target.value) : undefined); setStudentFilter(""); }} disabled={courseId != null && filteredClasses.length === 0} style={{ minWidth: 140 }}>
+              <option value="">全部</option>
+              {filteredClasses.map((c) => (<option key={c.id} value={c.id}>{c.name}</option>))}
+            </select>
+          </label>
+          <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+            <span style={{ color: "var(--text-muted)" }}>学生</span>
+            <select value={studentFilter} onChange={(e) => setStudentFilter(e.target.value)} disabled={classId != null && classStudents.length === 0} style={{ minWidth: 160 }}>
+              <option value="">全部</option>
+              {studentsForDropdown.map((s) => { const value = s.student_no ?? s.display_name ?? s.username; const label = `${s.student_no ?? "—"} ${s.display_name || s.username}`; return (<option key={s.id} value={value}>{label}</option>); })}
+            </select>
+          </label>
+        </div>
+      </section>
+      <h2 style={{ fontSize: 18, fontWeight: 600, marginBottom: 16 }}>问题反馈列表</h2>
+      <div className="card" style={{ marginBottom: 24 }}>
+        <div style={{ fontSize: 13, color: "var(--text-muted)", marginBottom: 12 }}>点击表头列名可排序；支持导出</div>
+        <div style={{ overflowX: "auto" }}>
+          <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 14 }}>
+            <thead>
+              <tr style={{ borderBottom: "2px solid var(--border)" }}>
+                {sortable("course_name", "课程")}
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>反馈问题</th>
+                {sortable("student_no", "学号")}
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>学生姓名</th>
+                {sortable("class_name", "班级")}
+                {sortable("created_at", "反馈时间")}
+                <th style={{ textAlign: "left", padding: "10px 8px" }}>回复内容</th>
+                {sortable("status", "处理状态")}
+                <th style={{ textAlign: "center", padding: "10px 8px", width: 120 }}>操作</th>
+              </tr>
+            </thead>
+            <tbody>
+              {feedbackListLoading ? (<tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "var(--text-muted)" }}>加载中…</td></tr>) : feedbackPaginated.length === 0 ? (<tr><td colSpan={9} style={{ padding: 24, textAlign: "center", color: "var(--text-muted)" }}>暂无反馈记录</td></tr>) : feedbackPaginated.map((r) => (
+                <tr key={r.id} style={{ borderBottom: "1px solid var(--border)" }}>
+                  <td style={{ padding: "10px 8px" }}>{r.course_name}</td>
+                  <td style={{ padding: "10px 8px", maxWidth: 200 }}>{r.feedback_text}</td>
+                  <td style={{ padding: "10px 8px" }}>{r.student_no}</td>
+                  <td style={{ padding: "10px 8px" }}>{r.student_name}</td>
+                  <td style={{ padding: "10px 8px" }}>{r.class_name}</td>
+                  <td style={{ padding: "10px 8px", whiteSpace: "nowrap" }}>{formatDateTimeQa(r.created_at)}</td>
+                  <td style={{ padding: "10px 8px", maxWidth: 180 }}>{r.reply_text}</td>
+                  <td style={{ padding: "10px 8px" }}>{r.status}</td>
+                  <td style={{ padding: "10px 8px", textAlign: "center" }}>
+                    <button type="button" className="btn-ghost" style={{ marginRight: 8, padding: "4px 10px", fontSize: 13 }} onClick={() => openFeedbackView(r)}>查看</button>
+                    <button type="button" className="btn-primary" style={{ padding: "4px 10px", fontSize: 13 }} onClick={() => openFeedbackEdit(r)}>编辑</button>
+                  </td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", flexWrap: "wrap", gap: 12, marginTop: 16 }}>
+          <div style={{ display: "flex", gap: 10, alignItems: "center", flexWrap: "wrap" }}>
+            <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>每页显示</span>
+            <select value={String(feedbackPageSize)} onChange={(e) => { const n = Math.max(1, Math.min(100, Number(e.target.value || 10))); setFeedbackPageSize(n); setFeedbackPage(1); }} style={{ padding: "6px 10px", border: "1px solid var(--border)", borderRadius: 6 }}>
+              {PAGE_SIZE_OPTIONS_QA.map((n) => (<option key={n} value={n}>{n}</option>))}
+            </select>
+            <button type="button" className="btn-secondary" onClick={() => setFeedbackPage((p) => Math.max(1, p - 1))} disabled={feedbackPage <= 1}>上一页</button>
+            <button type="button" className="btn-secondary" onClick={() => setFeedbackPage((p) => Math.min(Math.max(1, Math.ceil(feedbackTotal / feedbackPageSize)), p + 1))} disabled={feedbackPage >= Math.ceil(feedbackTotal / feedbackPageSize)}>下一页</button>
+            <span style={{ color: "var(--text-secondary)", fontSize: 13 }}>第 {feedbackPage} / {Math.max(1, Math.ceil(feedbackTotal / feedbackPageSize))} 页，共 {feedbackTotal} 条</span>
+          </div>
+          <button type="button" className="btn-secondary" onClick={handleExportFeedbackTable}>导出表格（Excel/CSV）</button>
+        </div>
+      </div>
+      {feedbackModal && selectedFeedback && (
+        <div style={{ position: "fixed", inset: 0, zIndex: 100, display: "flex", alignItems: "center", justifyContent: "center", background: "rgba(0,0,0,0.65)" }} onClick={(e) => e.target === e.currentTarget && closeFeedbackModal()}>
+          <div style={{ background: "#fff", borderRadius: "var(--radius-lg)", padding: 24, maxWidth: 520, width: "90%", maxHeight: "85vh", overflow: "auto", boxShadow: "0 8px 32px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
+            <h3 style={{ margin: "0 0 16px", fontSize: 18 }}>{feedbackModal === "view" ? "查看反馈" : "编辑反馈"}</h3>
+            <dl style={{ margin: 0, display: "grid", gridTemplateColumns: "100px 1fr", gap: "10px 16px", fontSize: 14 }}>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>课程</dt><dd style={{ margin: 0 }}>{selectedFeedback.course_name}</dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>反馈问题</dt><dd style={{ margin: 0, wordBreak: "break-word" }}>{selectedFeedback.feedback_text}</dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>学号</dt><dd style={{ margin: 0 }}>{selectedFeedback.student_no}</dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>学生姓名</dt><dd style={{ margin: 0 }}>{selectedFeedback.student_name}</dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>班级</dt><dd style={{ margin: 0 }}>{selectedFeedback.class_name}</dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>反馈时间</dt><dd style={{ margin: 0 }}>{formatDateTimeQa(selectedFeedback.created_at)}</dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>回复内容</dt>
+              <dd style={{ margin: 0 }}>
+                {feedbackModal === "view" ? <span style={{ wordBreak: "break-word" }}>{selectedFeedback.reply_text || "—"}</span> : (
+                  <textarea value={editReplyText} onChange={(e) => setEditReplyText(e.target.value)} rows={3} style={{ width: "100%", resize: "vertical", padding: 8, borderRadius: "var(--radius-md)", border: "1px solid var(--border)" }} />
+                )}
+              </dd>
+              <dt style={{ color: "var(--text-muted)", margin: 0 }}>处理状态</dt>
+              <dd style={{ margin: 0 }}>
+                {feedbackModal === "view" ? selectedFeedback.status : (
+                  <select value={editStatus} onChange={(e) => setEditStatus(e.target.value)} style={{ padding: "6px 10px", borderRadius: "var(--radius-md)", border: "1px solid var(--border)", minWidth: 120 }}>
+                    <option value="待处理">待处理</option><option value="处理中">处理中</option><option value="已处理">已处理</option>
+                  </select>
+                )}
+              </dd>
+              {(feedbackModal === "view" || feedbackModal === "edit") && selectedFeedback.processed_at && (<><dt style={{ color: "var(--text-muted)", margin: 0 }}>处理回复时间</dt><dd style={{ margin: 0 }}>{formatDateTimeQa(selectedFeedback.processed_at)}</dd></>)}
+            </dl>
+            <div style={{ marginTop: 20, display: "flex", justifyContent: "flex-end", gap: 8 }}>
+              {feedbackModal === "edit" ? (<><button type="button" className="btn-secondary" onClick={closeFeedbackModal}>取消</button><button type="button" className="btn-primary" onClick={saveFeedbackEdit} disabled={feedbackSaveLoading}>{feedbackSaveLoading ? "保存中…" : "保存"}</button></>) : <button type="button" className="btn-primary" onClick={closeFeedbackModal}>关闭</button>}
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
