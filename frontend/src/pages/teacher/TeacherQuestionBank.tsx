@@ -2926,7 +2926,12 @@ function ExerciseManagePanel() {
                         <td style={{ border: "1px solid var(--border)", padding: 8, wordBreak: "break-word", whiteSpace: "normal" }}>
                           {row.options?.length ? row.options.join("；") : "-"}
                         </td>
-                        <td style={{ border: "1px solid var(--border)", padding: 8, overflow: "hidden", wordBreak: "break-word" }}>{row.correctAnswer || "-"}</td>
+                        <td style={{ border: "1px solid var(--border)", padding: 8, overflow: "hidden", wordBreak: "break-word" }}>
+                          {(() => {
+                            const s = row.correctAnswer || "-";
+                            return Array.from(s).length > 48 ? `${Array.from(s).slice(0, 48).join("")}...` : s;
+                          })()}
+                        </td>
                         <td style={{ border: "1px solid var(--border)", padding: 8 }}>
                           {row.explanation ? (Array.from(row.explanation).length > 31 ? `${Array.from(row.explanation).slice(0, 31).join("")}...` : row.explanation) : "-"}
                         </td>
@@ -3051,7 +3056,12 @@ function ExerciseManagePanel() {
                     <td style={{ border: "1px solid var(--border)", padding: 8, wordBreak: "break-word", whiteSpace: "normal" }}>
                       {row.options?.length ? row.options.join("；") : "-"}
                     </td>
-                    <td style={{ border: "1px solid var(--border)", padding: 8, overflow: "hidden", wordBreak: "break-word" }}>{row.correctAnswer || "-"}</td>
+                    <td style={{ border: "1px solid var(--border)", padding: 8, overflow: "hidden", wordBreak: "break-word" }}>
+                      {(() => {
+                        const s = row.correctAnswer || "-";
+                        return Array.from(s).length > 48 ? `${Array.from(s).slice(0, 48).join("")}...` : s;
+                      })()}
+                    </td>
                     <td style={{ border: "1px solid var(--border)", padding: 8 }}>
                       {row.explanation ? (Array.from(row.explanation).length > 31 ? `${Array.from(row.explanation).slice(0, 31).join("")}...` : row.explanation) : "-"}
                     </td>
