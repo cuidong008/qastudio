@@ -177,6 +177,7 @@ const teacherQuickLinks = [
   { label: "学情概览", path: "/teacher/learning-data" },
   { label: "我的课程", path: "/teacher/courses" },
   { label: "我的班级", path: "/teacher/classes" },
+  { label: "答疑交互", path: "/teacher/qa-interaction" },
   { label: "课件流水线", path: "/teacher/pipeline" },
   { label: "题库管理", path: "/teacher/question-bank" },
 ];

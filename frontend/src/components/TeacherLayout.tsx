@@ -60,6 +60,7 @@ export default function TeacherLayout({
             <NavLink to="/teacher/learning-data" className="nav-link"><span>学情概览</span></NavLink>
             <NavLink to="/teacher/courses" className="nav-link"><span>我的课程</span></NavLink>
             <NavLink to="/teacher/classes" className="nav-link" onMouseEnter={() => { import("../pages/teacher/TeacherClasses"); }}><span>我的班级</span></NavLink>
+            <NavLink to="/teacher/qa-interaction" className="nav-link"><span>答疑交互</span></NavLink>
             <NavLink to="/teacher/pipeline" className="nav-link"><span>课件流水线</span></NavLink>
             <NavLink to="/teacher/question-bank" className="nav-link" end={false}><span>题库管理</span></NavLink>
           </nav>
