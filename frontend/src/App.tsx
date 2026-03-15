@@ -9,13 +9,13 @@ import Exercises from "./pages/student/Exercises";
 import Feedback from "./pages/student/Feedback";
 import TeacherLayout from "./components/TeacherLayout";
 import TeacherLearningData from "./pages/teacher/TeacherLearningData";
-import TeacherQaInteraction from "./pages/teacher/TeacherQaInteraction";
 import TeacherCourses from "./pages/teacher/TeacherCourses";
 import TeacherChapterMaterials from "./pages/teacher/TeacherChapterMaterials";
 import TeacherCourseMaterials from "./pages/teacher/TeacherCourseMaterials";
 import TeacherChapterQuestions from "./pages/teacher/TeacherChapterQuestions";
 
 const TeacherClasses = lazy(() => import("./pages/teacher/TeacherClasses"));
+const TeacherQaInteraction = lazy(() => import("./pages/teacher/TeacherQaInteraction"));
 import TeacherPipeline from "./pages/teacher/TeacherPipeline";
 import TeacherQuestionBank, { TeacherPaperContentPage, TeacherPaperFilesPage } from "./pages/teacher/TeacherQuestionBank";
 import AdminLayout from "./components/AdminLayout";
@@ -62,7 +62,7 @@ function App() {
         <Route path="/teacher/chapter-materials" element={<TeacherLayout requireAuth fluid><TeacherChapterMaterials /></TeacherLayout>} />
         <Route path="/teacher/chapter-questions" element={<TeacherLayout requireAuth><TeacherChapterQuestions /></TeacherLayout>} />
         <Route path="/teacher/classes" element={<TeacherLayout requireAuth><Suspense fallback={<div style={{ padding: 24, color: "var(--text-muted)" }}>加载中…</div>}><TeacherClasses /></Suspense></TeacherLayout>} />
-        <Route path="/teacher/qa-interaction" element={<TeacherLayout requireAuth><TeacherQaInteraction /></TeacherLayout>} />
+        <Route path="/teacher/qa-interaction" element={<TeacherLayout requireAuth><Suspense fallback={<div style={{ padding: 24, color: "var(--text-muted)" }}>加载中…</div>}><TeacherQaInteraction /></Suspense></TeacherLayout>} />
         <Route path="/teacher/pipeline" element={<TeacherLayout requireAuth fluid><TeacherPipeline /></TeacherLayout>} />
         <Route path="/teacher/question-bank" element={<Navigate to="/teacher/question-bank/exercises/generate" replace />} />
         <Route
