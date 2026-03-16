@@ -3287,8 +3287,10 @@ async def _build_merged_context_for_chapters(
     db: AsyncSession,
     course_id: int,
     chapter_ids: list[int],
+    include_documents: bool = True,
 ) -> tuple[str, list[tuple[int, str]]]:
-    """多章合并为一份上下文，用于分析题生成。返回 (merged_context, [(chapter_id, chapter_title), ...])"""
+    """多章合并为一份上下文，用于分析题生成。返回 (merged_context, [(chapter_id, chapter_title), ...])。
+    include_documents=False 时仅包含章节标题与知识点，不包含文档正文，用于减少 token（如互联网试卷分析题预生成）。"""
     if not chapter_ids:
         return "", []
     r_ch = await db.execute(
@@ -3307,20 +3309,21 @@ async def _build_merged_context_for_chapters(
         title = title_map.get(ch_id, "")
         chapter_tuples.append((ch_id, title))
         block_parts: list[str] = [f"## 章节：{title}"]
-        r_docs = await db.execute(
-            select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
-            .where(KnowledgeDocument.chapter_id == ch_id)
-            .order_by(KnowledgeDocument.id.desc())
-            .limit(30)
-        )
-        for d_title, content, page_ref in r_docs.all():
-            c = (content or "").strip()
-            if not c:
-                continue
-            header = f"文档：{(d_title or '').strip()}".strip()
-            if page_ref:
-                header += f"（{page_ref}）"
-            block_parts.append(f"{header}\n{c}")
+        if include_documents:
+            r_docs = await db.execute(
+                select(KnowledgeDocument.title, KnowledgeDocument.content, KnowledgeDocument.page_ref)
+                .where(KnowledgeDocument.chapter_id == ch_id)
+                .order_by(KnowledgeDocument.id.desc())
+                .limit(30)
+            )
+            for d_title, content, page_ref in r_docs.all():
+                c = (content or "").strip()
+                if not c:
+                    continue
+                header = f"文档：{(d_title or '').strip()}".strip()
+                if page_ref:
+                    header += f"（{page_ref}）"
+                block_parts.append(f"{header}\n{c}")
         r_kps = await db.execute(
             select(KnowledgePoint.title, KnowledgePoint.content)
             .where(KnowledgePoint.chapter_id == ch_id)
@@ -3703,7 +3706,7 @@ async def _run_question_generation_task(task_id: int):
                 if not course:
                     raise RuntimeError("课程不存在")
                 merged_context, chapter_tuples = await _build_merged_context_for_chapters(
-                    db, task.course_id, body.chapter_ids
+                    db, task.course_id, body.chapter_ids, include_documents=False
                 )
                 if not merged_context.strip():
                     raise RuntimeError("所选章节暂无可用内容")
@@ -3883,7 +3886,9 @@ async def generate_analysis_preview(
     owned_ids = {int(row[0]) for row in r_ch.all() if row[0]}
     if owned_ids != set(body.chapter_ids):
         raise HTTPException(status_code=400, detail="存在不属于当前课程的章节")
-    merged_context, chapter_tuples = await _build_merged_context_for_chapters(db, course_id, body.chapter_ids)
+    merged_context, chapter_tuples = await _build_merged_context_for_chapters(
+        db, course_id, body.chapter_ids, include_documents=False
+    )
     if not merged_context.strip():
         raise HTTPException(status_code=400, detail="所选章节暂无可用内容，请先上传或解析文档")
     chapter_titles_text = "、".join(t for _, t in chapter_tuples)
@@ -4738,7 +4743,10 @@ async def generate_teacher_paper(
         analysis_row = next((r for r in normalized_configs if r.get("type") == "analysis"), None)
         analysis_count = int(analysis_row["count"]) if (analysis_row and int(analysis_row.get("count", 0)) > 0) else 0
         if analysis_count > 0:
-            merged_context, chapter_tuples = await _build_merged_context_for_chapters(db, course.id, chapter_ids)
+            # 互联网试卷分析题仅用章节标题+知识点，减少送入大模型的内容（不含文档正文）
+            merged_context, chapter_tuples = await _build_merged_context_for_chapters(
+                db, course.id, chapter_ids, include_documents=False
+            )
             if merged_context.strip():
                 from ..rag.config import get_rag_settings
                 from ..rag.llm import get_llm

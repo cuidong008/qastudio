@@ -2092,19 +2092,25 @@ function ExerciseManagePanel() {
         const remaining = items.filter((x) => !inTextDup.has(x.序号));
         if (remaining.length >= 2) {
           const chapterName = items[0].row.chapterName;
-          const questionType = typeLabel[items[0].row.questionType as QuestionTypeKey] || items[0].row.questionType;
-          const res = await api.teacher.courses.checkDuplicates({
-            chapter_name: chapterName,
-            question_type: questionType,
-            items: remaining.map(({ row, 序号 }) => ({
-              index: 序号,
-              question_text: row.questionText || "",
-              options: row.options || [],
-              correct_answer: row.correctAnswer || "",
-            })),
-          });
-          for (const g of res.groups || []) {
-            if (g.length >= 2) allGroups.push([...g].sort((a, b) => a - b));
+          const questionTypeLabel = typeLabel[items[0].row.questionType as QuestionTypeKey] || items[0].row.questionType;
+          // 按题型分批送入大模型，避免单次 prompt 超长：普通题 ~250 tokens/题 按 120 道/批，分析题 ~800 tokens/题 按 40 道/批
+          const isAnalysis = (items[0].row.questionType as string) === "analysis";
+          const batchSize = isAnalysis ? 40 : 120;
+          for (let start = 0; start < remaining.length; start += batchSize) {
+            const batch = remaining.slice(start, start + batchSize);
+            const res = await api.teacher.courses.checkDuplicates({
+              chapter_name: chapterName,
+              question_type: questionTypeLabel,
+              items: batch.map(({ row, 序号 }) => ({
+                index: 序号,
+                question_text: row.questionText || "",
+                options: row.options || [],
+                correct_answer: row.correctAnswer || "",
+              })),
+            });
+            for (const g of res.groups || []) {
+              if (g.length >= 2) allGroups.push([...g].sort((a, b) => a - b));
+            }
           }
         }
       }
