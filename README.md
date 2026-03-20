@@ -14,6 +14,27 @@
 - Python 3.10+
 - Node.js 18+
 
+### 使用 `run-local.sh` 一键本地运行（不依赖 Docker）
+
+适用于 **Linux / macOS**（Bash）。需已满足上方 Python / Node 版本；首次请在 `backend/` 下配置环境：`cp .env.example .env` 并按需修改。
+
+在项目根目录执行（可先 `chmod +x run-local.sh`）：
+
+| 命令 | 说明 |
+|------|------|
+| `./run-local.sh init` | **仅需一次**：创建项目根 `.venv`、安装后端依赖、执行数据库种子 |
+| `./run-local.sh build` | 编译前端并部署到 `backend/static`（首次会自动 `npm ci`） |
+| `./run-local.sh start` | 启动服务（需已完成 `init` 与 `build`） |
+| `./run-local.sh stop` | 停止服务 |
+| `./run-local.sh restart` | 先 `stop` 再 `start` |
+| `./run-local.sh status` | 查看是否在运行 |
+
+- **访问**：默认 **http://127.0.0.1:7000**（前后端由同一后端进程托管；与下方「前后端分开跑」时的 5173/8000 不同）。
+- **端口**：可通过环境变量覆盖，例如 `PORT=8000 ./run-local.sh start`。
+- **日志**：默认写入项目根 `.qastudio.log`；可用 `QASTUDIO_LOG` 指定路径，例如 `tail -f .qastudio.log` 查看。
+
+若需热更新前端或单独调试 API，仍可使用下文「后端」「前端」分步启动。
+
 ### 文档转换依赖（可选，按操作系统）
 
 用于以下能力：
