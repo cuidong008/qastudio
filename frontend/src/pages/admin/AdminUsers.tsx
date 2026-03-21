@@ -323,7 +323,7 @@ export default function AdminUsers() {
                 </select>
               </label>
               <label>
-                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>显示名</span>
+                <span style={{ display: "block", marginBottom: 4, fontSize: 14 }}>姓名</span>
                 <input
                   type="text"
                   value={form.display_name}
