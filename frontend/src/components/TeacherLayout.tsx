@@ -1,5 +1,5 @@
 import { ReactNode, useEffect } from "react";
-import { NavLink, useNavigate, useLocation } from "react-router-dom";
+import { Link, NavLink, useNavigate, useLocation } from "react-router-dom";
 import { useAuth } from "../api/auth";
 
 export default function TeacherLayout({
@@ -17,6 +17,7 @@ export default function TeacherLayout({
   const { user, logout } = useAuth();
   const navigate = useNavigate();
   const location = useLocation();
+  const roleText = user?.role === "admin" ? "管理员" : user?.role === "teaching_leader" ? "教研组长" : "教师";
   /** 问答首页不显示顶部菜单，仅通过页面内底部按钮进入其他页 */
   const hideHeader = location.pathname === "/teacher/qa";
 
@@ -66,8 +67,13 @@ export default function TeacherLayout({
           </nav>
           <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
             <span style={{ color: "var(--text-secondary)", fontSize: 14 }}>
-              {user?.display_name || user?.username}（{user?.role === "teaching_leader" ? "教研组长" : "教师"}）
+              {user?.display_name || user?.username}（{roleText}）
             </span>
+            {user?.role === "admin" && (
+              <Link to="/admin/users" className="btn-ghost" style={{ padding: "8px 14px", minHeight: 36, borderRadius: "var(--radius-md)" }}>
+                管理员端
+              </Link>
+            )}
             <button
               type="button"
               className="btn-ghost"
